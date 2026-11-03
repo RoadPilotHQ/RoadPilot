@@ -7,8 +7,11 @@ import { formatDuration } from '../format'
 export function OverviewCards() {
   const { t, formatNumber } = useI18n()
   const { snapshot } = useDashboard()
-  const { vehicle, job, autopilotActive } = snapshot
+  const { vehicle, job, autopilotActive, mode } = snapshot
   const noData = t('common.noData')
+  // In live mode a missing value means the telemetry does not provide it.
+  const missing = mode === 'live' && vehicle ? t('common.unavailable') : noData
+  const jobMissing = mode === 'live' ? t('common.unavailable') : t('job.none')
   const duration = job ? formatDuration(job.remainingMinutes) : null
 
   return (
@@ -31,17 +34,19 @@ export function OverviewCards() {
         <Gauge size={38} className="icon-orange" aria-hidden />
         <div>
           <div className="label">{t('overview.speed')}</div>
-          {vehicle ? (
+          {vehicle?.speedKmh != null ? (
             <>
               <div className="overview-value">
-                {formatNumber(vehicle.speedKmh)} {t('unit.kmh')}
+                {formatNumber(Math.round(Math.abs(vehicle.speedKmh)))} {t('unit.kmh')}
               </div>
-              <div className="sub">
-                {t('overview.speed.target', { value: formatNumber(vehicle.targetSpeedKmh) })}
-              </div>
+              {vehicle.targetSpeedKmh != null ? (
+                <div className="sub">
+                  {t('overview.speed.target', { value: formatNumber(vehicle.targetSpeedKmh) })}
+                </div>
+              ) : null}
             </>
           ) : (
-            <div className="overview-value text-muted">{noData}</div>
+            <div className="overview-value text-muted">{missing}</div>
           )}
         </div>
       </div>
@@ -50,11 +55,13 @@ export function OverviewCards() {
         <Package size={38} className="icon-orange" aria-hidden />
         <div>
           <div className="label">{t('overview.job')}</div>
-          <div className="overview-value overview-value-sm">
-            {job
-              ? t('job.route', { origin: job.origin, destination: job.destination })
-              : t('job.none')}
-          </div>
+          {job ? (
+            <div className="overview-value overview-value-sm">
+              {t('job.route', { origin: job.origin, destination: job.destination })}
+            </div>
+          ) : (
+            <div className="overview-value overview-value-sm text-muted">{jobMissing}</div>
+          )}
         </div>
       </div>
 
@@ -70,7 +77,9 @@ export function OverviewCards() {
               <div className="sub">{t('route.eta', duration)}</div>
             </>
           ) : (
-            <div className="overview-value text-muted">{noData}</div>
+            <div className="overview-value text-muted">
+              {mode === 'live' ? t('common.unavailable') : noData}
+            </div>
           )}
         </div>
       </div>

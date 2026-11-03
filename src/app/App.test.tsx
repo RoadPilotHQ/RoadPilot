@@ -6,8 +6,8 @@ import { App } from './App'
 describe('App', () => {
   it('never shows a connected state for the offline demo source and labels demo data', () => {
     render(<App />)
-    expect(screen.getByRole('status')).toHaveTextContent('ETS2 Disconnected')
-    expect(screen.queryByText('ETS2 Connected')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Game not running')
+    expect(screen.queryByText(/Connected/)).not.toBeInTheDocument()
     expect(screen.getByText('Demo data')).toBeInTheDocument()
   })
 
@@ -55,9 +55,8 @@ describe('App', () => {
   })
 
   it('shows no-data states when the source has no vehicle or job', () => {
-    const empty = {
-      getSnapshot: () => ({ ...offlineDemoSource.getSnapshot(), vehicle: null, job: null }),
-    }
+    const snapshot = { ...offlineDemoSource.getSnapshot(), vehicle: null, job: null }
+    const empty = { getSnapshot: () => snapshot, subscribe: () => () => {} }
     render(<App source={empty} />)
     expect(screen.getAllByText('No data').length).toBeGreaterThan(0)
     expect(screen.getAllByText('No active job').length).toBeGreaterThan(0)

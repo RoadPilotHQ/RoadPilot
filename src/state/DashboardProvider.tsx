@@ -1,4 +1,12 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react'
 import { offlineDemoSource, type DashboardSource } from '@/backend/dashboardSource'
 import type {
   AssistanceSystem,
@@ -26,7 +34,7 @@ export function DashboardProvider({
   source?: DashboardSource
   children: ReactNode
 }) {
-  const [snapshot] = useState(() => source.getSnapshot())
+  const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot)
   const [preferences, setPreferences] = useState(() => loadPreferences())
 
   const update = useCallback((change: (prev: Preferences) => Preferences) => {

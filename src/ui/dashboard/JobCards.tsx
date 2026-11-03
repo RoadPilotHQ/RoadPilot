@@ -17,7 +17,7 @@ function useDeadlineText() {
 
 export function CurrentJobCard() {
   const { t, formatNumber, locale } = useI18n()
-  const { job } = useDashboard().snapshot
+  const { job, mode } = useDashboard().snapshot
   const deadlineText = useDeadlineText()
 
   return (
@@ -50,7 +50,7 @@ export function CurrentJobCard() {
           </dl>
         </>
       ) : (
-        <p className="note">{t('job.none')}</p>
+        <p className="note">{mode === 'live' ? t('common.unavailable') : t('job.none')}</p>
       )}
     </Card>
   )
@@ -58,12 +58,12 @@ export function CurrentJobCard() {
 
 export function RouteProgressCard() {
   const { t, formatNumber } = useI18n()
-  const { job } = useDashboard().snapshot
+  const { job, mode } = useDashboard().snapshot
 
   if (!job) {
     return (
       <Card title={t('route.title')}>
-        <p className="note">{t('common.noData')}</p>
+        <p className="note">{mode === 'live' ? t('common.unavailable') : t('common.noData')}</p>
       </Card>
     )
   }

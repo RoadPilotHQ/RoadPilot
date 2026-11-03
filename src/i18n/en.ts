@@ -15,13 +15,30 @@ export const en = {
   'nav.about': 'About',
   'nav.label': 'Main navigation',
 
-  'connection.connected': 'ETS2 Connected',
-  'connection.disconnected': 'ETS2 Disconnected',
-  'connection.connecting': 'ETS2 Connecting…',
-  'connection.error': 'ETS2 Connection error',
+  'game.ets2': 'ETS2',
+  'game.ats': 'ATS',
+  'game.any': 'ETS2/ATS',
+
+  'connection.connected': '{game} Connected',
+  'connection.paused': '{game} Paused',
+  'connection.disconnected': 'Game not running',
+  'connection.connecting': '{game} Connecting…',
+  'connection.reconnecting': '{game} Reconnecting…',
+  'connection.unavailable': '{game} Telemetry unavailable',
+  'connection.error': 'Telemetry error',
 
   'mode.demo': 'Demo data',
   'mode.demoHint': 'Values are sample data, not a live game session.',
+  'mode.hint.connecting': 'Waiting for the first telemetry data from {game}.',
+  'mode.hint.unavailable':
+    '{game} is running, but no telemetry arrives. Check that the RoadPilot telemetry plugin is installed.',
+  'mode.hint.error':
+    'The telemetry connection could not be opened. Another telemetry reader may be running.',
+  'mode.live': 'Live data',
+  'mode.liveHint':
+    'Telemetry from {game}. Values the game plugin does not provide are marked as not available.',
+  'mode.interrupted': 'Telemetry interrupted',
+  'mode.interruptedHint': 'No new data from {game}. Waiting for the connection to resume.',
 
   'common.unavailable': 'Not available',
   'common.noData': 'No data',
@@ -47,6 +64,8 @@ export const en = {
   'vehicle.cruise': 'Cruise Control',
   'vehicle.cruise.on': 'On',
   'vehicle.cruise.off': 'Off',
+  'vehicle.gear.neutral': 'N',
+  'vehicle.gear.reverse': 'R{gear}',
 
   'autopilot.title': 'Autopilot Settings',
   'autopilot.laneKeeping': 'Lane Keeping',

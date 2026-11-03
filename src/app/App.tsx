@@ -7,10 +7,16 @@ import type { DashboardSource } from '@/backend/dashboardSource'
 
 function Shell() {
   const [page, setPage] = useState<PageId>('dashboard')
-  const { connection } = useDashboard().snapshot
+  const { connection, game, paused } = useDashboard().snapshot
   return (
     <div className="window">
-      <TopNav page={page} onNavigate={setPage} connection={connection} />
+      <TopNav
+        page={page}
+        onNavigate={setPage}
+        connection={connection}
+        game={game}
+        paused={paused}
+      />
       <main className="content">
         {page === 'dashboard' ? <DashboardPage /> : <PlaceholderPage page={page} />}
       </main>

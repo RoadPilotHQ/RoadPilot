@@ -20,6 +20,16 @@ export function VehicleDataCard() {
   const { t, formatNumber } = useI18n()
   const { vehicle } = useDashboard().snapshot
   const none = t('common.noData')
+  const unavailable = t('common.unavailable')
+  /** No vehicle at all: "No data". One missing value: "Not available". */
+  const show = <T,>(value: T | null | undefined, format: (v: T) => string) =>
+    !vehicle ? none : value == null ? unavailable : format(value)
+  const gearText = (gear: number) =>
+    gear === 0
+      ? t('vehicle.gear.neutral')
+      : gear < 0
+        ? t('vehicle.gear.reverse', { gear: -gear })
+        : String(gear)
 
   return (
     <Card title={t('vehicle.title')}>
@@ -27,24 +37,27 @@ export function VehicleDataCard() {
         <Row
           icon={<Gauge size={18} />}
           label={t('vehicle.speed')}
-          value={vehicle ? `${formatNumber(vehicle.speedKmh)} ${t('unit.kmh')}` : none}
+          value={show(
+            vehicle?.speedKmh,
+            (v) => `${formatNumber(Math.round(Math.abs(v)))} ${t('unit.kmh')}`,
+          )}
         />
         <Row
           icon={<Cog size={18} />}
           label={t('vehicle.rpm')}
-          value={vehicle ? `${formatNumber(vehicle.engineRpm)} ${t('unit.rpm')}` : none}
+          value={show(vehicle?.engineRpm, (v) => `${formatNumber(Math.round(v))} ${t('unit.rpm')}`)}
         />
         <Row
           icon={<Settings2 size={18} />}
           label={t('vehicle.gear')}
-          value={vehicle ? String(vehicle.gear) : none}
+          value={show(vehicle?.gear, gearText)}
         />
         <Row
           icon={<Navigation size={18} />}
           label={t('vehicle.cruise')}
-          value={
-            vehicle ? t(vehicle.cruiseControl ? 'vehicle.cruise.on' : 'vehicle.cruise.off') : none
-          }
+          value={show(vehicle?.cruiseControl, (on) =>
+            t(on ? 'vehicle.cruise.on' : 'vehicle.cruise.off'),
+          )}
         />
       </ul>
     </Card>
