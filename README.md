@@ -1,78 +1,67 @@
 # RoadPilot
 
-RoadPilot is a planned desktop application that adds driving assistance and autonomous driving to Euro Truck Simulator 2 (ETS2) and American Truck Simulator (ATS).
+RoadPilot is a desktop application project for Euro Truck Simulator 2 (ETS2) and American Truck Simulator (ATS). The current release is an early dashboard prototype: it displays clearly marked demo values and does not connect to or control either game.
 
-> **Status: early planning.** This repository does not contain source code yet. Responsibilities, architecture and roadmap below describe the **planned** scope, not existing functionality.
+## Run the desktop app
 
-## Purpose
+Install Node.js 22.12 or newer, Rust, the Microsoft C++ Build Tools, and the WebView2 Runtime on Windows. From this repository, install the JavaScript dependencies once and launch the native window:
 
-This repository is home to the main RoadPilot desktop application. It is meant to coordinate the whole ecosystem: it reads the game state, decides how the truck should drive, and presents everything to the user in a dashboard.
+```powershell
+npm install
+npm run desktop
+```
 
-## Key responsibilities
+This opens RoadPilot in its own desktop window. To create a Windows installer, run:
 
-- Desktop application
-- Dashboard
-- Core application architecture
-- Vehicle control integration
-- Driving assistance systems
-- Main application coordination
+```powershell
+npm run desktop:build
+```
 
-## Architecture overview
+The installer is written under `src-tauri/target/release/bundle/`.
 
-The following structure is a proposal and may change as development starts:
+For browser-only UI development, `npm run dev` remains available. It runs the Vite development server at `http://127.0.0.1:1420`.
 
-- **Application shell**: the desktop window, settings and user interface.
-- **Dashboard**: the main view showing the system state and driving assistance status.
-- **Core**: coordination between the game connection, driving logic and the other RoadPilot components.
-- **Vehicle control integration**: the boundary through which steering, throttle and braking commands would be sent to the game.
-- **Driving assistance systems**: individual assistance functions built on top of the core.
+## Verify changes
 
-## Integration with the RoadPilot ecosystem
+```powershell
+npm run check
+npm run build
+```
 
-RoadPilot is split into independent repositories. Each one is developed, versioned and released on its own; there is no monorepo and no shared source code.
+## Current dashboard behavior
 
-| Repository | Role |
+- The ETS2 badge reports a connection state supplied by the backend boundary. The current offline source reports **Disconnected**.
+- Sample vehicle and job values are labeled **Demo data** and are never represented as live telemetry.
+- Autopilot and assistance features are marked **Planned**. Their switches only save local preferences; they do not control the game.
+- English is bundled as the default locale. Translation keys are centralized in `src/i18n/en.ts`; the separate [RoadPilot-Language repository](https://github.com/RoadPilotHQ/RoadPilot-Language) remains the home for future language bundles.
+
+## Repository boundaries
+
+RoadPilot is developed in separate repositories. This repository owns the desktop shell, dashboard, application architecture, and future vehicle integration.
+
+| Repository | Responsibility |
 |---|---|
 | **RoadPilot** (this repository) | Main desktop application |
 | [RoadPilot-Map](https://github.com/RoadPilotHQ/RoadPilot-Map) | Map processing and geographic data |
-| [RoadPilot-Language](https://github.com/RoadPilotHQ/RoadPilot-Language) | Translations and localization |
+| [RoadPilot-Language](https://github.com/RoadPilotHQ/RoadPilot-Language) | Translation bundles |
 | [RoadPilot-Visualization](https://github.com/RoadPilotHQ/RoadPilot-Visualization) | Visualization components and development tools |
 | [RoadPilot-Plugin](https://github.com/RoadPilotHQ/RoadPilot-Plugin) | Plugin architecture and SDK |
 | [RoadPilot-Website](https://github.com/RoadPilotHQ/RoadPilot-Website) | Official website |
 | [RoadPilot-Discord](https://github.com/RoadPilotHQ/RoadPilot-Discord) | Discord community infrastructure |
 | [RoadPilot-Docs](https://github.com/RoadPilotHQ/RoadPilot-Docs) | Central documentation |
 
-As the central application, RoadPilot is expected to consume map data from RoadPilot-Map, translations from RoadPilot-Language, visualization components from RoadPilot-Visualization and extensions through the interfaces defined in RoadPilot-Plugin. These interfaces are still being defined; none of them exists yet.
+These integrations and interfaces are planned; they are not active in the dashboard yet.
 
-## Development status
+## Status
 
-| Area | Status |
-|---|---|
-| Source code | Not started |
-| Architecture | In planning |
-| Releases | None |
-
-## Planned roadmap
-
-Planned work, in no fixed order and without dates:
-
-- [ ] Define the core application architecture
-- [ ] Select the technology stack for the desktop application
-- [ ] Design the dashboard
-- [ ] Define the vehicle control integration boundary
-- [ ] Specify the first driving assistance functions
-- [ ] Define the interfaces to the other RoadPilot repositories
+The React dashboard runs inside a Tauri 2 desktop window. Game telemetry, vehicle control, and the other planned assistance features are not implemented yet.
 
 ## Contributing
 
-RoadPilot is at an early stage and the contribution process is still being defined. Shared guidelines are planned in [RoadPilot-Docs](https://github.com/RoadPilotHQ/RoadPilot-Docs).
-
-Until then, please open an issue or start a discussion before starting any work, so it can be coordinated. All contributions, issues and documentation must be written in English.
+The contribution process is still being defined. Please open an issue or discussion before starting larger work so it can be coordinated. Project contributions and documentation should be written in English.
 
 ## License
 
-Licensing is currently undecided. No license has been selected for this repository yet. Until a license is published here, no permission is granted to use, copy, modify or distribute its contents beyond what the GitHub Terms of Service allow.
-
----
+Licensing is undecided. No license has been selected, and no permission is granted beyond what the GitHub Terms of Service allow.
 
 Euro Truck Simulator 2 and American Truck Simulator are trademarks of SCS Software. RoadPilot is not an official SCS Software product.
