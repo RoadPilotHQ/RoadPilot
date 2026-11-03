@@ -2,6 +2,7 @@ import { Info, LayoutDashboard, ScrollText, Settings, Truck, Waypoints } from 'l
 import type { ComponentType } from 'react'
 import type { ConnectionState } from '@/domain/types'
 import { useI18n, type TranslationKey } from '@/i18n'
+import { Logo } from './Logo'
 
 export const PAGES = ['dashboard', 'driving', 'settings', 'logs', 'about'] as const
 export type PageId = (typeof PAGES)[number]
@@ -32,16 +33,6 @@ export function ConnectionBadge({ state }: { state: ConnectionState }) {
   )
 }
 
-function Logo() {
-  return (
-    <svg width="34" height="26" viewBox="0 0 34 26" aria-hidden>
-      <path d="M2 24 13 2l5 0L8 24Z" fill="#e8792e" />
-      <path d="M12 24 21 6l4 0 7 18h-6l-3-8-3 8Z" fill="#f19a52" />
-      <path d="M16 24l2-5 3 0 1 5Z" fill="#292724" />
-    </svg>
-  )
-}
-
 export function TopNav({
   page,
   onNavigate,
@@ -56,7 +47,6 @@ export function TopNav({
     <header className="topbar">
       <div className="brand">
         <Logo />
-        <span className="brand-name">{t('app.name')}</span>
       </div>
       <nav className="nav" aria-label={t('nav.label')}>
         {PAGES.map((id) => {

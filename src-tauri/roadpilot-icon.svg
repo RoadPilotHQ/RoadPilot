@@ -1,6 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- App icon: the official mark from src/assets/brand/roadpilot-mark.svg on the brand background.
+       The gradient definitions and the mark group must stay identical to that file (enforced by a test).
+       Regenerate the platform icons with: npm run icons -->
   <rect width="1024" height="1024" rx="208" fill="#f2e8d8" />
-  <path d="M206 812 454 212h128L334 812H206Z" fill="#e8792e" />
-  <path d="m442 812 244-600h120l188 600H846l-70-220-90 220H442Z" fill="#f19a52" />
-  <path d="m600 812 72-176h92l56 176H600Z" fill="#292724" />
+  <defs>
+    <linearGradient id="roadpilot-orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ee8a3a" />
+      <stop offset="1" stop-color="#dd6e22" />
+    </linearGradient>
+  </defs>
+  <g transform="translate(80 307) scale(5.4)">
+  <g id="roadpilot-mark">
+    <path d="M56 0h14L42 76H0Z" fill="url(#roadpilot-orange)" />
+    <path d="M90 0h14l56 76h-42Z" fill="url(#roadpilot-orange)" />
+    <path d="M75 3h10l13.8 53H61.2Z" fill="#e8792e" />
+    <path d="M61.2 56h37.6l5.2 20H56Z" fill="#3a2a1f" />
+    <path d="M78 26h4l1.4 22h-6.8Z" fill="#f6b56a" />
+    <path d="M77 60h6v16h-6Z" fill="#f6e7cf" />
+  </g>
+  </g>
 </svg>

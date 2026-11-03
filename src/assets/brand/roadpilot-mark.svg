@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 76" width="160" height="76" role="img">
+  <title>RoadPilot</title>
+  <defs>
+    <linearGradient id="roadpilot-orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ee8a3a" />
+      <stop offset="1" stop-color="#dd6e22" />
+    </linearGradient>
+  </defs>
+  <g id="roadpilot-mark">
+    <path d="M56 0h14L42 76H0Z" fill="url(#roadpilot-orange)" />
+    <path d="M90 0h14l56 76h-42Z" fill="url(#roadpilot-orange)" />
+    <path d="M75 3h10l13.8 53H61.2Z" fill="#e8792e" />
+    <path d="M61.2 56h37.6l5.2 20H56Z" fill="#3a2a1f" />
+    <path d="M78 26h4l1.4 22h-6.8Z" fill="#f6b56a" />
+    <path d="M77 60h6v16h-6Z" fill="#f6e7cf" />
+  </g>
+</svg>

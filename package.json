@@ -18,6 +18,7 @@
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run test",
     "tauri": "tauri",
+    "icons": "tauri icon src-tauri/roadpilot-icon.svg -o src-tauri/icons",
     "desktop": "tauri dev",
     "desktop:build": "tauri build"
   },
