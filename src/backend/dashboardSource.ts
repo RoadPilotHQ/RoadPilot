@@ -1,4 +1,5 @@
-import type { DashboardSnapshot, TelemetryUpdate } from '@/domain/types'
+import type { TelemetryData, TelemetryUpdate } from '@/domain/telemetry'
+import type { DashboardSnapshot, JobData } from '@/domain/types'
 
 /**
  * Boundary between the UI and the data producers. Compatible with React's
@@ -33,8 +34,19 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
   game: null,
   paused: false,
   autopilotActive: false,
-  vehicle: { speedKmh: 80, targetSpeedKmh: 80, engineRpm: 1420, gear: 12, cruiseControl: true },
+  vehicle: {
+    speedKmh: 80,
+    targetSpeedKmh: 80,
+    engineRpm: 1420,
+    gear: 12,
+    cruiseControl: true,
+    engineRunning: true,
+    fuelL: 412,
+    fuelPercent: 52,
+    waterTemperatureC: 88,
+  },
   job: {
+    state: 'active',
     cargo: 'Electronics',
     weightKg: 12400,
     income: 24360,
@@ -45,8 +57,94 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
     remainingKm: 742,
     remainingMinutes: 552,
     progressPercent: 48,
+    revenue: null,
   },
+  dynamics: {
+    accelerationMs2: 0.2,
+    throttle: 0.35,
+    brake: 0,
+    steering: -0.05,
+    cruiseControl: true,
+    cruiseControlKmh: 80,
+  },
+  navigation: { distanceKm: 742, etaMinutes: 552, speedLimitKmh: 80, speedLimitShown: true },
+  environment: { gameClock: '09:20', weather: null, rain: null },
   availability: AVAILABILITY,
+}
+
+/** Live view of one telemetry frame. Missing values stay `null`; nothing is filled in. */
+function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSnapshot {
+  const { vehicle: v, dynamics: d, job: j, navigation: n, environment: e } = data
+  const jobKnown = j.state !== 'unknown' && j.state !== 'none'
+  return {
+    mode: 'live',
+    connection: update.status,
+    game: update.game,
+    paused: update.paused,
+    autopilotActive: false,
+    vehicle: {
+      speedKmh: v.speedKmh,
+      targetSpeedKmh: v.cruiseControlKmh,
+      engineRpm: v.engineRpm,
+      gear: v.gear,
+      cruiseControl: v.cruiseControlOn,
+      engineRunning: v.engineRunning,
+      fuelL: v.fuelL,
+      fuelPercent: v.fuelPercent,
+      waterTemperatureC: v.waterTemperatureC,
+    },
+    job: jobKnown
+      ? {
+          state: j.state,
+          cargo: j.cargo,
+          weightKg: j.cargoMassKg,
+          income: j.income,
+          currency: j.currency,
+          origin: j.sourceCity,
+          destination: j.destinationCity,
+          deadline: j.deadline,
+          // Route Advisor values describe the current route, which is the job route
+          // only while a job is active.
+          remainingKm: j.state === 'active' ? n.distanceKm : null,
+          remainingMinutes: j.state === 'active' ? n.etaMin : null,
+          progressPercent: j.progressPercent,
+          revenue: j.deliveredRevenue,
+        }
+      : j.state === 'none'
+        ? { ...EMPTY_JOB, state: 'none' }
+        : null,
+    dynamics: {
+      accelerationMs2: d.longitudinalAccelerationMs2,
+      throttle: d.throttleInput,
+      brake: d.brakeInput,
+      steering: d.steeringInput,
+      cruiseControl: v.cruiseControlOn,
+      cruiseControlKmh: v.cruiseControlKmh,
+    },
+    navigation: {
+      distanceKm: n.distanceKm,
+      etaMinutes: n.etaMin,
+      speedLimitKmh: n.speedLimitKmh,
+      speedLimitShown: n.speedLimitShown,
+    },
+    environment: { gameClock: e.gameClock, weather: null, rain: null },
+    availability: AVAILABILITY,
+  }
+}
+
+const EMPTY_JOB: JobData = {
+  state: 'none',
+  cargo: null,
+  weightKg: null,
+  income: null,
+  currency: null,
+  origin: null,
+  destination: null,
+  deadline: null,
+  remainingKm: null,
+  remainingMinutes: null,
+  progressPercent: null,
+  revenue: null,
 }
 
 /**
@@ -57,25 +155,9 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
  */
 export function snapshotFromTelemetry(update: TelemetryUpdate | null): DashboardSnapshot {
   if (!update) return DEMO_SNAPSHOT
-  const base = { connection: update.status, game: update.game, paused: update.paused }
+  if (update.status === 'connected' && update.data) return liveSnapshot(update, update.data)
 
-  if (update.status === 'connected' && update.vehicle) {
-    const v = update.vehicle
-    return {
-      ...base,
-      mode: 'live',
-      autopilotActive: false,
-      vehicle: {
-        speedKmh: v.speedKmh,
-        targetSpeedKmh: null,
-        engineRpm: v.engineRpm,
-        gear: v.gear,
-        cruiseControl: null,
-      },
-      job: null,
-      availability: AVAILABILITY,
-    }
-  }
+  const base = { connection: update.status, game: update.game, paused: update.paused }
   if (update.status === 'reconnecting') {
     return {
       ...base,
@@ -83,6 +165,9 @@ export function snapshotFromTelemetry(update: TelemetryUpdate | null): Dashboard
       autopilotActive: false,
       vehicle: null,
       job: null,
+      dynamics: null,
+      navigation: null,
+      environment: null,
       availability: AVAILABILITY,
     }
   }

@@ -29,12 +29,51 @@ export type Availability = 'available' | 'unavailable'
 export interface VehicleData {
   /** Signed; negative while reversing. */
   speedKmh: number | null
+  /** Cruise control set speed. */
   targetSpeedKmh: number | null
   engineRpm: number | null
   /** Positive forward, zero neutral, negative reverse. */
   gear: number | null
   cruiseControl: boolean | null
+  engineRunning: boolean | null
+  fuelL: number | null
+  /** Calculated from fuel and tank capacity. */
+  fuelPercent: number | null
+  /** Approximated by the game, not simulated. */
+  waterTemperatureC: number | null
 }
+
+/** Driver inputs and longitudinal dynamics. */
+export interface DynamicsData {
+  /** Forward positive, braking negative. */
+  accelerationMs2: number | null
+  /** Player inputs, 0..1. */
+  throttle: number | null
+  brake: number | null
+  /** Player steering input, -1..1, positive = left. */
+  steering: number | null
+  cruiseControl: boolean | null
+  cruiseControlKmh: number | null
+}
+
+/** Route Advisor values as provided by the game. */
+export interface NavigationData {
+  distanceKm: number | null
+  etaMinutes: number | null
+  speedLimitKmh: number | null
+  /** `false` when the game reports no speed limit. */
+  speedLimitShown: boolean | null
+}
+
+export interface EnvironmentData {
+  /** In-game clock time `HH:MM`. */
+  gameClock: string | null
+  /** The SCS telemetry SDK provides no weather or rain information. */
+  weather: string | null
+  rain: string | null
+}
+
+export type JobState = 'active' | 'none' | 'delivered' | 'cancelled' | 'unknown'
 
 export interface DeadlineValue {
   /** Days from the current in-game day. */
@@ -44,16 +83,21 @@ export interface DeadlineValue {
 }
 
 export interface JobData {
-  cargo: string
-  weightKg: number
-  income: number
-  currency: string
-  origin: string
-  destination: string
+  state: JobState
+  cargo: string | null
+  weightKg: number | null
+  income: number | null
+  /** ISO 4217 code. */
+  currency: string | null
+  origin: string | null
+  destination: string | null
   deadline: DeadlineValue | null
-  remainingKm: number
-  remainingMinutes: number
-  progressPercent: number
+  remainingKm: number | null
+  remainingMinutes: number | null
+  /** Calculated and approximate in live mode. */
+  progressPercent: number | null
+  /** Revenue of a delivered job. */
+  revenue: number | null
 }
 
 export interface DashboardSnapshot {
@@ -65,6 +109,9 @@ export interface DashboardSnapshot {
   autopilotActive: boolean
   vehicle: VehicleData | null
   job: JobData | null
+  dynamics: DynamicsData | null
+  navigation: NavigationData | null
+  environment: EnvironmentData | null
   availability: {
     autopilot: Record<AutopilotFeature, Availability>
     assistance: Record<AssistanceSystem, Availability>
@@ -89,21 +136,4 @@ export const DEFAULT_PREFERENCES: Preferences = {
     autoBraking: true,
   },
   drivingDistance: 'medium',
-}
-
-/**
- * Wire contract of the `telemetry:update` event and the `telemetry_snapshot` command
- * (`src-tauri/src/telemetry/model.rs`). Only values telemetry protocol v1 carries.
- */
-export interface TelemetryUpdate {
-  status: ConnectionState
-  game: GameId | null
-  paused: boolean
-  /** Present only while connected; never stale. */
-  vehicle: {
-    speedKmh: number | null
-    engineRpm: number | null
-    gear: number | null
-  } | null
-  error: string | null
 }

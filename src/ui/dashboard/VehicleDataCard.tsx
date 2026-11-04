@@ -1,35 +1,26 @@
-import { Cog, Gauge, Navigation, Settings2 } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { Cog, Fuel, Gauge, Navigation, Power, Settings2, Thermometer } from 'lucide-react'
 import { useDashboard } from '@/state/DashboardProvider'
 import { useI18n } from '@/i18n'
 import { Card } from '../components/controls'
-
-function Row({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <li className="row">
-      <span className="row-icon" aria-hidden>
-        {icon}
-      </span>
-      <span className="row-label">{label}</span>
-      <span className="row-value">{value}</span>
-    </li>
-  )
-}
+import { Row, useValueText } from './rows'
 
 export function VehicleDataCard() {
   const { t, formatNumber } = useI18n()
   const { vehicle } = useDashboard().snapshot
-  const none = t('common.noData')
-  const unavailable = t('common.unavailable')
-  /** No vehicle at all: "No data". One missing value: "Not available". */
-  const show = <T,>(value: T | null | undefined, format: (v: T) => string) =>
-    !vehicle ? none : value == null ? unavailable : format(value)
+  const show = useValueText(vehicle !== null)
   const gearText = (gear: number) =>
     gear === 0
       ? t('vehicle.gear.neutral')
       : gear < 0
         ? t('vehicle.gear.reverse', { gear: -gear })
         : String(gear)
+  const fuelText = (litres: number) =>
+    vehicle?.fuelPercent != null
+      ? t('vehicle.fuel.withPercent', {
+          litres: formatNumber(Math.round(litres)),
+          percent: formatNumber(Math.round(vehicle.fuelPercent)),
+        })
+      : t('vehicle.fuel.value', { litres: formatNumber(Math.round(litres)) })
 
   return (
     <Card title={t('vehicle.title')}>
@@ -57,6 +48,26 @@ export function VehicleDataCard() {
           label={t('vehicle.cruise')}
           value={show(vehicle?.cruiseControl, (on) =>
             t(on ? 'vehicle.cruise.on' : 'vehicle.cruise.off'),
+          )}
+        />
+        <Row
+          icon={<Fuel size={18} />}
+          label={t('vehicle.fuel')}
+          value={show(vehicle?.fuelL, fuelText)}
+          calculated={vehicle?.fuelL != null && vehicle.fuelPercent != null}
+        />
+        <Row
+          icon={<Power size={18} />}
+          label={t('vehicle.engine')}
+          value={show(vehicle?.engineRunning, (on) =>
+            t(on ? 'vehicle.engine.running' : 'vehicle.engine.off'),
+          )}
+        />
+        <Row
+          icon={<Thermometer size={18} />}
+          label={t('vehicle.temperature')}
+          value={show(vehicle?.waterTemperatureC, (v) =>
+            t('vehicle.temperature.value', { value: formatNumber(Math.round(v)) }),
           )}
         />
       </ul>

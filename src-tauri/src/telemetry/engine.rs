@@ -1,13 +1,13 @@
 //! Telemetry engine: hosts the RoadPilot telemetry pipe, tracks the connection and
 //! publishes normalized updates. Runs on Tauri's async runtime, never on the main thread.
 
-use super::model::TelemetryUpdate;
-use super::normalize::normalize_vehicle;
+use super::model::{ConnectionStatus, TelemetryUpdate};
+use super::normalize::{FrameInput, normalize};
 use super::process::detect_game;
 use super::status::{ConnectionTracker, GameProcess, LatestFrame};
 use roadpilot_telemetry_client::{PluginState, ReceivedTelemetryFrame};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::time::sleep;
 
@@ -39,8 +39,9 @@ pub async fn run(sink: impl UpdateSink, shared: SharedUpdate) {
         endpoint.poll(now).await;
 
         let latest = endpoint.latest();
-        let fresh_frame =
-            latest.is_some_and(|f| now.duration_since(f.received_at) < LIVE_INTERVAL * 5);
+        let fresh_frame = latest
+            .as_ref()
+            .is_some_and(|f| now.duration_since(f.received_at) < LIVE_INTERVAL * 5);
         if !fresh_frame && last_scan.is_none_or(|t| now.duration_since(t) >= PROCESS_SCAN_INTERVAL)
         {
             process = tokio::task::spawn_blocking(detect_game)
@@ -58,9 +59,11 @@ pub async fn run(sink: impl UpdateSink, shared: SharedUpdate) {
             last_sent = Some(update);
         }
 
+        // While connected (also paused: the game keeps sending frames) sample at a fixed
+        // rate instead of waking on every frame.
         let connected = last_sent
             .as_ref()
-            .is_some_and(|u| u.vehicle.is_some() && !u.paused);
+            .is_some_and(|u| u.status == ConnectionStatus::Connected);
         if connected {
             sleep(LIVE_INTERVAL).await;
         } else {
@@ -81,6 +84,8 @@ struct Endpoint {
     error: Option<String>,
     failed_at: Option<Instant>,
     started_at: Instant,
+    /// Normalized form of the newest frame, keyed by its receive time.
+    cache: Option<LatestFrame>,
 }
 
 impl Endpoint {
@@ -93,6 +98,7 @@ impl Endpoint {
             error: None,
             failed_at: None,
             started_at: Instant::now(),
+            cache: None,
         }
     }
 
@@ -128,13 +134,30 @@ impl Endpoint {
         }
     }
 
-    fn latest(&self) -> Option<LatestFrame> {
-        self.receiver.borrow().as_ref().map(|received| LatestFrame {
-            received_at: received.received_at,
-            game: received.frame.game.into(),
-            paused: received.frame.plugin_state == PluginState::Paused,
-            vehicle: normalize_vehicle(&received.frame.values),
-        })
+    /// The newest frame, normalized once per received frame.
+    fn latest(&mut self) -> Option<LatestFrame> {
+        let borrowed = self.receiver.borrow();
+        let Some(received) = borrowed.as_ref() else {
+            self.cache = None;
+            return None;
+        };
+        if self
+            .cache
+            .as_ref()
+            .is_none_or(|c| c.received_at != received.received_at)
+        {
+            self.cache = Some(LatestFrame {
+                received_at: received.received_at,
+                game: received.frame.game.into(),
+                paused: received.frame.plugin_state == PluginState::Paused,
+                data: normalize(&FrameInput {
+                    frame: &received.frame,
+                    dropped_fields: &received.dropped_fields,
+                    received_at_unix_ms: unix_ms(received.received_at),
+                }),
+            });
+        }
+        self.cache.clone()
     }
 
     async fn changed(&mut self) {
@@ -168,4 +191,12 @@ fn spawn_server(
 ) -> Option<tauri::async_runtime::JoinHandle<std::io::Result<()>>> {
     // The RoadPilot telemetry transport is a Windows named pipe; other platforms have none yet.
     None
+}
+
+/// Wall-clock time of a monotonic instant in the past, as Unix epoch milliseconds.
+fn unix_ms(at: Instant) -> u64 {
+    SystemTime::now()
+        .checked_sub(at.elapsed())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_millis() as u64)
 }

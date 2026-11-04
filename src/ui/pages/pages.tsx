@@ -3,6 +3,7 @@ import { useI18n, type TranslationKey } from '@/i18n'
 import { Card } from '../components/controls'
 import { AssistanceCard } from '../dashboard/AssistanceCard'
 import { AutopilotCard } from '../dashboard/AutopilotCard'
+import { DynamicsCard, EnvironmentCard, NavigationCard } from '../dashboard/DetailCards'
 import { CurrentJobCard, RouteProgressCard } from '../dashboard/JobCards'
 import { OverviewCards } from '../dashboard/OverviewCards'
 import { VehicleDataCard } from '../dashboard/VehicleDataCard'
@@ -51,6 +52,9 @@ export function DashboardPage() {
         <AssistanceCard />
         <CurrentJobCard />
         <RouteProgressCard />
+        <DynamicsCard />
+        <NavigationCard />
+        <EnvironmentCard />
       </div>
     </div>
   )

@@ -12,7 +12,9 @@ export function OverviewCards() {
   // In live mode a missing value means the telemetry does not provide it.
   const missing = mode === 'live' && vehicle ? t('common.unavailable') : noData
   const jobMissing = mode === 'live' ? t('common.unavailable') : t('job.none')
-  const duration = job ? formatDuration(job.remainingMinutes) : null
+  const activeJob = job?.state === 'active' ? job : null
+  const duration =
+    activeJob?.remainingMinutes != null ? formatDuration(activeJob.remainingMinutes) : null
 
   return (
     <div className="overview">
@@ -55,9 +57,9 @@ export function OverviewCards() {
         <Package size={38} className="icon-orange" aria-hidden />
         <div>
           <div className="label">{t('overview.job')}</div>
-          {job ? (
+          {activeJob?.origin && activeJob.destination ? (
             <div className="overview-value overview-value-sm">
-              {t('job.route', { origin: job.origin, destination: job.destination })}
+              {t('job.route', { origin: activeJob.origin, destination: activeJob.destination })}
             </div>
           ) : (
             <div className="overview-value overview-value-sm text-muted">{jobMissing}</div>
@@ -69,12 +71,12 @@ export function OverviewCards() {
         <Route size={38} className="icon-orange" aria-hidden />
         <div>
           <div className="label">{t('overview.remaining')}</div>
-          {job && duration ? (
+          {activeJob?.remainingKm != null ? (
             <>
               <div className="overview-value">
-                {formatNumber(job.remainingKm)} {t('unit.km')}
+                {formatNumber(Math.round(activeJob.remainingKm))} {t('unit.km')}
               </div>
-              <div className="sub">{t('route.eta', duration)}</div>
+              {duration ? <div className="sub">{t('route.eta', duration)}</div> : null}
             </>
           ) : (
             <div className="overview-value text-muted">

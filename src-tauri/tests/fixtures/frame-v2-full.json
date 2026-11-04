@@ -1,0 +1,90 @@
+{
+  "protocol": "roadpilot.telemetry",
+  "schemaVersion": 2,
+  "session": 4242424242,
+  "sequence": 1234,
+  "game": "ets2",
+  "gameVersion": "1.21",
+  "pluginState": "running",
+  "simulationTimeUs": 98765432,
+  "gameTimeMin": 2000,
+  "localScale": 19,
+  "truck": {
+    "speedMps": 22.5,
+    "engineRpm": 1350.5,
+    "gear": 11,
+    "displayedGear": 11,
+    "engineEnabled": true,
+    "electricEnabled": true,
+    "fuelL": 412.5,
+    "fuelRangeKm": 1180,
+    "fuelConsumptionLPerKm": 0.35,
+    "fuelWarning": false,
+    "adblueL": 60.25,
+    "oilTemperatureC": 95.5,
+    "waterTemperatureC": 88,
+    "oilPressurePsi": 55,
+    "batteryVoltageV": 26.5,
+    "brakeAirPressurePsi": 120,
+    "brakeTemperatureC": 45,
+    "parkingBrake": false,
+    "motorBrake": true,
+    "retarderLevel": 1,
+    "cruiseControlMps": 22.222,
+    "odometerKm": 123456.7
+  },
+  "inputs": {
+    "steeringInput": -0.125,
+    "throttleInput": 0.75,
+    "brakeInput": 0,
+    "clutchInput": 0,
+    "steeringEffective": -0.1,
+    "throttleEffective": 0.7,
+    "brakeEffective": 0,
+    "clutchEffective": 0
+  },
+  "motion": {
+    "localVelocityMps": { "x": 0.25, "y": -0.5, "z": -22.5 },
+    "localAccelerationMps2": { "x": 0.5, "y": 0, "z": -0.75 },
+    "localAngularVelocityRps": { "x": 0, "y": 0.0125, "z": 0 },
+    "wheelSteeringRot": -0.03
+  },
+  "placement": {
+    "x": -31234.5678,
+    "y": 45.25,
+    "z": 12345.875,
+    "heading": 0.25,
+    "pitch": 0.01,
+    "roll": -0.005
+  },
+  "truckConfig": {
+    "brand": "Scania",
+    "name": "S",
+    "fuelCapacityL": 800,
+    "adblueCapacityL": 80,
+    "rpmLimit": 2500,
+    "forwardGears": 12,
+    "reverseGears": 2,
+    "retarderSteps": 3
+  },
+  "job": {
+    "state": "active",
+    "cargo": "Electronics",
+    "cargoMassKg": 12400,
+    "cargoDamage": 0.015,
+    "cargoLoaded": true,
+    "sourceCity": "Hamburg",
+    "sourceCompany": "Tradeaux",
+    "destinationCity": "Praha \"Hlavní\"",
+    "destinationCompany": "Kaarfor",
+    "income": 24360,
+    "deliveryTimeMin": 3412,
+    "plannedDistanceKm": 742,
+    "jobMarket": "freight_market"
+  },
+  "navigation": {
+    "distanceM": 742000,
+    "timeS": 33120,
+    "speedLimitMps": 22.222
+  }
+}

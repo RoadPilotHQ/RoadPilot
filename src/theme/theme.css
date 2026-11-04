@@ -278,7 +278,8 @@ button:focus-visible {
   grid-template-columns: 1fr 1.15fr 1.25fr;
   grid-template-areas:
     'vehicle autopilot assist'
-    'job route route';
+    'job route route'
+    'dynamics navigation environment';
   gap: var(--gap);
 }
 
@@ -296,6 +297,15 @@ button:focus-visible {
 }
 .grid > :nth-child(5) {
   grid-area: route;
+}
+.grid > :nth-child(6) {
+  grid-area: dynamics;
+}
+.grid > :nth-child(7) {
+  grid-area: navigation;
+}
+.grid > :nth-child(8) {
+  grid-area: environment;
 }
 
 .rows {
@@ -346,6 +356,13 @@ button:focus-visible {
 .sub-heading {
   margin: 12px 0 8px;
   font-weight: 600;
+}
+
+.calc-mark {
+  margin-left: 2px;
+  color: var(--orange);
+  font-weight: 700;
+  cursor: help;
 }
 
 .note {
@@ -505,7 +522,9 @@ button:focus-visible {
     grid-template-areas:
       'vehicle autopilot'
       'assist assist'
-      'job route';
+      'job route'
+      'dynamics navigation'
+      'environment environment';
   }
   .grid > :nth-child(5) {
     grid-area: route;

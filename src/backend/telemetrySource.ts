@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import type { DashboardSnapshot, TelemetryUpdate } from '@/domain/types'
+import type { TelemetryUpdate } from '@/domain/telemetry'
+import type { DashboardSnapshot } from '@/domain/types'
 import { offlineDemoSource, snapshotFromTelemetry, type DashboardSource } from './dashboardSource'
 
 /** Names shared with `src-tauri/src/lib.rs`. */

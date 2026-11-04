@@ -2491,7 +2491,7 @@ dependencies = [
 [[package]]
 name = "roadpilot-telemetry-client"
 version = "0.1.0"
-source = "git+https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git?rev=98e1cbd82dd6a30c119287d66ab4b1b00f49f1f3#98e1cbd82dd6a30c119287d66ab4b1b00f49f1f3"
+source = "git+https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git?rev=0cc0d2d969443b8f60ac0619dd0e608fce495d7f#0cc0d2d969443b8f60ac0619dd0e608fce495d7f"
 dependencies = [
  "serde",
  "serde_json",

@@ -1,7 +1,7 @@
 //! Connection state machine. Pure logic: time and inputs are passed in, so every
 //! transition is unit-testable without a game, a pipe or a real clock.
 
-use super::model::{ConnectionStatus, Game, TelemetryUpdate, VehicleTelemetry};
+use super::model::{ConnectionStatus, Game, TelemetryData, TelemetryUpdate};
 use std::time::{Duration, Instant};
 
 /// A frame is considered current for this long after it was received.
@@ -20,12 +20,12 @@ pub enum GameProcess {
 }
 
 /// The newest frame, already normalized.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LatestFrame {
     pub received_at: Instant,
     pub game: Game,
     pub paused: bool,
-    pub vehicle: VehicleTelemetry,
+    pub data: TelemetryData,
 }
 
 #[derive(Debug, Default)]
@@ -121,7 +121,7 @@ fn connected(frame: &LatestFrame) -> TelemetryUpdate {
         status: ConnectionStatus::Connected,
         game: Some(frame.game),
         paused: frame.paused,
-        vehicle: Some(frame.vehicle),
+        data: Some(frame.data.clone()),
         error: None,
     }
 }
@@ -135,10 +135,14 @@ mod tests {
             received_at: at,
             game,
             paused,
-            vehicle: VehicleTelemetry {
-                speed_kmh: Some(80.0),
-                engine_rpm: Some(1400.0),
-                gear: Some(12),
+            data: TelemetryData {
+                vehicle: crate::telemetry::model::Vehicle {
+                    speed_kmh: Some(80.0),
+                    engine_rpm: Some(1400.0),
+                    gear: Some(12),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         }
     }
@@ -164,7 +168,7 @@ mod tests {
         assert_eq!(u.game, Some(Game::Ets2));
         let u = t.evaluate(start + CONNECT_GRACE, None, ets2, None);
         assert_eq!(u.status, ConnectionStatus::Unavailable);
-        assert!(u.vehicle.is_none());
+        assert!(u.data.is_none());
     }
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
         );
         assert_eq!(u.status, ConnectionStatus::Connected);
         assert_eq!(u.game, Some(Game::Ats));
-        assert_eq!(u.vehicle.and_then(|v| v.speed_kmh), Some(80.0));
+        assert_eq!(u.data.and_then(|d| d.vehicle.speed_kmh), Some(80.0));
     }
 
     #[test]
@@ -193,7 +197,7 @@ mod tests {
         let u = t.evaluate(start + STALE_AFTER + secs(1), Some(&f), ets2, None);
         assert_eq!(u.status, ConnectionStatus::Reconnecting);
         assert!(
-            u.vehicle.is_none(),
+            u.data.is_none(),
             "stale values must not be shown as current"
         );
     }
@@ -265,7 +269,7 @@ mod tests {
         let u = t.evaluate(start + secs(30), Some(&paused), ets2, None);
         assert_eq!(u.status, ConnectionStatus::Connected);
         assert!(u.paused);
-        assert!(u.vehicle.is_some());
+        assert!(u.data.is_some());
     }
 
     #[test]
@@ -298,6 +302,6 @@ mod tests {
         );
         assert_eq!(u.status, ConnectionStatus::Error);
         assert_eq!(u.error.as_deref(), Some("pipe busy"));
-        assert!(u.vehicle.is_none());
+        assert!(u.data.is_none());
     }
 }
