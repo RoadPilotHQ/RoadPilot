@@ -66,6 +66,10 @@ describe('dashboard with live telemetry', () => {
     expect(vehicle.getByLabelText('Calculated by RoadPilot from game values')).toBeInTheDocument()
     expect(vehicle.getByText('Running')).toBeInTheDocument()
     expect(vehicle.getByText('88 °C')).toBeInTheDocument()
+    expect(vehicle.getByText('1,240 km')).toBeInTheDocument()
+    expect(vehicle.getByText('60 l')).toBeInTheDocument()
+    expect(vehicle.getByText('102 °C')).toBeInTheDocument()
+    expect(vehicle.getByText('24.1 V')).toBeInTheDocument()
   })
 
   it('shows driving dynamics, navigation, job and environment', async () => {
@@ -99,15 +103,28 @@ describe('dashboard with live telemetry', () => {
     expect(environment.getAllByText('Not provided by the game')).toHaveLength(2)
   })
 
+  it('shows live world position and orientation with the SDK convention', async () => {
+    const { send } = setup()
+    await send(live())
+    const position = card('Vehicle Position')
+    expect(position.getByText('1,200.5 m')).toBeInTheDocument()
+    expect(position.getByText('-3,400.3 m')).toBeInTheDocument()
+    expect(position.getByText('90°')).toBeInTheDocument()
+    expect(
+      position.getByText('Game world coordinates · heading counterclockwise from north.'),
+    ).toBeInTheDocument()
+  })
+
   it('marks every value the game does not provide as not available', async () => {
     const { send } = setup()
     const data = emptyData()
     data.vehicle.speedKmh = 50
     await send(live(data))
     expect(card('Vehicle Data').getByText('50 km/h')).toBeInTheDocument()
-    expect(card('Vehicle Data').getAllByText('Not available')).toHaveLength(6)
+    expect(card('Vehicle Data').getAllByText('Not available')).toHaveLength(12)
     expect(card('Driving Dynamics').getAllByText('Not available')).toHaveLength(5)
     expect(card('Navigation').getAllByText('Not available')).toHaveLength(3)
+    expect(card('Vehicle Position').getAllByText('Not available')).toHaveLength(6)
     expect(card('Current Job').getByText('Not available')).toBeInTheDocument()
     // No demo job is mixed into live data.
     expect(screen.queryByText('Hamburg → Praha')).not.toBeInTheDocument()
@@ -149,7 +166,7 @@ describe('dashboard with live telemetry', () => {
     expect(badge()).toHaveTextContent('ETS2 Reconnecting…')
     expect(screen.getByText('Telemetry interrupted')).toBeInTheDocument()
     expect(card('Vehicle Data').queryByText('83 km/h')).not.toBeInTheDocument()
-    expect(card('Vehicle Data').getAllByText('No data')).toHaveLength(7)
+    expect(card('Vehicle Data').getAllByText('No data')).toHaveLength(13)
     expect(card('Driving Dynamics').getAllByText('No data')).toHaveLength(5)
     expect(card('Environment').getAllByText('No data')).toHaveLength(3)
   })

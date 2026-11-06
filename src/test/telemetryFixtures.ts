@@ -89,9 +89,15 @@ export function fullData(): TelemetryData {
     gear: 11,
     engineRunning: true,
     fuelL: 412.5,
+    fuelRangeKm: 1240,
     fuelCapacityL: 800,
     fuelPercent: 51.6,
     waterTemperatureC: 88,
+    adblueL: 60,
+    oilTemperatureC: 102,
+    batteryVoltageV: 24.1,
+    parkingBrake: false,
+    retarderLevel: 2,
     cruiseControlOn: true,
     cruiseControlKmh: 80,
   })
@@ -114,6 +120,7 @@ export function fullData(): TelemetryData {
     plannedDistanceKm: 680,
     progressPercent: 25,
   }
+  d.position = { x: 1200.5, y: 18, z: -3400.25, headingDeg: 90, pitchDeg: 0, rollDeg: 0 }
   d.navigation = { distanceKm: 510, etaMin: 400, speedLimitKmh: 90, speedLimitShown: true }
   d.environment = { gameTimeMin: 2000, gameClock: '09:20', timeScale: 19 }
   return d

@@ -42,8 +42,14 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
     cruiseControl: true,
     engineRunning: true,
     fuelL: 412,
+    fuelRangeKm: null,
     fuelPercent: 52,
     waterTemperatureC: 88,
+    adblueL: null,
+    oilTemperatureC: null,
+    batteryVoltageV: null,
+    parkingBrake: null,
+    retarderLevel: null,
   },
   job: {
     state: 'active',
@@ -69,6 +75,7 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
   },
   navigation: { distanceKm: 742, etaMinutes: 552, speedLimitKmh: 80, speedLimitShown: true },
   environment: { gameClock: '09:20', weather: null, rain: null },
+  position: null,
   availability: AVAILABILITY,
 }
 
@@ -90,8 +97,14 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
       cruiseControl: v.cruiseControlOn,
       engineRunning: v.engineRunning,
       fuelL: v.fuelL,
+      fuelRangeKm: v.fuelRangeKm,
       fuelPercent: v.fuelPercent,
       waterTemperatureC: v.waterTemperatureC,
+      adblueL: v.adblueL,
+      oilTemperatureC: v.oilTemperatureC,
+      batteryVoltageV: v.batteryVoltageV,
+      parkingBrake: v.parkingBrake,
+      retarderLevel: v.retarderLevel,
     },
     job: jobKnown
       ? {
@@ -128,6 +141,7 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
       speedLimitShown: n.speedLimitShown,
     },
     environment: { gameClock: e.gameClock, weather: null, rain: null },
+    position: data.position,
     availability: AVAILABILITY,
   }
 }
@@ -168,6 +182,7 @@ export function snapshotFromTelemetry(update: TelemetryUpdate | null): Dashboard
       dynamics: null,
       navigation: null,
       environment: null,
+      position: null,
       availability: AVAILABILITY,
     }
   }

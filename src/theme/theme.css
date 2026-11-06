@@ -279,7 +279,8 @@ button:focus-visible {
   grid-template-areas:
     'vehicle autopilot assist'
     'job route route'
-    'dynamics navigation environment';
+    'dynamics navigation environment'
+    'position position position';
   gap: var(--gap);
 }
 
@@ -306,6 +307,9 @@ button:focus-visible {
 }
 .grid > :nth-child(8) {
   grid-area: environment;
+}
+.grid > :nth-child(9) {
+  grid-area: position;
 }
 
 .rows {
@@ -524,7 +528,8 @@ button:focus-visible {
       'assist assist'
       'job route'
       'dynamics navigation'
-      'environment environment';
+      'environment environment'
+      'position position';
   }
   .grid > :nth-child(5) {
     grid-area: route;

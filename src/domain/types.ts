@@ -37,10 +37,16 @@ export interface VehicleData {
   cruiseControl: boolean | null
   engineRunning: boolean | null
   fuelL: number | null
+  fuelRangeKm: number | null
   /** Calculated from fuel and tank capacity. */
   fuelPercent: number | null
   /** Approximated by the game, not simulated. */
   waterTemperatureC: number | null
+  adblueL: number | null
+  oilTemperatureC: number | null
+  batteryVoltageV: number | null
+  parkingBrake: boolean | null
+  retarderLevel: number | null
 }
 
 /** Driver inputs and longitudinal dynamics. */
@@ -71,6 +77,20 @@ export interface EnvironmentData {
   /** The SCS telemetry SDK provides no weather or rain information. */
   weather: string | null
   rain: string | null
+}
+
+/** World position and orientation in the game SDK's coordinate conventions. */
+export interface PositionData {
+  /** Metres; X east, Y up, Z south. */
+  x: number
+  y: number
+  z: number
+  /** Degrees counterclockwise from north. */
+  headingDeg: number
+  /** Degrees; positive = nose up. */
+  pitchDeg: number
+  /** Degrees; counterclockwise around the forward axis. */
+  rollDeg: number
 }
 
 export type JobState = 'active' | 'none' | 'delivered' | 'cancelled' | 'unknown'
@@ -112,6 +132,7 @@ export interface DashboardSnapshot {
   dynamics: DynamicsData | null
   navigation: NavigationData | null
   environment: EnvironmentData | null
+  position: PositionData | null
   availability: {
     autopilot: Record<AutopilotFeature, Availability>
     assistance: Record<AssistanceSystem, Availability>

@@ -27,8 +27,14 @@ describe('snapshotFromTelemetry', () => {
       cruiseControl: true,
       engineRunning: true,
       fuelL: 412.5,
+      fuelRangeKm: 1240,
       fuelPercent: 51.6,
       waterTemperatureC: 88,
+      adblueL: 60,
+      oilTemperatureC: 102,
+      batteryVoltageV: 24.1,
+      parkingBrake: false,
+      retarderLevel: 2,
     })
     expect(s.dynamics).toEqual({
       accelerationMs2: -1.26,
@@ -57,6 +63,14 @@ describe('snapshotFromTelemetry', () => {
       speedLimitShown: true,
     })
     expect(s.environment).toEqual({ gameClock: '09:20', weather: null, rain: null })
+    expect(s.position).toEqual({
+      x: 1200.5,
+      y: 18,
+      z: -3400.25,
+      headingDeg: 90,
+      pitchDeg: 0,
+      rollDeg: 0,
+    })
   })
 
   it('keeps missing telemetry values missing instead of inventing them', () => {
@@ -66,6 +80,7 @@ describe('snapshotFromTelemetry', () => {
     expect(Object.values(s.dynamics ?? {}).every((v) => v === null)).toBe(true)
     expect(s.job).toBeNull()
     expect(s.environment?.gameClock).toBeNull()
+    expect(s.position).toBeNull()
   })
 
   it('distinguishes no job, delivered jobs and unknown job information', () => {
@@ -95,6 +110,7 @@ describe('snapshotFromTelemetry', () => {
     expect(s.dynamics).toBeNull()
     expect(s.navigation).toBeNull()
     expect(s.environment).toBeNull()
+    expect(s.position).toBeNull()
   })
 
   it.each(['disconnected', 'connecting', 'unavailable', 'error'] as const)(

@@ -144,3 +144,51 @@ export function EnvironmentCard() {
     </Card>
   )
 }
+
+export function PositionCard() {
+  const { t, locale } = useI18n()
+  const { position, mode, vehicle } = useDashboard().snapshot
+  const show = useValueText(mode === 'live' ? vehicle !== null : false)
+  const format = (v: number) =>
+    new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(v)
+  const metres = (v: number) => t('position.value', { value: format(v) })
+  const degrees = (v: number) => t('position.angle', { value: format(v) })
+
+  return (
+    <Card title={t('position.title')}>
+      <ul className="rows">
+        <Row
+          icon={<MapPin size={18} />}
+          label={t('position.x')}
+          value={show(position?.x, metres)}
+        />
+        <Row
+          icon={<MapPin size={18} />}
+          label={t('position.y')}
+          value={show(position?.y, metres)}
+        />
+        <Row
+          icon={<MapPin size={18} />}
+          label={t('position.z')}
+          value={show(position?.z, metres)}
+        />
+        <Row
+          icon={<Navigation size={18} />}
+          label={t('position.heading')}
+          value={show(position?.headingDeg, degrees)}
+        />
+        <Row
+          icon={<Activity size={18} />}
+          label={t('position.pitch')}
+          value={show(position?.pitchDeg, degrees)}
+        />
+        <Row
+          icon={<Activity size={18} />}
+          label={t('position.roll')}
+          value={show(position?.rollDeg, degrees)}
+        />
+      </ul>
+      {mode === 'live' ? <p className="note">{t('position.convention')}</p> : null}
+    </Card>
+  )
+}
