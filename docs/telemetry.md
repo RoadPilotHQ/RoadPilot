@@ -2,7 +2,7 @@
 
 RoadPilot reads live data from Euro Truck Simulator 2 (ETS2) and American Truck Simulator (ATS). This integration is **read-only**: it never steers, brakes, accelerates or injects input into the game.
 
-> **Status:** telemetry schema 2 (vehicle, dynamics, position, job, navigation, game time) is implemented and covered by automated tests. **No schema 2 field has been verified in a running game yet.** The earlier schema 1 integration (speed, RPM, gear) was live-verified in **ATS 1.62.x** only; **ETS2 has not been tested live at all.** See [Verification status](#verification-status).
+> **Status:** telemetry schema 2 (vehicle including wheel geometry, dynamics, position, job, navigation, game time) is implemented and covered by automated tests. **No schema 2 field has been verified in a running game yet.** The earlier schema 1 integration (speed, RPM, gear) was live-verified in **ATS 1.62.x** only; **ETS2 has not been tested live at all.** See [Verification status](#verification-status).
 
 ## Telemetry source
 
@@ -46,6 +46,12 @@ The plugin sends raw wheel geometry from the SDK truck configuration (`truckConf
 Only one program can host the telemetry pipe. Close the RoadPilot-Telemetry console reader before starting RoadPilot, otherwise RoadPilot shows **Telemetry error**.
 
 An older schema 1 plugin keeps working: RoadPilot then shows speed, RPM and gear and marks everything else as not available.
+
+## Relationship to the Input SDK
+
+This telemetry integration is read-only and has no control path. Control uses a different part of the SCS SDK, the Input SDK, in a different plugin from [RoadPilot-SDK](https://github.com/RoadPilotHQ/RoadPilot-SDK) (`roadpilot-input.dll`, pipe `\\.\pipe\roadpilot-input-v1`). That plugin registers a generic input device with throttle, brake and steering axes; the user binds them manually in the game. The protocol, limits and safety rules are specified only in its [PROTOCOL.md](https://github.com/RoadPilotHQ/RoadPilot-SDK/blob/main/docs/PROTOCOL.md).
+
+State in this application: **no component sends commands to that pipe and there is no steering activation UI.** The future sender must refresh commands at least every 50 ms, independently of the 10 Hz telemetry engine described below; that rate is a requirement of the input protocol, not an existing capability. Steering range, sign and interaction with manual controls are unverified in ATS and ETS2. The steering values in the telemetry (`steeringInput`, `steeringEffective`) are readings of the game state, not commands.
 
 ## Data flow
 
