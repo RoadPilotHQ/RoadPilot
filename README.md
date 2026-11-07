@@ -52,7 +52,7 @@ RoadPilot is developed in separate repositories. This repository owns the deskto
 | [RoadPilot-Discord](https://github.com/RoadPilotHQ/RoadPilot-Discord) | Discord community infrastructure |
 | [RoadPilot-Docs](https://github.com/RoadPilotHQ/RoadPilot-Docs) | Central documentation |
 
-RoadPilot-Telemetry is in use for live game telemetry. The other integrations and interfaces are planned; they are not active in the dashboard yet.
+RoadPilot-Telemetry is in use for live game telemetry. A read-only local WebSocket bridge to RoadPilot-Visualization is implemented but not yet live-verified. Other integrations and interfaces remain planned.
 
 ## Status
 

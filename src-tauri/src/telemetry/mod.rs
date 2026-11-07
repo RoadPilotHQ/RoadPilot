@@ -11,3 +11,5 @@ pub mod model;
 pub mod normalize;
 pub mod process;
 pub mod status;
+pub mod visualization;
+pub mod visualization_stream;

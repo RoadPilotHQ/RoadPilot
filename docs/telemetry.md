@@ -13,6 +13,7 @@ RoadPilot uses the RoadPilot telemetry stack from the separate [RoadPilot-Teleme
 | Native game plugin `roadpilot-telemetry.dll` | RoadPilot-Telemetry `plugin/`               | Loaded by ETS2/ATS through the official SCS Telemetry SDK 1.16. Writes schema 2 frames over a persistent pipe connection. |
 | `roadpilot-telemetry-client` crate           | RoadPilot-Telemetry `client/`               | Hosts the named pipe, decodes, validates and orders frames. Accepts schema 1 and 2.                                       |
 | Telemetry engine                             | this repository, `src-tauri/src/telemetry/` | Connection state, unit and axis conversion, calculated values, events to the dashboard.                                   |
+| Visualization stream                         | this repository, `visualization_stream.rs`  | Read-only schema 2 frame stream on loopback port `17891` for RoadPilot-Visualization.                                     |
 
 The wire format, units, bounds and SDK sources of every field are specified in RoadPilot-Telemetry [`docs/PROTOCOL-V2.md`](https://github.com/RoadPilotHQ/RoadPilot-Telemetry/blob/main/docs/PROTOCOL-V2.md).
 
@@ -53,12 +54,21 @@ ETS2/ATS -> roadpilot-telemetry.dll (worker thread, persistent connection)
   -> telemetry::engine: 10 Hz sampling, change detection                         [Tokio task]
   -> Tauri event "telemetry:update" / command "telemetry_snapshot"
   -> src/backend/telemetrySource.ts -> snapshotFromTelemetry -> dashboard
+  -> loopback WebSocket ws://127.0.0.1:17891 -> roadpilot-visualization-frame schema 2
 ```
 
 - The engine runs on Tauri's async runtime, independent of React and of the main thread. Process detection runs on a blocking worker thread.
 - While connected (also while paused, when the game keeps sending frames) the engine samples at most 10 times per second; the plugin sends up to ~60 frames per second. Events are emitted only when the update changes. While not connected it re-evaluates once per second and wakes immediately on the first frame.
 - Only the newest frame is kept (Tokio `watch` channel) and normalized once, so memory does not grow during long sessions.
 - On application exit the engine task is aborted, which also stops the pipe server.
+
+## Visualization stream
+
+RoadPilot also broadcasts telemetry frames to the separate RoadPilot-Visualization application. The stream binds only to `127.0.0.1:17891`, accepts browser origins used by the local Visualization dev/preview servers and Tauri local origins, and never accepts commands. A client without an `Origin` header is allowed only through the loopback listener, for local native tools. Incoming client text/binary messages are closed; WebSocket messages are limited to 1 KiB.
+
+Open the Visualization app with `?source=live` to connect to this stream. It sends schema 2 `roadpilot-visualization-frame` messages only while telemetry data is present. Position maps from SDK X/Z metres to scene east/north (`scene y = -SDK z`); heading is converted from the SDK's counterclockwise-from-north convention to scene radians counterclockwise from east. Speed, observed road-wheel angle, and player inputs are forwarded with unit conversion. Vehicle dimensions, path curvature, lane geometry, other agents, traffic signals and a planned trajectory are not reported by the current RoadPilot telemetry source and remain `null` or empty. In particular, yaw rate is not presented as path curvature.
+
+The bridge is newly implemented and **has not yet been verified live in ATS or ETS2**. The socket's origin check limits browser access; binding to loopback does not authenticate other local processes.
 
 ## Connection states
 
