@@ -65,7 +65,35 @@
     "rpmLimit": 2500,
     "forwardGears": 12,
     "reverseGears": 2,
-    "retarderSteps": 3
+    "retarderSteps": 3,
+    "wheelCount": 4,
+    "hookPositionM": { "x": 0, "y": 1, "z": 1.25 },
+    "wheels": [
+      {
+        "positionM": { "x": -0.875, "y": 0.5, "z": -1.75 },
+        "radiusM": 0.5,
+        "steerable": true,
+        "powered": false
+      },
+      {
+        "positionM": { "x": 0.875, "y": 0.5, "z": -1.75 },
+        "radiusM": 0.5,
+        "steerable": true,
+        "powered": false
+      },
+      {
+        "positionM": { "x": -0.875, "y": 0.5, "z": 1.25 },
+        "radiusM": 0.5,
+        "steerable": false,
+        "powered": true
+      },
+      {
+        "positionM": { "x": 0.875, "y": 0.5, "z": 1.25 },
+        "radiusM": 0.5,
+        "steerable": false,
+        "powered": true
+      }
+    ]
   },
   "job": {
     "state": "active",

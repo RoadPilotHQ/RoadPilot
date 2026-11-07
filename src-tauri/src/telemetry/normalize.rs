@@ -88,7 +88,47 @@ fn vehicle(t: &proto::TruckState, c: &proto::TruckConfig) -> Vehicle {
             .map(|v| round1(v * MPS_TO_KMH)),
         brand: c.brand.clone(),
         model: c.name.clone(),
+        wheelbase_m: wheelbase_m(c),
     }
+}
+
+/// Plausible range for a truck wheelbase in metres; anything else is treated as bad data.
+const WHEELBASE_RANGE_M: std::ops::RangeInclusive<f32> = 0.5..=30.0;
+
+/// Wheelbase from the truck configuration, calculated only here (the plugin sends raw wheel
+/// geometry). Distance along vehicle Z between the mean position of the steerable wheels and
+/// the mean position of the powered wheels that are not steerable (the drive axle group).
+///
+/// Returns `None` when the data is incomplete or invalid: wheels missing or truncated
+/// (`wheelCount` differs from the list length), any wheel without position, steerable or
+/// powered flag, non-finite positions, no steerable or no drive wheel, or an implausible
+/// result.
+fn wheelbase_m(c: &proto::TruckConfig) -> Option<f32> {
+    let wheels = c.wheels.as_ref()?;
+    if wheels.is_empty() || c.wheel_count? as usize != wheels.len() {
+        return None;
+    }
+    let (mut steer_sum, mut steer_n, mut drive_sum, mut drive_n) = (0.0_f64, 0_u32, 0.0_f64, 0_u32);
+    for wheel in wheels {
+        let (pos, steerable, powered) = (wheel.position_m?, wheel.steerable?, wheel.powered?);
+        if !pos.z.is_finite() {
+            return None;
+        }
+        if steerable {
+            steer_sum += f64::from(pos.z);
+            steer_n += 1;
+        } else if powered {
+            drive_sum += f64::from(pos.z);
+            drive_n += 1;
+        }
+    }
+    if steer_n == 0 || drive_n == 0 {
+        return None;
+    }
+    let wheelbase = (drive_sum / f64::from(drive_n) - steer_sum / f64::from(steer_n)).abs() as f32;
+    WHEELBASE_RANGE_M
+        .contains(&wheelbase)
+        .then(|| (wheelbase * 100.0).round() / 100.0)
 }
 
 /// SDK vehicle space (X right, Y up, Z backwards) -> forward / right / up.
@@ -254,6 +294,7 @@ mod tests {
         assert_eq!(v.cruise_control_kmh, Some(80.0)); // 22.222 m/s
         assert_eq!(v.retarder_steps, Some(3));
         assert_eq!(v.brand.as_deref(), Some("Scania"));
+        assert_eq!(v.wheelbase_m, Some(3.0)); // front z -1.75, drive z 1.25
 
         let j = &d.job;
         assert_eq!(j.state, JobState::Active);
@@ -450,6 +491,74 @@ mod tests {
         assert_eq!(d.vehicle.engine_rpm, None);
         assert_eq!(d.vehicle.gear, Some(4));
         assert_eq!(d.source.invalid_fields, vec!["truck.engineRpm".to_string()]);
+    }
+
+    fn wheel(z: f32, steerable: bool, powered: bool) -> proto::WheelConfig {
+        proto::WheelConfig {
+            position_m: Some(Vec3 { x: 0.9, y: 0.5, z }),
+            radius_m: Some(0.5),
+            steerable: Some(steerable),
+            powered: Some(powered),
+        }
+    }
+
+    fn wheelbase_of(count: Option<u32>, wheels: Option<Vec<proto::WheelConfig>>) -> Option<f32> {
+        let mut f = frame(GameId::Ats);
+        f.truck_config = Some(proto::TruckConfig {
+            wheel_count: count,
+            wheels,
+            ..proto::TruckConfig::default()
+        });
+        with(f).vehicle.wheelbase_m
+    }
+
+    #[test]
+    fn wheelbase_uses_steerable_and_drive_axle_group_centres() {
+        // 6x4: steerable front axle, two powered rear axles (tandem), one unpowered rear.
+        let wheels = vec![
+            wheel(-2.0, true, false),
+            wheel(-2.0, true, false),
+            wheel(2.0, false, true),
+            wheel(3.2, false, true),
+            wheel(5.0, false, false),
+        ];
+        assert_eq!(wheelbase_of(Some(5), Some(wheels)), Some(4.6)); // (2.0+3.2)/2 - (-2.0)
+        // A powered steerable front wheel does not count as a drive wheel.
+        let awd = vec![wheel(-1.5, true, true), wheel(2.0, false, true)];
+        assert_eq!(wheelbase_of(Some(2), Some(awd)), Some(3.5));
+    }
+
+    #[test]
+    fn wheelbase_is_absent_for_incomplete_or_invalid_geometry() {
+        let ok = vec![wheel(-1.5, true, false), wheel(2.0, false, true)];
+        assert_eq!(wheelbase_of(Some(2), Some(ok.clone())), Some(3.5));
+        assert_eq!(wheelbase_of(None, None), None);
+        assert_eq!(wheelbase_of(Some(2), None), None);
+        assert_eq!(wheelbase_of(None, Some(ok.clone())), None);
+        assert_eq!(wheelbase_of(Some(0), Some(vec![])), None);
+        // Truncated list: the game reported more wheels than the protocol carries.
+        assert_eq!(wheelbase_of(Some(16), Some(ok.clone())), None);
+        // Missing position, steerable or powered on any wheel.
+        for broken in 0..3 {
+            let mut w = ok.clone();
+            match broken {
+                0 => w[1].position_m = None,
+                1 => w[1].steerable = None,
+                _ => w[0].powered = None,
+            }
+            assert_eq!(wheelbase_of(Some(2), Some(w)), None);
+        }
+        // No steerable wheel, no drive wheel, non-finite position, implausible distance.
+        let no_steer = vec![wheel(-1.5, false, false), wheel(2.0, false, true)];
+        assert_eq!(wheelbase_of(Some(2), Some(no_steer)), None);
+        let no_drive = vec![wheel(-1.5, true, false), wheel(2.0, false, false)];
+        assert_eq!(wheelbase_of(Some(2), Some(no_drive)), None);
+        let nan = vec![wheel(f32::NAN, true, false), wheel(2.0, false, true)];
+        assert_eq!(wheelbase_of(Some(2), Some(nan)), None);
+        let same = vec![wheel(1.0, true, false), wheel(1.1, false, true)];
+        assert_eq!(wheelbase_of(Some(2), Some(same)), None);
+        let far = vec![wheel(-20.0, true, false), wheel(20.0, false, true)];
+        assert_eq!(wheelbase_of(Some(2), Some(far)), None);
     }
 
     fn job_template() -> proto::Job {

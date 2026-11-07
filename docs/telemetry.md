@@ -28,10 +28,14 @@ Why this source:
 `src-tauri/Cargo.toml` pins the client crate to a fixed commit:
 
 ```toml
-roadpilot-telemetry-client = { git = "https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git", rev = "0cc0d2d969443b8f60ac0619dd0e608fce495d7f" }
+roadpilot-telemetry-client = { git = "https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git", rev = "ca64c8e7e169a26143c62b2c525de3e8ec3b39ab" }
 ```
 
 Update the `rev` deliberately, together with the copied test fixture in `src-tauri/tests/fixtures/`. The client's dependencies report MIT, Apache-2.0 or Unlicense terms. The SCS SDK (© SCS Software, MIT-style licence) is not vendored or redistributed by RoadPilot; the plugin is built against a locally extracted SDK. The project licence is still undecided.
+
+### Wheel geometry and wheelbase
+
+The plugin sends raw wheel geometry from the SDK truck configuration (`truckConfig.wheels[]`, `hookPositionM`, at most 14 wheels, SDK vehicle space X right, Y up, Z backwards). The application calculates `vehicle.wheelbaseM` in `telemetry::normalize` only: the distance along Z between the mean of the steerable wheels and the mean of the powered, non-steerable wheels. It is absent when the geometry is incomplete (missing or truncated wheel list, a wheel without position or flags, no steerable or no drive wheel), non-finite, or outside 0.5–30 m. Not verified in a running game yet.
 
 ### Setup
 

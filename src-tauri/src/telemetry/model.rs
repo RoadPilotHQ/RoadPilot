@@ -136,6 +136,10 @@ pub struct Vehicle {
     pub cruise_control_kmh: Option<f32>,
     pub brand: Option<String>,
     pub model: Option<String>,
+    /// Calculated in metres: distance along the vehicle's length axis between the centre of
+    /// the steerable wheels and the centre of the powered, non-steerable wheels. `None` unless
+    /// the wheel geometry is complete and plausible.
+    pub wheelbase_m: Option<f32>,
 }
 
 /// Driving dynamics in the truck's own frame. Velocities and accelerations are converted
