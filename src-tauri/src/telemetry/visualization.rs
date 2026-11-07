@@ -3,7 +3,7 @@
 //! Fields without a source in game telemetry stay `null`; this adapter does not infer a route,
 //! lane geometry, path curvature, or vehicle dimensions.
 
-use super::model::TelemetryUpdate;
+use super::model::{Game, TelemetryUpdate};
 use serde::Serialize;
 
 const FRAME_FORMAT: &str = "roadpilot-visualization-frame";
@@ -34,6 +34,7 @@ struct SchemaVersion {
 #[derive(Debug, Serialize)]
 struct FrameSource {
     id: &'static str,
+    game: Option<Game>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,7 +73,10 @@ pub fn frame_from_update(update: &TelemetryUpdate) -> Option<VisualizationFrameV
     Some(VisualizationFrameV2 {
         format: FRAME_FORMAT,
         schema_version: SchemaVersion { major: 2, minor: 0 },
-        source: FrameSource { id: "roadpilot" },
+        source: FrameSource {
+            id: "roadpilot",
+            game: update.game,
+        },
         sequence: data.source.sequence,
         timestamp_s: data
             .source
@@ -117,7 +121,9 @@ pub fn frame_from_update(update: &TelemetryUpdate) -> Option<VisualizationFrameV
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::model::{ConnectionStatus, Dynamics, Position, TelemetryData, Vehicle};
+    use crate::telemetry::model::{
+        ConnectionStatus, Dynamics, Game, Position, TelemetryData, Vehicle,
+    };
 
     fn update() -> TelemetryUpdate {
         let mut update = TelemetryUpdate::status(ConnectionStatus::Connected, None);
@@ -159,6 +165,14 @@ mod tests {
         );
         assert!((json["inputs"]["steering"].as_f64().unwrap() - 0.25).abs() < 1e-6);
         assert!((json["inputs"]["throttle"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn includes_the_known_game_in_source_metadata() {
+        let mut update = update();
+        update.game = Some(Game::Ats);
+        let json = serde_json::to_value(frame_from_update(&update).unwrap()).unwrap();
+        assert_eq!(json["source"]["game"], "ats");
     }
 
     #[test]
