@@ -148,6 +148,17 @@ function ControlDetails({ status }: { status: ControlStatus }) {
           ? t('control.output.withheld', { reason: withheldText(t, stages.withheld) })
           : t('control.output.idle')
 
+  const { intervals } = status.timing
+  const timingText =
+    intervals.count === 0
+      ? t('control.timing.none')
+      : t('control.timing.value', {
+          p99: intervals.p99Ms.toFixed(1),
+          p999: intervals.p999Ms.toFixed(1),
+          max: intervals.maxMs.toFixed(1),
+          over50: intervals.over50,
+        })
+
   const decisions = status.recentDecisions.slice(0, RECENT)
 
   return (
@@ -158,6 +169,7 @@ function ControlDetails({ status }: { status: ControlStatus }) {
         <ControlRow label={t('control.row.epoch')} value={String(telemetry.epoch)} />
         <ControlRow label={t('control.row.safety')} value={safety} />
         <ControlRow label={t('control.row.tick')} value={tick} />
+        <ControlRow label={t('control.row.timing')} value={timingText} />
         <ControlRow
           label={t('control.row.watchdog')}
           value={

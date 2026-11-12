@@ -29,6 +29,7 @@
 //! * [`schedule`]: the monotonic 40 ms tick schedule and its timing monitoring.
 //! * [`watchdog`]: independent detection of a stalled supervisor loop.
 //! * [`log`]: the bounded log of decisions, timing and encoded messages.
+//! * [`timing`]: tick timing histograms (lateness, interval, processing, command interval).
 //! * [`sender`]: the deterministic core that ties everything together.
 //! * [`runtime`]: the async drivers that feed the core from the telemetry client's frame
 //!   channel (a second receiver on the same channel, never a second pipe server) and from
@@ -47,6 +48,7 @@ pub mod sender;
 pub mod sink;
 pub mod status;
 pub mod supervisor;
+pub mod timing;
 pub mod vehicle;
 pub mod watchdog;
 
@@ -67,6 +69,7 @@ mod dry_run_proof {
         ("sink", include_str!("sink.rs")),
         ("status", include_str!("status.rs")),
         ("supervisor", include_str!("supervisor.rs")),
+        ("timing", include_str!("timing.rs")),
         ("vehicle", include_str!("vehicle.rs")),
         ("watchdog", include_str!("watchdog.rs")),
     ];
@@ -123,7 +126,7 @@ mod dry_run_proof {
             .filter_map(|(_, line)| line.strip_prefix("pub mod "))
             .filter_map(|rest| rest.strip_suffix(';'))
             .collect();
-        assert!(declared.len() >= 12, "{declared:?}");
+        assert!(declared.len() >= 13, "{declared:?}");
         for module in &declared {
             assert!(
                 SOURCES.iter().any(|(name, _)| name == module),

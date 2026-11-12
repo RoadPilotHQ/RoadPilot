@@ -886,6 +886,103 @@ mod tests {
         );
     }
 
+    // ---- real-time timing measurements (Windows acceptance tests, ignored by default) ----
+    //
+    // These run the production slot and runtime on the real clock, with telemetry arriving at
+    // 60 Hz and the supervisor Active in dry run, so every tick generates and encodes a
+    // command. They are ignored in normal runs because their result depends on the machine and
+    // its load. Run them with a release build:
+    //
+    //   cargo test --release --lib timing_acceptance -- --ignored --nocapture
+    //   cargo test --release --lib timing_start_stop -- --ignored --nocapture
+    //
+    // ROADPILOT_TIMING_SECONDS (default 60) and ROADPILOT_TIMING_CYCLES (default 20) set the
+    // duration. The acceptance criterion is no tick interval and no command refresh interval
+    // above 50 ms, no timing fault and no watchdog trip.
+
+    fn env_u64(name: &str, default: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    fn print_report(label: &str, seconds: f64, timing: &status::TimingDto) {
+        let report = serde_json::json!({
+            "label": label,
+            "seconds": seconds,
+            "os": std::env::consts::OS,
+            "logicalCpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+            "optimized": !cfg!(debug_assertions),
+            "timing": timing,
+        });
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    }
+
+    fn assert_acceptance(timing: &status::TimingDto) {
+        assert_eq!(timing.intervals.over_50, 0, "tick intervals above 50 ms");
+        assert_eq!(
+            timing.command_intervals.over_50, 0,
+            "command refresh intervals above 50 ms"
+        );
+        assert_eq!(timing.gap_violations, 0, "timing faults");
+        assert_eq!(timing.watchdog_trips, 0, "watchdog trips");
+    }
+
+    #[test]
+    #[ignore = "real-time Windows timing measurement; run explicitly"]
+    fn timing_acceptance() {
+        let seconds = env_u64("ROADPILOT_TIMING_SECONDS", 60);
+        let rig = Rig::active();
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_secs(seconds));
+        let status = rig.slot.status();
+        print_report(
+            "timing_acceptance",
+            started.elapsed().as_secs_f64(),
+            &status.timing,
+        );
+        assert_eq!(status.state, StateCode::Active, "still active at the end");
+        assert_acceptance(&status.timing);
+    }
+
+    #[test]
+    #[ignore = "real-time Windows timing measurement; run explicitly"]
+    fn timing_start_stop() {
+        let cycles = env_u64("ROADPILOT_TIMING_CYCLES", 20);
+        let mut worst_interval: f64 = 0.0;
+        let mut worst_command: f64 = 0.0;
+        let mut ticks = 0;
+        let mut over_50 = 0;
+        for cycle in 1..=cycles {
+            let rig = Rig::active();
+            std::thread::sleep(Duration::from_secs(5));
+            let timing = rig.slot.status().timing;
+            let outcome = rig.slot.shutdown(SHUTDOWN_GRACE, ABORT_GRACE);
+            assert!(
+                matches!(outcome, ShutdownOutcome::Completed(_)),
+                "cycle {cycle}: {outcome:?}"
+            );
+            println!(
+                "cycle {cycle}: ticks {} p99 {:.2} p99.9 {:.2} max {:.2} ms, command max {:.2} ms, >50 {}",
+                timing.ticks,
+                timing.intervals.p99_ms,
+                timing.intervals.p999_ms,
+                timing.intervals.max_ms,
+                timing.command_intervals.max_ms,
+                timing.intervals.over_50 + timing.command_intervals.over_50
+            );
+            worst_interval = worst_interval.max(timing.intervals.max_ms);
+            worst_command = worst_command.max(timing.command_intervals.max_ms);
+            ticks += timing.ticks;
+            over_50 += timing.intervals.over_50 + timing.command_intervals.over_50;
+            assert_acceptance(&timing);
+        }
+        println!(
+            "start/stop: {cycles} cycles, {ticks} ticks, worst interval {worst_interval:.2} ms, worst command interval {worst_command:.2} ms, above 50 ms: {over_50}"
+        );
+    }
+
     // ---- dry run ----
 
     #[test]

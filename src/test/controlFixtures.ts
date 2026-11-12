@@ -1,6 +1,27 @@
 import { act } from '@testing-library/react'
 import type { ControlBridge } from '@/backend/controlSource'
-import type { CommandReply, ControlStatus, OperatorCommand } from '@/domain/control'
+import type {
+  CommandReply,
+  ControlStatus,
+  OperatorCommand,
+  TimingHistogram,
+} from '@/domain/control'
+
+/** A narrow distribution around `centerMs`. */
+export function histogram(centerMs: number): TimingHistogram {
+  return {
+    count: 249,
+    meanMs: centerMs,
+    p50Ms: centerMs,
+    p95Ms: centerMs + 0.3,
+    p99Ms: centerMs + 0.5,
+    p999Ms: centerMs + 0.6,
+    maxMs: centerMs + 0.7,
+    over40: 0,
+    over45: 0,
+    over50: 0,
+  }
+}
 
 /** A running, disabled, dry-run status with fresh ETS2 telemetry. */
 export function controlStatus(overrides: Partial<ControlStatus> = {}): ControlStatus {
@@ -48,6 +69,19 @@ export function controlStatus(overrides: Partial<ControlStatus> = {}): ControlSt
       disarmsEncoded: 0,
     },
     recentDecisions: [],
+    timing: {
+      timer: 'precise',
+      elevatedPriority: true,
+      ticks: 250,
+      intervals: histogram(40.0),
+      lateness: histogram(0.3),
+      processing: histogram(0.1),
+      commandIntervals: histogram(40.0),
+      missedDeadlines: 0,
+      lateTicks: 0,
+      gapViolations: 0,
+      watchdogTrips: 0,
+    },
     ...overrides,
   }
 }

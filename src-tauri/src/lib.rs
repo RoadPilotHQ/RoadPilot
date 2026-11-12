@@ -96,6 +96,15 @@ pub fn run() {
             if let RunEvent::Exit = event {
                 // Control first: disarm before anything else goes away.
                 if let Some(control) = app.try_state::<ControlSlot>() {
+                    // Diagnostics for timing measurements of the running application: when
+                    // ROADPILOT_TIMING_REPORT names a file, the tick timing summary is written
+                    // there at exit. Nothing is written otherwise.
+                    if let Some(path) = std::env::var_os("ROADPILOT_TIMING_REPORT") {
+                        let timing = control.status().timing;
+                        if let Ok(json) = serde_json::to_vec_pretty(&timing) {
+                            let _ = std::fs::write(path, json);
+                        }
+                    }
                     let outcome = control.shutdown(SHUTDOWN_GRACE, ABORT_GRACE);
                     if !matches!(
                         outcome,

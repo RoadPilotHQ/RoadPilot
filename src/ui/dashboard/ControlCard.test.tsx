@@ -290,6 +290,32 @@ describe('control section', () => {
     expect(section().getByText('Tripped · 2 trips so far')).toBeInTheDocument()
   })
 
+  it('shows the measured tick interval percentiles and violations', async () => {
+    const fake = setup()
+    await fake.push(controlStatus())
+    expect(
+      section().getByText('p99 40.5 · p99.9 40.6 · max 40.7 ms · over 50 ms: 0'),
+    ).toBeInTheDocument()
+    const status = controlStatus()
+    await fake.push({
+      ...status,
+      nowMs: 20_000,
+      timing: {
+        ...status.timing,
+        intervals: { ...status.timing.intervals, maxMs: 72.6, over50: 1 },
+      },
+    })
+    expect(
+      section().getByText('p99 40.5 · p99.9 40.6 · max 72.6 ms · over 50 ms: 1'),
+    ).toBeInTheDocument()
+    await fake.push({
+      ...status,
+      nowMs: 30_000,
+      timing: { ...status.timing, intervals: { ...status.timing.intervals, count: 0 } },
+    })
+    expect(section().getByText('No interval yet')).toBeInTheDocument()
+  })
+
   it('says when the control task has stopped', async () => {
     const fake = setup()
     await fake.push(controlStatus({ runtime: 'stopped' }))

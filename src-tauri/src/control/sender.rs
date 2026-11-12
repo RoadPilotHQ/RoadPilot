@@ -40,6 +40,7 @@ use super::status::{ControlStatus, RECENT_DECISIONS, StatusInput};
 use super::supervisor::{
     Command, Reason, Response, SafetyEvent, Supervisor, SupervisorConfig, Transition,
 };
+use super::timing::{TimerKind, TimingStats};
 use super::vehicle::VehicleState;
 use super::watchdog::{Heartbeat, TripFlag};
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
@@ -70,6 +71,8 @@ pub struct CoreConfig {
     pub freshness: FreshnessConfig,
     pub supervisor: SupervisorConfig,
     pub limits: ControlLimits,
+    /// Which timer drives the ticks; reported in the timing statistics only.
+    pub timer: TimerKind,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -138,6 +141,9 @@ pub struct ControlCore<S: MessageSink> {
     last_message: Option<(MessageRecord, Instant)>,
     watchdog_trips: u64,
     last_watchdog_trip: Option<(Duration, Instant)>,
+    timing: TimingStats,
+    tick_started: Option<Instant>,
+    last_command_at: Option<Instant>,
 }
 
 impl ControlCore<DryRunSink> {
@@ -187,6 +193,9 @@ impl<S: MessageSink> ControlCore<S> {
             last_message: None,
             watchdog_trips: 0,
             last_watchdog_trip: None,
+            timing: TimingStats::new(config.timer),
+            tick_started: None,
+            last_command_at: None,
         }
     }
 
@@ -218,6 +227,39 @@ impl<S: MessageSink> ControlCore<S> {
         self.scheduler.next_deadline()
     }
 
+    /// The runtime reports when the work of the current tick was finished, so the processing
+    /// duration is measured on the real clock rather than assumed.
+    pub fn tick_finished(&mut self, at: Instant) {
+        if let Some(started) = self.tick_started.take() {
+            self.timing
+                .processing
+                .record(at.saturating_duration_since(started));
+        }
+    }
+
+    pub fn timing(&self) -> &TimingStats {
+        &self.timing
+    }
+
+    fn record_timing(&mut self, timing: &Timing, now: Instant) {
+        let stats = &mut self.timing;
+        stats.ticks += 1;
+        stats.lateness.record(timing.lateness);
+        if let Some(gap) = timing.gap {
+            stats.intervals.record(gap);
+        }
+        stats.missed_deadlines += u64::from(timing.missed);
+        match timing.verdict {
+            Verdict::OnTime => {}
+            Verdict::Late | Verdict::DeadlinesMissed => stats.late_ticks += 1,
+            Verdict::GapViolation => {
+                stats.late_ticks += 1;
+                stats.gap_violations += 1;
+            }
+        }
+        self.tick_started = Some(now);
+    }
+
     /// A read-only status snapshot for display. Never used for decisions.
     pub fn status(&self, now: Instant) -> ControlStatus {
         super::status::build(&StatusInput {
@@ -240,6 +282,7 @@ impl<S: MessageSink> ControlCore<S> {
             loop_silent: self.heartbeat.silent_for(now),
             stats: self.stats,
             recent_decisions: self.log.recent_decisions(RECENT_DECISIONS),
+            timing: &self.timing,
         })
     }
 
@@ -385,6 +428,7 @@ impl<S: MessageSink> ControlCore<S> {
 
         // 2. Timing.
         let timing = self.scheduler.on_tick(now);
+        self.record_timing(&timing, now);
         match timing.verdict {
             Verdict::OnTime => {}
             Verdict::Late => self.log.timing(
@@ -445,6 +489,17 @@ impl<S: MessageSink> ControlCore<S> {
             (false, None, false) => TickOutcome::Idle,
         };
         self.last_tick = Some((timing, outcome, now));
+        if command_encoded {
+            if let Some(previous) = self.last_command_at {
+                self.timing
+                    .command_intervals
+                    .record(now.saturating_duration_since(previous));
+            }
+            self.last_command_at = Some(now);
+        } else {
+            // The refresh sequence ends; the next command starts a new one.
+            self.last_command_at = None;
+        }
         TickReport {
             timing,
             transition,
@@ -1431,5 +1486,95 @@ mod tests {
             "the arm and activate transitions survive the message flood"
         );
         assert_eq!(s.dropped.decisions, 0);
+    }
+
+    // ---- timing statistics ----
+
+    #[test]
+    fn ticks_on_the_grid_record_intervals_and_command_refresh_intervals() {
+        let mut rig = Rig::active();
+        rig.run_to(1_000);
+        let t = rig.core.timing();
+        assert_eq!(t.ticks, 25);
+        let intervals = t.intervals.summary();
+        assert_eq!(intervals.count, 24);
+        assert!((intervals.max_ms - 40.0).abs() < 1e-9);
+        assert_eq!(intervals.over_40, 0);
+        assert!((t.lateness.summary().max_ms).abs() < 1e-9);
+        // Commands from the tick at 240 ms on: 20 commands, 19 refresh intervals of 40 ms.
+        let commands = t.command_intervals.summary();
+        assert_eq!(commands.count, 19);
+        assert!((commands.max_ms - 40.0).abs() < 1e-9);
+        assert_eq!(
+            (t.missed_deadlines, t.late_ticks, t.gap_violations),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_late_tick_a_missed_deadline_and_a_gap_are_counted() {
+        let mut rig = Rig::active();
+        rig.run_to(400);
+        rig.ticks_on = false;
+        rig.run_to(480);
+        rig.core.tick(rig.at(485)); // 45 ms late: one deadline skipped, gap 85 ms
+        rig.run_to(624);
+        rig.core.tick(rig.at(630)); // next deadline 520: 110 ms late, gap 145 ms
+        let t = rig.core.timing();
+        assert_eq!(t.missed_deadlines, 1 + 2);
+        assert_eq!(t.late_ticks, 2);
+        assert_eq!(t.gap_violations, 1);
+        let intervals = t.intervals.summary();
+        assert_eq!(intervals.over_50, 2);
+        assert!((intervals.max_ms - 145.0).abs() < 1e-9);
+        // The 85 ms refresh interval counts; after the gap fault the sequence ended.
+        let commands = t.command_intervals.summary();
+        assert!((commands.max_ms - 85.0).abs() < 1e-9);
+        assert_eq!(commands.over_50, 1);
+    }
+
+    #[test]
+    fn the_refresh_sequence_restarts_after_output_stops() {
+        let mut rig = Rig::active();
+        rig.run_to(400);
+        rig.command(Command::Disarm);
+        rig.run_to(1_000);
+        let before = rig.core.timing().command_intervals.summary();
+        rig.command(Command::Arm);
+        rig.command(Command::Activate);
+        rig.run_to(1_200);
+        let after = rig.core.timing().command_intervals.summary();
+        assert!(after.count > before.count);
+        assert!(
+            (after.max_ms - 40.0).abs() < 1e-9,
+            "no interval spans the disarmed time: {}",
+            after.max_ms
+        );
+    }
+
+    #[test]
+    fn processing_is_measured_from_tick_start_to_reported_finish() {
+        let mut rig = Rig::new();
+        rig.ticks_on = false;
+        rig.run_to(40);
+        rig.core.tick(rig.at(40));
+        rig.core
+            .tick_finished(rig.at(40) + Duration::from_micros(2_500));
+        // A finish without a new tick is ignored.
+        rig.core.tick_finished(rig.at(60));
+        let p = rig.core.timing().processing.summary();
+        assert_eq!(p.count, 1);
+        assert!((p.max_ms - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_timing_summary_is_part_of_the_status() {
+        let mut rig = Rig::active();
+        rig.run_to(600);
+        let status = rig.core.status(rig.at(600));
+        assert_eq!(status.timing.ticks, 15);
+        assert_eq!(status.timing.intervals.count, 14);
+        assert_eq!(status.timing.timer, super::super::status::TimerCode::Tokio);
+        assert!(!status.timing.elevated_priority);
     }
 }

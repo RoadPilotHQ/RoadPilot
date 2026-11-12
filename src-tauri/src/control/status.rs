@@ -20,6 +20,7 @@ use super::schedule::{Timing, Verdict};
 use super::sender::{CoreStats, TickOutcome};
 use super::sink::{Delivery, OperatingMode};
 use super::supervisor::{Command, Reason, Rejection, SafetyEvent, State, Transition};
+use super::timing::{Histogram, TimerKind, TimingStats};
 use super::vehicle::InvalidFrame;
 use roadpilot_telemetry_client::GameId;
 use serde::Serialize;
@@ -606,6 +607,7 @@ pub struct ControlStatus {
     pub watchdog: WatchdogDto,
     pub counters: CountersDto,
     pub recent_decisions: Vec<LogEntryDto>,
+    pub timing: TimingDto,
 }
 
 impl ControlStatus {
@@ -640,12 +642,13 @@ impl ControlStatus {
             },
             counters: CountersDto::from(CoreStats::default()),
             recent_decisions: Vec::new(),
+            timing: TimingDto::from_stats(&TimingStats::default(), 0),
         }
     }
 }
 
 /// The internal values a status snapshot is built from (see `ControlCore::status`).
-pub struct StatusInput {
+pub struct StatusInput<'a> {
     pub now: Instant,
     pub start: Instant,
     pub mode: OperatingMode,
@@ -665,9 +668,10 @@ pub struct StatusInput {
     pub loop_silent: Duration,
     pub stats: CoreStats,
     pub recent_decisions: Vec<Entry<DecisionEvent>>,
+    pub timing: &'a TimingStats,
 }
 
-pub fn build(input: &StatusInput) -> ControlStatus {
+pub fn build(input: &StatusInput<'_>) -> ControlStatus {
     let at = |instant: Instant| millis(instant.saturating_duration_since(input.start));
     let (freshness_code, invalid_reason) = freshness(&input.assessment);
     let sample = input.assessment.usable();
@@ -726,6 +730,99 @@ pub fn build(input: &StatusInput) -> ControlStatus {
             .rev()
             .map(LogEntryDto::decision)
             .collect(),
+        timing: TimingDto::from_stats(input.timing, input.watchdog_trips),
+    }
+}
+
+// ---- timing ----
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimerCode {
+    Tokio,
+    Precise,
+}
+
+impl From<TimerKind> for TimerCode {
+    fn from(kind: TimerKind) -> Self {
+        match kind {
+            TimerKind::Tokio => Self::Tokio,
+            TimerKind::Precise => Self::Precise,
+        }
+    }
+}
+
+/// One distribution in milliseconds. `over40`, `over45` and `over50` are exact counts.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistogramDto {
+    pub count: u64,
+    pub mean_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub p999_ms: f64,
+    pub max_ms: f64,
+    pub over_40: u64,
+    pub over_45: u64,
+    pub over_50: u64,
+}
+
+impl From<&Histogram> for HistogramDto {
+    fn from(h: &Histogram) -> Self {
+        let s = h.summary();
+        Self {
+            count: s.count,
+            mean_ms: s.mean_ms,
+            p50_ms: s.p50_ms,
+            p95_ms: s.p95_ms,
+            p99_ms: s.p99_ms,
+            p999_ms: s.p999_ms,
+            max_ms: s.max_ms,
+            over_40: s.over_40,
+            over_45: s.over_45,
+            over_50: s.over_50,
+        }
+    }
+}
+
+/// Tick timing since the control runtime started.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingDto {
+    pub timer: TimerCode,
+    /// Whether the control threads run at elevated thread priority. Set by the application.
+    pub elevated_priority: bool,
+    pub ticks: u64,
+    /// Start of one tick to the start of the next.
+    pub intervals: HistogramDto,
+    /// Tick start after its scheduled deadline (scheduler wake-up).
+    pub lateness: HistogramDto,
+    /// Tick start to the end of its work.
+    pub processing: HistogramDto,
+    /// Between two consecutive ticks that both encoded a command (generated, not delivered).
+    pub command_intervals: HistogramDto,
+    pub missed_deadlines: u64,
+    pub late_ticks: u64,
+    pub gap_violations: u64,
+    pub watchdog_trips: u64,
+}
+
+impl TimingDto {
+    pub fn from_stats(stats: &TimingStats, watchdog_trips: u64) -> Self {
+        Self {
+            timer: stats.timer.into(),
+            elevated_priority: false,
+            ticks: stats.ticks,
+            intervals: (&stats.intervals).into(),
+            lateness: (&stats.lateness).into(),
+            processing: (&stats.processing).into(),
+            command_intervals: (&stats.command_intervals).into(),
+            missed_deadlines: stats.missed_deadlines,
+            late_ticks: stats.late_ticks,
+            gap_violations: stats.gap_violations,
+            watchdog_trips,
+        }
     }
 }
 

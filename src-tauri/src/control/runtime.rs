@@ -251,6 +251,7 @@ async fn run_sender(
                     }
                 }
                 core.tick(at);
+                core.tick_finished(now());
                 status.send_replace(core.status(at));
             }
             changed = receiver.changed(), if open => {

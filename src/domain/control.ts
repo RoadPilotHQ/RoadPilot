@@ -192,6 +192,37 @@ export interface ControlStatus {
   }
   /** Newest first. */
   recentDecisions: LogEntry[]
+  timing: ControlTiming
+}
+
+/** One timing distribution in milliseconds; `over40`, `over45` and `over50` are exact counts. */
+export interface TimingHistogram {
+  count: number
+  meanMs: number
+  p50Ms: number
+  p95Ms: number
+  p99Ms: number
+  p999Ms: number
+  maxMs: number
+  over40: number
+  over45: number
+  over50: number
+}
+
+/** Tick timing since the control runtime started. A command interval is between two encoded
+ * commands; an encoded command is not a delivered one. */
+export interface ControlTiming {
+  timer: 'tokio' | 'precise'
+  elevatedPriority: boolean
+  ticks: number
+  intervals: TimingHistogram
+  lateness: TimingHistogram
+  processing: TimingHistogram
+  commandIntervals: TimingHistogram
+  missedDeadlines: number
+  lateTicks: number
+  gapViolations: number
+  watchdogTrips: number
 }
 
 export type CommandOutcome = 'accepted' | 'rejected' | 'pending' | 'unavailable'
