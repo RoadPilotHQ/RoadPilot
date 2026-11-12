@@ -191,6 +191,18 @@ pub(crate) mod test_support {
         f
     }
 
+    /// A usable assessment of epoch 1, session 7 at 3 m/s: slow enough to arm under the
+    /// default speed cap.
+    pub fn slow_usable_assessment() -> crate::control::freshness::Assessment {
+        let mut frame = running_frame(7, 10, 1_000_000);
+        frame.truck.as_mut().unwrap().speed_mps = Some(3.0);
+        crate::control::freshness::Assessment::Usable(crate::control::freshness::Sample {
+            state: VehicleState::from_frame(&frame).unwrap(),
+            epoch: 1,
+            age: std::time::Duration::from_millis(5),
+        })
+    }
+
     pub fn paused_frame(session: u64, sequence: u64, simulation_time_us: u64) -> TelemetryFrame {
         let mut f = TelemetryFrame::new(sequence, GameId::Ets2, PluginState::Paused);
         f.session = Some(session);
