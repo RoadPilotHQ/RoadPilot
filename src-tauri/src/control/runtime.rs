@@ -24,7 +24,8 @@
 use super::log::{ControlLog, DecisionEvent};
 use super::sender::{ControlCore, CoreConfig, RequestSource, ShutdownReport};
 use super::sink::DryRunSink;
-use super::supervisor::Command;
+use super::status::ControlStatus;
+use super::supervisor::{Command, Response, State};
 use super::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, WATCHDOG_PERIOD, Watchdog};
 use crate::telemetry::engine::FrameFeed;
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
@@ -32,7 +33,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant as TokioInstant, sleep, sleep_until};
 
 type FrameReceiver = watch::Receiver<Option<ReceivedTelemetryFrame>>;
@@ -56,18 +57,66 @@ fn now() -> Instant {
     TokioInstant::now().into_std()
 }
 
+/// What the control task answered to an operator command.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CommandReply {
+    pub response: Response,
+    /// Supervisor state after the whole batch the command was part of.
+    pub state: State,
+}
+
+struct Request {
+    command: Command,
+    reply: Option<oneshot::Sender<CommandReply>>,
+}
+
 /// Operator access to the running control tasks. Cheap to clone.
 #[derive(Clone)]
 pub struct ControlHandle {
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::UnboundedSender<Request>,
     shutdown: Arc<watch::Sender<bool>>,
     log: ControlLog,
+    status: watch::Receiver<ControlStatus>,
+    heartbeat: Heartbeat,
 }
 
 impl ControlHandle {
-    /// Queues an operator command. `false` if the control task is gone.
+    /// Queues an operator command without waiting for the answer. `false` if the control
+    /// task is gone.
     pub fn send(&self, command: Command) -> bool {
-        self.commands.send(command).is_ok()
+        self.commands
+            .send(Request {
+                command,
+                reply: None,
+            })
+            .is_ok()
+    }
+
+    /// Queues an operator command; the receiver resolves with the answer once the control
+    /// task has processed it. `None` if the control task is gone.
+    pub fn request(&self, command: Command) -> Option<oneshot::Receiver<CommandReply>> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Request {
+                command,
+                reply: Some(tx),
+            })
+            .ok()?;
+        Some(rx)
+    }
+
+    /// The newest status the control task published, with the loop silence measured now,
+    /// independently of the loop, so a stalled loop is visible.
+    pub fn status(&self) -> ControlStatus {
+        let mut status = self.status.borrow().clone();
+        status.watchdog.loop_silent_ms =
+            u64::try_from(self.heartbeat.silent_for(now()).as_millis()).unwrap_or(u64::MAX);
+        status
+    }
+
+    /// Notifies whenever the control task publishes a new status. Closed once it has stopped.
+    pub fn status_changes(&self) -> watch::Receiver<ControlStatus> {
+        self.status.clone()
     }
 
     /// Asks the sender task to disarm and stop, and the watchdog to stop.
@@ -100,17 +149,26 @@ pub fn build(
     let heartbeat = Heartbeat::new(start);
     let watchdog = Watchdog::new(heartbeat.clone(), SUPERVISOR_TIMEOUT);
     let trip = watchdog.flag();
-    let core = ControlCore::dry_run(config, source, log.clone(), heartbeat, trip, start);
+    let core = ControlCore::dry_run(config, source, log.clone(), heartbeat.clone(), trip, start);
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (status_tx, status_rx) = watch::channel(core.status(start));
     ControlRuntime {
         handle: ControlHandle {
             commands: command_tx,
             shutdown: Arc::new(shutdown_tx),
             log: log.clone(),
+            status: status_rx,
+            heartbeat,
         },
-        sender_task: Box::pin(run_sender(core, feed, command_rx, shutdown_rx.clone())),
+        sender_task: Box::pin(run_sender(
+            core,
+            feed,
+            command_rx,
+            shutdown_rx.clone(),
+            status_tx,
+        )),
         watchdog_task: Box::pin(run_watchdog(watchdog, log, shutdown_rx)),
     }
 }
@@ -124,30 +182,43 @@ fn observe(core: &mut ControlCore<DryRunSink>, receiver: &mut FrameReceiver) {
     }
 }
 
-/// Processes queued operator commands, any disarm first.
+/// Processes everything queued at once, any disarm first, publishes the resulting status, and
+/// only then answers each request, so a requester never sees a status older than its answer.
 fn handle_commands(
     core: &mut ControlCore<DryRunSink>,
-    first: Option<Command>,
-    queue: &mut mpsc::UnboundedReceiver<Command>,
+    first: Request,
+    queue: &mut mpsc::UnboundedReceiver<Request>,
+    status: &watch::Sender<ControlStatus>,
 ) {
-    let mut batch: Vec<Command> = first.into_iter().collect();
-    while let Ok(command) = queue.try_recv() {
-        batch.push(command);
+    let mut batch = vec![first];
+    while let Ok(request) = queue.try_recv() {
+        batch.push(request);
     }
     let at = now();
-    for command in batch.iter().filter(|c| **c == Command::Disarm) {
-        core.on_command(*command, at);
+    let (disarms, others): (Vec<Request>, Vec<Request>) = batch
+        .into_iter()
+        .partition(|r| r.command == Command::Disarm);
+    let mut answered = Vec::with_capacity(disarms.len() + others.len());
+    for request in disarms.into_iter().chain(others) {
+        let response = core.on_command(request.command, at);
+        answered.push((request.reply, response));
     }
-    for command in batch.iter().filter(|c| **c != Command::Disarm) {
-        core.on_command(*command, at);
+    let state = core.state();
+    status.send_replace(core.status(now()));
+    for (reply, response) in answered {
+        if let Some(reply) = reply {
+            // The requester may have given up waiting; that is not an error.
+            let _ = reply.send(CommandReply { response, state });
+        }
     }
 }
 
 async fn run_sender(
     mut core: ControlCore<DryRunSink>,
     feed: impl FrameSource,
-    mut commands: mpsc::UnboundedReceiver<Command>,
+    mut commands: mpsc::UnboundedReceiver<Request>,
     mut shutdown: watch::Receiver<bool>,
+    status: watch::Sender<ControlStatus>,
 ) -> ShutdownReport {
     let mut receiver = feed.receiver();
     let mut open = receiver.has_changed().is_ok();
@@ -163,9 +234,9 @@ async fn run_sender(
             biased;
             // Shutdown, or the handle was dropped: either way, disarm and stop.
             _ = shutdown.changed() => break,
-            command = commands.recv() => {
-                if let Some(command) = command {
-                    handle_commands(&mut core, Some(command), &mut commands);
+            request = commands.recv() => {
+                if let Some(request) = request {
+                    handle_commands(&mut core, request, &mut commands, &status);
                 }
             }
             () = sleep_until(deadline) => {
@@ -180,6 +251,7 @@ async fn run_sender(
                     }
                 }
                 core.tick(at);
+                status.send_replace(core.status(at));
             }
             changed = receiver.changed(), if open => {
                 if changed.is_ok() {
@@ -191,7 +263,11 @@ async fn run_sender(
             }
         }
     }
-    core.shutdown(now())
+    let at = now();
+    let report = core.shutdown(at);
+    // The final status (disarmed) is published before the task ends; the channel then closes.
+    status.send_replace(core.status(at));
+    report
 }
 
 async fn run_watchdog(

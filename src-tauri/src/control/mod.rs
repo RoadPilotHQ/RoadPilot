@@ -45,6 +45,7 @@ pub mod runtime;
 pub mod schedule;
 pub mod sender;
 pub mod sink;
+pub mod status;
 pub mod supervisor;
 pub mod vehicle;
 pub mod watchdog;
@@ -64,6 +65,7 @@ mod dry_run_proof {
         ("schedule", include_str!("schedule.rs")),
         ("sender", include_str!("sender.rs")),
         ("sink", include_str!("sink.rs")),
+        ("status", include_str!("status.rs")),
         ("supervisor", include_str!("supervisor.rs")),
         ("vehicle", include_str!("vehicle.rs")),
         ("watchdog", include_str!("watchdog.rs")),
@@ -121,7 +123,7 @@ mod dry_run_proof {
             .filter_map(|(_, line)| line.strip_prefix("pub mod "))
             .filter_map(|rest| rest.strip_suffix(';'))
             .collect();
-        assert!(declared.len() >= 11, "{declared:?}");
+        assert!(declared.len() >= 12, "{declared:?}");
         for module in &declared {
             assert!(
                 SOURCES.iter().any(|(name, _)| name == module),

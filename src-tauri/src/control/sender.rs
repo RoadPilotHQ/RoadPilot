@@ -36,11 +36,14 @@ use super::log::{
 use super::protocol::{WireMessage, encode};
 use super::schedule::{Scheduler, Timing, Verdict};
 use super::sink::{Delivery, DryRunSink, MessageSink, OperatingMode};
-use super::supervisor::{Command, Response, SafetyEvent, Supervisor, SupervisorConfig, Transition};
+use super::status::{ControlStatus, RECENT_DECISIONS, StatusInput};
+use super::supervisor::{
+    Command, Reason, Response, SafetyEvent, Supervisor, SupervisorConfig, Transition,
+};
 use super::vehicle::VehicleState;
 use super::watchdog::{Heartbeat, TripFlag};
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What the controller wants this tick. In this phase no controller exists; the runtime uses
 /// [`NeutralRequests`].
@@ -97,6 +100,19 @@ pub struct ShutdownReport {
     pub disarm: DisarmStatus,
 }
 
+/// What a tick did with its output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TickOutcome {
+    /// Not Active and no disarm owed: nothing to do.
+    Idle,
+    /// A command was generated, bounded and encoded (and, in dry-run, not transmitted).
+    CommandEncoded,
+    /// The owed disarm was encoded.
+    DisarmEncoded,
+    /// Active, but no command could be produced.
+    Withheld(Withheld),
+}
+
 pub struct ControlCore<S: MessageSink> {
     monitor: FreshnessMonitor,
     supervisor: Supervisor,
@@ -114,6 +130,14 @@ pub struct ControlCore<S: MessageSink> {
     feed_lost: bool,
     stats: CoreStats,
     last_now: Instant,
+    // What the status display shows. Recorded where it happens; never used for decisions.
+    start: Instant,
+    last_tick: Option<(Timing, TickOutcome, Instant)>,
+    last_transition: Option<(Transition, Instant)>,
+    last_safety_event: Option<(SafetyEvent, Instant)>,
+    last_message: Option<(MessageRecord, Instant)>,
+    watchdog_trips: u64,
+    last_watchdog_trip: Option<(Duration, Instant)>,
 }
 
 impl ControlCore<DryRunSink> {
@@ -156,6 +180,13 @@ impl<S: MessageSink> ControlCore<S> {
             feed_lost: false,
             stats: CoreStats::default(),
             last_now: start,
+            start,
+            last_tick: None,
+            last_transition: None,
+            last_safety_event: None,
+            last_message: None,
+            watchdog_trips: 0,
+            last_watchdog_trip: None,
         }
     }
 
@@ -187,9 +218,38 @@ impl<S: MessageSink> ControlCore<S> {
         self.scheduler.next_deadline()
     }
 
-    fn log_transition(&self, now: Instant, transition: Transition) {
+    /// A read-only status snapshot for display. Never used for decisions.
+    pub fn status(&self, now: Instant) -> ControlStatus {
+        super::status::build(&StatusInput {
+            now,
+            start: self.start,
+            mode: self.sink.mode(),
+            state: self.supervisor.state(),
+            permits_output: self.supervisor.permits_output(),
+            assessment: self.monitor.assess(now),
+            epoch: self.monitor.epoch(),
+            frame_age: self.monitor.last_frame_age(now),
+            feed_lost: self.feed_lost,
+            last_transition: self.last_transition,
+            last_safety_event: self.last_safety_event,
+            last_tick: self.last_tick,
+            last_message: self.last_message,
+            watchdog_pending: self.trip.is_tripped(),
+            watchdog_trips: self.watchdog_trips,
+            last_watchdog_trip: self.last_watchdog_trip,
+            loop_silent: self.heartbeat.silent_for(now),
+            stats: self.stats,
+            recent_decisions: self.log.recent_decisions(RECENT_DECISIONS),
+        })
+    }
+
+    fn log_transition(&mut self, now: Instant, transition: Transition) {
         self.log
             .decision(now, DecisionEvent::Transition(transition));
+        self.last_transition = Some((transition, now));
+        if let Reason::Safety(event) = transition.reason {
+            self.last_safety_event = Some((event, now));
+        }
     }
 
     fn report(&mut self, now: Instant, event: SafetyEvent) -> Option<Transition> {
@@ -219,17 +279,16 @@ impl<S: MessageSink> ControlCore<S> {
                 }),
             ),
         };
-        self.log.message(
-            now,
-            MessageRecord {
-                kind,
-                bytes,
-                requested,
-                bounded,
-                adjustments,
-                delivery,
-            },
-        );
+        let record = MessageRecord {
+            kind,
+            bytes,
+            requested,
+            bounded,
+            adjustments,
+            delivery,
+        };
+        self.log.message(now, record);
+        self.last_message = Some((record, now));
         delivery
     }
 
@@ -318,6 +377,8 @@ impl<S: MessageSink> ControlCore<S> {
 
         // 1. The independent watchdog saw this loop silent.
         if let Some(silent_for) = self.trip.take() {
+            self.watchdog_trips += 1;
+            self.last_watchdog_trip = Some((silent_for, now));
             let t = self.report(now, SafetyEvent::SupervisorTimeout { silent_for });
             transition = transition.or(t);
         }
@@ -377,6 +438,13 @@ impl<S: MessageSink> ControlCore<S> {
         } else {
             self.flush_disarm(now).is_some()
         };
+        let outcome = match (command_encoded, withheld, disarm_encoded) {
+            (true, _, _) => TickOutcome::CommandEncoded,
+            (false, Some(reason), _) => TickOutcome::Withheld(reason),
+            (false, None, true) => TickOutcome::DisarmEncoded,
+            (false, None, false) => TickOutcome::Idle,
+        };
+        self.last_tick = Some((timing, outcome, now));
         TickReport {
             timing,
             transition,

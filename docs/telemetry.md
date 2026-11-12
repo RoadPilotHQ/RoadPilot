@@ -51,7 +51,7 @@ An older schema 1 plugin keeps working: RoadPilot then shows speed, RPM and gear
 
 This telemetry integration is read-only and has no control path. Control uses a different part of the SCS SDK, the Input SDK, in a different plugin from [RoadPilot-SDK](https://github.com/RoadPilotHQ/RoadPilot-SDK) (`roadpilot-input.dll`, pipe `\\.\pipe\roadpilot-input-v1`). That plugin registers a generic input device with throttle, brake and steering axes; the user binds them manually in the game. The protocol, limits and safety rules are specified only in its [PROTOCOL.md](https://github.com/RoadPilotHQ/RoadPilot-SDK/blob/main/docs/PROTOCOL.md).
 
-State in this application: **no component sends commands to that pipe and there is no steering activation UI.** The future sender must refresh commands at least every 50 ms, independently of the 10 Hz telemetry engine described below; that rate is a requirement of the input protocol, not an existing capability. Steering range, sign and interaction with manual controls are unverified in ATS and ETS2. The steering values in the telemetry (`steeringInput`, `steeringEffective`) are readings of the game state, not commands.
+State in this application: **no component sends commands to that pipe.** The control pipeline ([control.md](control.md)) encodes the protocol in dry run every 40 ms, independently of the 10 Hz telemetry engine described below, reading the raw frames through a second receiver of the engine's frame channel, and discards every message; the pipe is never opened. Steering range, sign and interaction with manual controls are unverified in ATS and ETS2. The steering values in the telemetry (`steeringInput`, `steeringEffective`) are readings of the game state, not commands.
 
 ## Data flow
 

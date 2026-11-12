@@ -236,6 +236,12 @@ impl FreshnessMonitor {
         self.config
     }
 
+    /// Local time since the newest accepted frame was received; `None` before the first one.
+    pub fn last_frame_age(&self, now: Instant) -> Option<Duration> {
+        self.track
+            .map(|t| now.saturating_duration_since(t.received_at))
+    }
+
     fn bump(&mut self, cause: Discontinuity) {
         self.epoch = self.epoch.saturating_add(1);
         self.last_discontinuity = Some(cause);

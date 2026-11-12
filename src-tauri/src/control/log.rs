@@ -219,6 +219,24 @@ impl ControlLog {
         inner.messages.push(entry);
     }
 
+    /// The newest `count` decision records, oldest first.
+    pub fn recent_decisions(&self, count: usize) -> Vec<Entry<DecisionEvent>> {
+        let inner = self.lock();
+        let skip = inner.decisions.entries.len().saturating_sub(count);
+        inner.decisions.entries.iter().skip(skip).copied().collect()
+    }
+
+    /// Kind of the newest encoded message, if any. A ring always keeps its newest record, so
+    /// this is reliable even after older messages were dropped.
+    pub fn last_message_kind(&self) -> Option<MessageKind> {
+        self.lock().messages.entries.back().map(|e| e.event.kind)
+    }
+
+    /// True if a command was encoded and no disarm followed it.
+    pub fn owes_disarm(&self) -> bool {
+        self.last_message_kind() == Some(MessageKind::Command)
+    }
+
     pub fn snapshot(&self) -> LogSnapshot {
         let inner = self.lock();
         LogSnapshot {
