@@ -76,9 +76,17 @@ Automated tests cover the protocol, conversions, connection states and the dashb
 | 4.1 | Telemetry capability audit ([report](docs/phase-4.1-telemetry-audit.md)) | Completed |
 | 4.2 | Wheel geometry: plugin and protocol fields, calculated wheelbase in this application | Completed |
 | 4.3 | Steering input support: steering axis and protocol v2 in [RoadPilot-SDK](https://github.com/RoadPilotHQ/RoadPilot-SDK) | Completed |
-| 4.4 | Control foundation in dry run: vehicle state and freshness, safety supervisor, bounded commands and protocol encoder, dry-run sender, app integration and Control section ([docs/control.md](docs/control.md)) | In progress (steps 1–6 of 7 done) |
+| 4.4 | Control foundation in dry run: vehicle state and freshness, safety supervisor, bounded commands and protocol encoder, dry-run sender, app integration and Control section ([docs/control.md](docs/control.md)) | Completed (dry run only; see verification status and outstanding risks) |
+| 4.5 | Not started | Planned |
 
-Implemented: read-only telemetry (schema 2), wheel geometry and wheelbase, the visualization bridge (not live-verified), and, in RoadPilot-SDK, the input plugin with throttle, brake and steering axes. Phase 4.4 (dry run): telemetry freshness checks, the safety supervisor, bounded commands, the protocol v2 encoder, the dry-run sender with watchdog and bounded log, and the Control section. Not implemented: live transmission to the input plugin, any steering or speed controller, autonomous driving. Phases 4.2 and 4.3 are automatically tested only; neither wheel geometry nor the steering axis has been verified in ATS or ETS2.
+Verification levels:
+
+- **Implemented and covered by automated tests:** read-only telemetry (schema 2), wheel geometry and wheelbase, the visualization bridge, and the Phase 4.4 control pipeline (freshness checks, safety supervisor, bounded commands, protocol v2 encoder, dry-run sender with watchdog and bounded log, application integration, Control section). In RoadPilot-SDK: the input plugin with throttle, brake and steering axes.
+- **Verified in the running desktop application:** the Control section renders and works through the real command path, and closing the window runs the orderly control shutdown (details in [docs/control.md](docs/control.md#verification-status)).
+- **Verified in ATS or ETS2 gameplay:** only the schema 1 telemetry (speed, RPM, gear) in ATS. Schema 2 telemetry, wheel geometry, the steering axis, the input plugin and manual override are not verified in either game.
+- **Not implemented:** live transmission to the input plugin, any steering or speed controller, autonomous driving.
+
+Outstanding risks, including the measured Windows timer granularity that must be resolved before any live transmission, are listed in [docs/control.md](docs/control.md#outstanding-risks).
 
 ## Contributing
 

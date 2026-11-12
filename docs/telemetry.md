@@ -185,18 +185,19 @@ Route Advisor values as provided by the game: `distanceKm` (from metres), `etaMi
 
 Implementation and verification are tracked separately. "Automated" means unit and integration tests with mocked data, a fake SCS host and the real pipe — not a running game.
 
-| Area                                                             | Implemented              | Automated tests | ATS live              | ETS2 live      |
-| ---------------------------------------------------------------- | ------------------------ | --------------- | --------------------- | -------------- |
-| Connection, pause/resume, game exit, reconnect (schema 1 plugin) | Yes                      | Yes             | **Verified** (1.62.x) | Not yet tested |
-| Speed, RPM, gear (schema 1 plugin)                               | Yes                      | Yes             | **Verified** (1.62.x) | Not yet tested |
-| Schema 2 plugin: connection, persistent pipe, reconnect          | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Fuel, engine, temperatures, cruise control                       | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Dynamics and inputs                                              | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Position and orientation                                         | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Job, deadline, delivered/cancelled                               | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Navigation (distance, ETA, speed limit)                          | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Game time                                                        | Yes                      | Yes             | Not yet tested        | Not yet tested |
-| Weather, rain, traffic                                           | Not available in the SDK | —               | —                     | —              |
+| Area                                                                  | Implemented              | Automated tests | ATS live              | ETS2 live      |
+| --------------------------------------------------------------------- | ------------------------ | --------------- | --------------------- | -------------- |
+| Connection, pause/resume, game exit, reconnect (schema 1 plugin)      | Yes                      | Yes             | **Verified** (1.62.x) | Not yet tested |
+| Speed, RPM, gear (schema 1 plugin)                                    | Yes                      | Yes             | **Verified** (1.62.x) | Not yet tested |
+| Schema 2 plugin: connection, persistent pipe, reconnect               | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Fuel, engine, temperatures, cruise control                            | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Dynamics and inputs                                                   | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Position and orientation                                              | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Job, deadline, delivered/cancelled                                    | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Navigation (distance, ETA, speed limit)                               | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Game time                                                             | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Raw frames to the dry-run control pipeline ([control.md](control.md)) | Yes                      | Yes             | Not yet tested        | Not yet tested |
+| Weather, rain, traffic                                                | Not available in the SDK | —               | —                     | —              |
 
 The complete path from pipe to dashboard was additionally exercised in the running desktop app without a game, by writing the shared schema 2 fixture frame into the real pipe over one persistent connection.
 
