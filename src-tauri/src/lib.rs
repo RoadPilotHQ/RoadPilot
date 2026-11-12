@@ -1,3 +1,4 @@
+pub mod control;
 mod telemetry;
 
 use std::sync::{Arc, Mutex};
