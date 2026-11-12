@@ -27,9 +27,53 @@ pub trait UpdateSink: Send + 'static {
 /// Latest update, readable by the `telemetry_snapshot` command.
 pub type SharedUpdate = Arc<Mutex<TelemetryUpdate>>;
 
-pub async fn run(sink: impl UpdateSink, shared: SharedUpdate) {
+type FrameReceiver = watch::Receiver<Option<ReceivedTelemetryFrame>>;
+
+/// Gives other consumers a receiver on the engine's own frame channel, so that control can read
+/// the raw frames at full rate without a second pipe server (the pipe allows one reader).
+///
+/// The engine creates a new channel whenever it restarts the pipe server after a failure; it
+/// publishes the new receiver here, so a consumer that finds its receiver closed asks for the
+/// current one with [`FrameFeed::current`]. Until the engine has started, the feed holds a
+/// closed receiver.
+#[derive(Clone, Debug)]
+pub struct FrameFeed {
+    current: Arc<Mutex<FrameReceiver>>,
+}
+
+impl FrameFeed {
+    pub fn new() -> Self {
+        let (_sender, receiver) = watch::channel(None);
+        Self {
+            current: Arc::new(Mutex::new(receiver)),
+        }
+    }
+
+    /// A new receiver on the engine's current frame channel.
+    pub fn current(&self) -> FrameReceiver {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn publish(&self, receiver: FrameReceiver) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = receiver;
+    }
+}
+
+impl Default for FrameFeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub async fn run(sink: impl UpdateSink, shared: SharedUpdate, feed: FrameFeed) {
     let mut tracker = ConnectionTracker::default();
-    let mut endpoint = Endpoint::start();
+    let mut endpoint = Endpoint::start(feed);
     let mut process = GameProcess::Unknown;
     let mut last_scan: Option<Instant> = None;
     let mut last_sent: Option<TelemetryUpdate> = None;
@@ -80,6 +124,8 @@ pub async fn run(sink: impl UpdateSink, shared: SharedUpdate) {
 /// for example while another telemetry reader holds the pipe.
 struct Endpoint {
     receiver: watch::Receiver<Option<ReceivedTelemetryFrame>>,
+    /// Shares every channel this endpoint creates with the control side.
+    feed: FrameFeed,
     task: Option<tauri::async_runtime::JoinHandle<std::io::Result<()>>>,
     error: Option<String>,
     failed_at: Option<Instant>,
@@ -89,11 +135,13 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    fn start() -> Self {
+    fn start(feed: FrameFeed) -> Self {
         let (sender, receiver) = watch::channel(None);
+        feed.publish(receiver.clone());
         let task = spawn_server(sender);
         Self {
             receiver,
+            feed,
             task,
             error: None,
             failed_at: None,
@@ -120,6 +168,7 @@ impl Endpoint {
                 .is_none_or(|t| now.duration_since(t) >= ENDPOINT_RETRY)
         {
             let (sender, receiver) = watch::channel(None);
+            self.feed.publish(receiver.clone());
             self.receiver = receiver;
             self.task = spawn_server(sender);
             self.started_at = now;

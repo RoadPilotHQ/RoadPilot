@@ -1,9 +1,12 @@
 pub mod control;
 mod telemetry;
 
+use control::runtime::{self as control_runtime, ControlHandle};
+use control::sender::{CoreConfig, NeutralRequests, ShutdownReport};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent};
-use telemetry::engine::{self, SharedUpdate, UpdateSink};
+use telemetry::engine::{self, FrameFeed, SharedUpdate, UpdateSink};
 use telemetry::model::TelemetryUpdate;
 use telemetry::visualization_stream::{self, UpdateBroadcaster};
 
@@ -16,6 +19,41 @@ impl UpdateSink for TauriSink {
     fn publish(&self, update: &TelemetryUpdate) {
         let _ = self.0.emit(TELEMETRY_EVENT, update);
         let _ = self.1.send(update.clone());
+    }
+}
+
+/// How long application exit waits for the control task to disarm before aborting it. Aborting
+/// still encodes the owed disarm, because dropping the control core does.
+const CONTROL_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// The dry-run control tasks. Nothing in the application can arm them yet: there is no app
+/// command and no UI, and the sink discards every message.
+struct ControlState {
+    handle: ControlHandle,
+    sender: Mutex<Option<tauri::async_runtime::JoinHandle<ShutdownReport>>>,
+    watchdog: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+impl ControlState {
+    /// Disarms and stops control, waiting a bounded time for the orderly path.
+    fn shutdown(&self) {
+        self.handle.shutdown();
+        if let Ok(mut slot) = self.sender.lock()
+            && let Some(mut task) = slot.take()
+        {
+            let finished = tauri::async_runtime::block_on(tokio::time::timeout(
+                CONTROL_SHUTDOWN_GRACE,
+                &mut task,
+            ));
+            if finished.is_err() {
+                task.abort();
+            }
+        }
+        if let Ok(mut slot) = self.watchdog.lock()
+            && let Some(task) = slot.take()
+        {
+            task.abort();
+        }
     }
 }
 
@@ -43,10 +81,21 @@ pub fn run() {
             let visualization = visualization_stream::broadcaster();
             let visualization_task =
                 visualization_stream::start(visualization.clone(), latest.clone());
+            // One pipe server, owned by the engine. Control reads a second receiver of the same
+            // frame channel through the feed.
+            let feed = FrameFeed::new();
             let task = tauri::async_runtime::spawn(engine::run(
                 TauriSink(app.handle().clone(), visualization),
                 latest.clone(),
+                feed.clone(),
             ));
+            let control =
+                control_runtime::build(feed, Box::new(NeutralRequests), CoreConfig::default());
+            app.manage(ControlState {
+                handle: control.handle,
+                sender: Mutex::new(Some(tauri::async_runtime::spawn(control.sender_task))),
+                watchdog: Mutex::new(Some(tauri::async_runtime::spawn(control.watchdog_task))),
+            });
             app.manage(TelemetryState {
                 latest,
                 task: Mutex::new(Some(task)),
@@ -59,6 +108,10 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                // Control first: disarm before anything else goes away.
+                if let Some(control) = app.try_state::<ControlState>() {
+                    control.shutdown();
+                }
                 if let Some(state) = app.try_state::<TelemetryState>() {
                     if let Ok(mut task) = state.task.lock()
                         && let Some(task) = task.take()

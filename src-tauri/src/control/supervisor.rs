@@ -138,6 +138,17 @@ pub enum SafetyEvent {
         speed_mps: f32,
         cap_mps: f32,
     },
+    /// The independent watchdog saw no supervisor update for too long.
+    SupervisorTimeout {
+        silent_for: Duration,
+    },
+    /// The sender's tick interval exceeded what the input plugin's timeouts tolerate.
+    SenderTiming {
+        gap: Duration,
+    },
+    /// The controller produced a request that cannot be turned into a command (NaN or
+    /// infinity). A controller error is a fault, never something to retry silently.
+    InvalidControlRequest,
 }
 
 /// Why a transition happened.
@@ -147,6 +158,8 @@ pub enum Reason {
     ManualActivate,
     ManualDisarm,
     FaultReset,
+    /// The application is shutting down.
+    Shutdown,
     Safety(SafetyEvent),
 }
 
@@ -294,6 +307,29 @@ impl Supervisor {
     /// Returns the transition it caused, if any. Disabled and Fault never change here.
     pub fn update(&mut self, assessment: &Assessment) -> Option<Transition> {
         self.evaluate(assessment).map(|(t, _)| t)
+    }
+
+    /// Reports a safety event detected outside the vehicle assessment (watchdog, sender
+    /// timing, controller error). Handled exactly like an assessment-based event: Armed is
+    /// disarmed to Disabled, Active ends in Fault, Disabled and Fault do not change.
+    pub fn report(&mut self, event: SafetyEvent) -> Option<Transition> {
+        let to = match self.state {
+            State::Armed => State::Disabled,
+            State::Active => State::Fault,
+            State::Disabled | State::Fault => return None,
+        };
+        Some(self.transition(to, Reason::Safety(event)))
+    }
+
+    /// Orderly shutdown: Armed and Active return to Disabled with [`Reason::Shutdown`]. A
+    /// fault stays a fault; there is nothing left to disarm.
+    pub fn shutdown(&mut self) -> Option<Transition> {
+        match self.state {
+            State::Armed | State::Active => {
+                Some(self.transition(State::Disabled, Reason::Shutdown))
+            }
+            State::Disabled | State::Fault => None,
+        }
     }
 
     fn evaluate(&mut self, assessment: &Assessment) -> Option<(Transition, SafetyEvent)> {
@@ -1058,5 +1094,92 @@ mod tests {
         assert!(!s.permits_output());
         s.command(Command::ResetFault, &ok());
         assert!(!s.permits_output());
+    }
+
+    fn external_events() -> Vec<SafetyEvent> {
+        vec![
+            SafetyEvent::SupervisorTimeout {
+                silent_for: ms(250),
+            },
+            SafetyEvent::SenderTiming { gap: ms(400) },
+            SafetyEvent::InvalidControlRequest,
+        ]
+    }
+
+    #[test]
+    fn external_safety_events_disarm_armed_and_fault_active() {
+        for event in external_events() {
+            let mut s = armed();
+            let t = s.report(event).unwrap();
+            assert_eq!(
+                t,
+                Transition {
+                    from: State::Armed,
+                    to: State::Disabled,
+                    reason: Reason::Safety(event)
+                }
+            );
+            let mut s = active();
+            let t = s.report(event).unwrap();
+            assert_eq!(
+                t,
+                Transition {
+                    from: State::Active,
+                    to: State::Fault,
+                    reason: Reason::Safety(event)
+                }
+            );
+            assert!(!s.permits_output());
+        }
+    }
+
+    #[test]
+    fn external_safety_events_change_nothing_when_disabled_or_faulted() {
+        for event in external_events() {
+            let mut s = Supervisor::default();
+            assert_eq!(s.report(event), None);
+            assert_eq!(s.state(), State::Disabled);
+            let mut s = active();
+            s.update(&Assessment::Unusable(Unusable::Paused));
+            assert_eq!(s.report(event), None);
+            assert_eq!(s.state(), State::Fault);
+        }
+    }
+
+    #[test]
+    fn an_external_event_cannot_be_overridden_by_a_later_activation() {
+        let mut s = armed();
+        s.report(SafetyEvent::SenderTiming { gap: ms(400) });
+        let r = s.command(Command::Activate, &ok());
+        assert_eq!(r.result, Err(Rejection::NotArmed));
+        assert!(!s.permits_output());
+    }
+
+    #[test]
+    fn shutdown_disarms_armed_and_active_with_its_own_reason() {
+        for mut s in [armed(), active()] {
+            let from = s.state();
+            let t = s.shutdown().unwrap();
+            assert_eq!(
+                t,
+                Transition {
+                    from,
+                    to: State::Disabled,
+                    reason: Reason::Shutdown
+                }
+            );
+            assert!(!s.permits_output());
+            assert_eq!(s.shutdown(), None, "idempotent");
+        }
+        let mut s = Supervisor::default();
+        assert_eq!(s.shutdown(), None);
+        let mut s = active();
+        s.update(&Assessment::Unusable(Unusable::Paused));
+        assert_eq!(s.shutdown(), None);
+        assert_eq!(
+            s.state(),
+            State::Fault,
+            "a fault is not cleared by shutdown"
+        );
     }
 }

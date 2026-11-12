@@ -191,6 +191,13 @@ pub(crate) mod test_support {
         f
     }
 
+    /// A running frame at 3 m/s: slow enough to arm under the default speed cap.
+    pub fn slow_frame(session: u64, sequence: u64, simulation_time_us: u64) -> TelemetryFrame {
+        let mut f = running_frame(session, sequence, simulation_time_us);
+        f.truck.as_mut().unwrap().speed_mps = Some(3.0);
+        f
+    }
+
     /// A usable assessment of epoch 1, session 7 at 3 m/s: slow enough to arm under the
     /// default speed cap.
     pub fn slow_usable_assessment() -> crate::control::freshness::Assessment {
