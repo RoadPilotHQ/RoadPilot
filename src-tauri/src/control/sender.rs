@@ -773,7 +773,7 @@ mod tests {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: self.at(self.now_ms),
-                received_qpc: None,
+                received_qpc: crate::control::vehicle::test_support::RECEIVED_QPC,
             };
             self.core.on_frame(&received, self.at(self.now_ms));
         }
@@ -1154,7 +1154,7 @@ mod tests {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: rig.at(rig.now_ms),
-                received_qpc: None,
+                received_qpc: crate::control::vehicle::test_support::RECEIVED_QPC,
             };
             rig.core.on_frame(&received, rig.at(rig.now_ms));
         }
@@ -1531,7 +1531,7 @@ mod tests {
             frame,
             dropped_fields: Vec::new(),
             received_at: rig.at(120),
-            received_qpc: None,
+            received_qpc: crate::control::vehicle::test_support::RECEIVED_QPC,
         };
         for _ in 0..10 {
             rig.core.on_frame(&received, rig.at(120));

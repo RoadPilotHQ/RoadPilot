@@ -23,6 +23,7 @@ use super::supervisor::{Command, Reason, Rejection, SafetyEvent, State, Transiti
 use super::timing::{Histogram, TimerKind, TimingStats};
 use super::vehicle::InvalidFrame;
 use roadpilot_telemetry_client::GameId;
+use roadpilot_telemetry_client::qpc::{Stamp, TimingError};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
@@ -137,6 +138,30 @@ impl From<Command> for CommandCode {
 }
 
 /// A frame rejection reason as a stable code, e.g. `missingField:truck.speedMps`.
+fn stamp_code(stamp: Stamp) -> &'static str {
+    match stamp {
+        Stamp::Produced => "produced",
+        Stamp::Sent => "sent",
+        Stamp::Received => "received",
+        Stamp::PluginFrequency => "pluginFrequency",
+        Stamp::LocalFrequency => "localFrequency",
+        Stamp::Now => "now",
+    }
+}
+
+fn timing_error_code(error: TimingError) -> String {
+    match error {
+        TimingError::Missing(stamp) => format!("missing:{}", stamp_code(stamp)),
+        TimingError::FrequencyMismatch { plugin, local } => {
+            format!("frequencyMismatch:{plugin}/{local}")
+        }
+        TimingError::NotMonotonic { earlier, later } => {
+            format!("notMonotonic:{}>{}", stamp_code(earlier), stamp_code(later))
+        }
+        TimingError::Implausible { span } => format!("implausible:{}ms", span.as_millis()),
+    }
+}
+
 pub fn invalid_frame_code(reason: InvalidFrame) -> String {
     match reason {
         InvalidFrame::UnsupportedSchema(v) => format!("unsupportedSchema:{v}"),
@@ -145,6 +170,8 @@ pub fn invalid_frame_code(reason: InvalidFrame) -> String {
         InvalidFrame::NotRunning => "notRunning".into(),
         InvalidFrame::MissingField(path) => format!("missingField:{path}"),
         InvalidFrame::NonFiniteValue(path) => format!("nonFiniteValue:{path}"),
+        InvalidFrame::ClockMissing(stamp) => format!("clockMissing:{}", stamp_code(stamp)),
+        InvalidFrame::ClockInvalid(error) => format!("clockInvalid:{}", timing_error_code(error)),
     }
 }
 

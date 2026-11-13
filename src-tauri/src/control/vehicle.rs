@@ -9,6 +9,7 @@
 //! metres, metres per second, rotations in turns, vehicle space X right / Y up / Z backwards,
 //! world space X east / Y up / Z south. Conversions belong to the controller that needs them.
 
+use roadpilot_telemetry_client::qpc::{Stamp, TimingError};
 use roadpilot_telemetry_client::{
     CURRENT_SCHEMA_VERSION, GameId, Placement, PluginState, TelemetryFrame,
 };
@@ -46,6 +47,12 @@ pub enum InvalidFrame {
     MissingField(&'static str),
     /// A required value is NaN or infinite (wire path).
     NonFiniteValue(&'static str),
+    /// The frame carries no valid QPC timing (an older plugin, a stamp removed as invalid, or
+    /// no clock in this process): its absolute age is unknown, so it is never fresh.
+    ClockMissing(Stamp),
+    /// The QPC stamps do not form one plausible timeline (backwards, a different frequency,
+    /// an implausible span): the age is unknown.
+    ClockInvalid(TimingError),
 }
 
 impl FrameIdentity {
@@ -153,6 +160,20 @@ pub(crate) mod test_support {
     use super::*;
     use roadpilot_telemetry_client::{Inputs, Motion, TruckState, Vec3};
 
+    /// The QPC value test frames are produced, sent and received at: a valid timing with zero
+    /// age, like a real plugin on an idle machine. Use it as `received_qpc` for frames from
+    /// this module.
+    pub const RECEIVED_QPC: Option<u64> = Some(1);
+
+    /// Stamps a frame like the plugin: produced and sent at [`RECEIVED_QPC`], at this
+    /// process's QPC frequency.
+    pub fn clocked(mut f: TelemetryFrame) -> TelemetryFrame {
+        f.produced_qpc = RECEIVED_QPC;
+        f.sent_qpc = RECEIVED_QPC;
+        f.qpc_frequency = roadpilot_telemetry_client::qpc::frequency();
+        f
+    }
+
     /// A valid running schema 2 frame with the required values set.
     pub fn running_frame(session: u64, sequence: u64, simulation_time_us: u64) -> TelemetryFrame {
         let mut f = TelemetryFrame::new(sequence, GameId::Ets2, PluginState::Running);
@@ -188,7 +209,7 @@ pub(crate) mod test_support {
             }),
             ..Motion::default()
         });
-        f
+        clocked(f)
     }
 
     /// A running frame at 3 m/s: slow enough to arm under the default speed cap.
@@ -214,7 +235,7 @@ pub(crate) mod test_support {
         let mut f = TelemetryFrame::new(sequence, GameId::Ets2, PluginState::Paused);
         f.session = Some(session);
         f.simulation_time_us = Some(simulation_time_us);
-        f
+        clocked(f)
     }
 }
 

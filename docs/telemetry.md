@@ -51,15 +51,15 @@ An older schema 1 plugin keeps working: RoadPilot then shows speed, RPM and gear
 
 Since RoadPilot-Telemetry `6a51cde` the plugin stamps every frame with Windows QueryPerformanceCounter values: `producedQpc` (game frame finished), `sentQpc` (just before the write) and `qpcFrequency`. The client adds `received_qpc` together with its receive time and derives the plugin processing time, the transport latency and the frame's absolute age (`roadpilot_telemetry_client::qpc`). The format, the validation rules and the compatibility matrix are in RoadPilot-Telemetry `docs/PROTOCOL-V2.md`; still schema 2, the fields are optional.
 
-| Plugin                   | RoadPilot                   | Behaviour                                                             |
-| ------------------------ | --------------------------- | --------------------------------------------------------------------- |
-| previous (without clock) | this release                | Works as before; timing is reported as missing (`Missing(Produced)`). |
-| `6a51cde` or later       | this release                | Timing is evaluated per frame.                                        |
-| `6a51cde` or later       | previous (client `ca64c8e`) | Works as before; the clock fields are ignored.                        |
+| Plugin                   | RoadPilot                   | Behaviour                                                                                                                                   |
+| ------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| previous (without clock) | this release                | Telemetry is displayed and recorded, but running frames are invalid for control (`clockMissing`): never usable, so control cannot be armed. |
+| `6a51cde` or later       | this release                | Timing is evaluated per frame.                                                                                                              |
+| `6a51cde` or later       | previous (client `ca64c8e`) | Works as before; the clock fields are ignored.                                                                                              |
 
 **Measured on the development machine (2026-11-13):** QPC runs at 10 MHz in both processes; a child process's QPC values lie on the parent's timeline (worst 48 µs from child stamp to parent reading). The real plugin in a separate host process delivered 164 frames, all with valid timing: transport p50 212 µs (max 446 µs), age at receive p50 229 µs (max 1.38 ms). Not yet measured in ATS or ETS2.
 
-**Status:** implemented, unit-tested and tested across processes with the plugin DLL. The timing is **recorded for diagnostics only** (see [Diagnostic recording](#diagnostic-recording)). Freshness, backlog detection and every control limit are unchanged and do not use it yet. A frame without a valid timing stays usable for display and dry-run diagnostics; before any live output may be enabled, RoadPilot will require a valid timing (its age is otherwise unknown).
+**Use in control (R2, Phase 4.5.4):** the relay converts the stamps into the local monotonic clock (`produced_at = received_at - (received_qpc - produced_qpc) / frequency`) and the freshness check measures the **absolute age** since the game produced the frame, against the unchanged 150 ms limit. This is never less than the age since receipt, so the check is only stricter: a frame that waited in the plugin or the pipe is no longer counted as fresh from the moment it was read. A running frame without a valid timing is invalid for control (`clockMissing:<stamp>` or `clockInvalid:<reason>`): the state is never usable and control cannot be armed; display and recording continue. Paused frames need no timing (they are never usable anyway). A session replaced by another one is refused for good, in the telemetry client and in the freshness check. Replay of the calibration drive gives exactly the same decisions and freshness states as before; Stage B (plugin without QPC) is never usable.
 
 ## Relationship to the Input SDK
 

@@ -1017,7 +1017,13 @@ mod tests {
             // Sent before it was produced: not one timeline.
             stamped(now - 10, now - 20),
             // An older plugin without stamps.
-            received(slow_frame(7, 3, 2_000)),
+            received({
+                let mut old = slow_frame(7, 3, 2_000);
+                old.produced_qpc = None;
+                old.sent_qpc = None;
+                old.qpc_frequency = None;
+                old
+            }),
         ] {
             recorder.sink.push(Item::Frame {
                 received: Box::new(frame),

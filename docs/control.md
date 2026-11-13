@@ -36,15 +36,15 @@ Source: `src-tauri/src/control/` (core, no Tauri dependency) and `src-tauri/src/
 
 ## Safety rules
 
-| Rule                             | Value                                                                  |
-| -------------------------------- | ---------------------------------------------------------------------- |
-| Telemetry age limit              | 150 ms (configurable 50–200 ms); simulation time is only a cross-check |
-| Settling after any discontinuity | at least 3 frames over at least 50 ms                                  |
-| Test speed cap                   | 5 m/s; exceeding it disarms (Armed) or faults (Active)                 |
-| Steering limit                   | ±0.15, rate 0.5 per second, direction changes pass through zero        |
-| Throttle limit                   | 0.10; brake 1.0; brake overrides throttle                              |
-| Sender period                    | 40 ms; a gap over 100 ms is a safety event                             |
-| Watchdog timeout                 | 100 ms without a supervisor update                                     |
+| Rule                             | Value                                                                                                                                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Telemetry age limit              | 150 ms (configurable 50–200 ms), measured as the absolute age since the game produced the frame (QPC); simulation time is only a cross-check |
+| Settling after any discontinuity | at least 3 frames over at least 50 ms                                                                                                        |
+| Test speed cap                   | 5 m/s; exceeding it disarms (Armed) or faults (Active)                                                                                       |
+| Steering limit                   | ±0.15, rate 0.5 per second, direction changes pass through zero                                                                              |
+| Throttle limit                   | 0.10; brake 1.0; brake overrides throttle                                                                                                    |
+| Sender period                    | 40 ms; a gap over 100 ms is a safety event                                                                                                   |
+| Watchdog timeout                 | 100 ms without a supervisor update                                                                                                           |
 
 Supervisor states: **Disabled** (initial), **Armed**, **Active** (the only state that produces commands), **Fault**.
 

@@ -21,9 +21,16 @@
 //!
 //! # Rules implemented here
 //!
-//! * **Age** is measured with the monotonic local receive time of the newest accepted frame,
-//!   never with simulation time. Data older than the limit (default 150 ms, at most 200 ms)
-//!   is unusable.
+//! * **Age** is the frame's absolute age: the time since the game produced it (`FRAME_END`),
+//!   from the plugin's QPC stamp converted to the local monotonic clock when the frame is
+//!   received ([`FrameDigest`]); never simulation time. It includes the time the frame spent in
+//!   the plugin and the pipe, so it is never less than the time since it was received. Data
+//!   older than the limit (default 150 ms, at most 200 ms) is unusable. A running frame
+//!   without a valid QPC timing has no known age and is rejected as invalid (`ClockMissing`,
+//!   `ClockInvalid`); paused frames are not usable anyway and are accepted without one.
+//! * **Retired sessions.** A session (per game) that was replaced by another is never
+//!   accepted again ([`RETIRED_SESSIONS`] are remembered), so a late frame of a finished game
+//!   cannot pass as a new session.
 //! * **Ordering** uses `(session, sequence)` only. Repeated and older frames, and frames whose
 //!   receive time goes backwards, are rejected and do **not** refresh freshness.
 //! * **Simulation time** is a cross-check, never an ordering or age source: a clock that
@@ -42,7 +49,8 @@
 //! only make the system stricter; they must not be loosened without live measurements.
 
 use super::vehicle::{FrameIdentity, InvalidFrame, VehicleState};
-use roadpilot_telemetry_client::{PluginState, ReceivedTelemetryFrame};
+use roadpilot_telemetry_client::qpc::{self, Stamp, Stamps, TimingError};
+use roadpilot_telemetry_client::{GameId, PluginState, ReceivedTelemetryFrame};
 use std::time::{Duration, Instant};
 
 /// Default maximum age of the newest accepted frame. A healthy plugin delivers a frame about
@@ -51,6 +59,9 @@ pub const DEFAULT_MAX_AGE: Duration = Duration::from_millis(150);
 /// Configurable range of the age limit. Values outside are refused, not clamped.
 pub const MIN_MAX_AGE: Duration = Duration::from_millis(50);
 pub const MAX_MAX_AGE: Duration = Duration::from_millis(200);
+
+/// Replaced sessions remembered and refused.
+pub const RETIRED_SESSIONS: usize = 8;
 
 /// Good consecutive frames and local time span required after any epoch change.
 const SETTLE_FRAMES: u32 = 3;
@@ -125,17 +136,85 @@ pub struct FrameDigest {
     pub paused: bool,
     /// Running frames: the vehicle state, or why there is none. `None` while paused.
     pub state: Option<Result<VehicleState, InvalidFrame>>,
+    /// When the game produced the frame, on the local monotonic clock:
+    /// `received_at - (received_qpc - produced_qpc) / frequency`. `None` unless the clock is
+    /// [`ClockStatus::Verified`].
+    pub produced_at: Option<Instant>,
+    pub clock: ClockStatus,
+}
+
+/// The frame's QPC timing, validated by `roadpilot_telemetry_client::qpc::evaluate`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClockStatus {
+    /// All stamps present, one frequency equal to this process's, `produced <= sent <=
+    /// received`, plausible span.
+    Verified {
+        /// `FRAME_END` to the plugin's send (includes the plugin's ~16 ms send pacing).
+        processing: Duration,
+        /// Plugin send to receive.
+        transport: Duration,
+    },
+    /// A stamp or a frequency is absent.
+    Missing(Stamp),
+    /// The stamps do not form one plausible timeline.
+    Invalid(TimingError),
 }
 
 impl FrameDigest {
+    /// The digest of a received frame, judged against this process's QPC frequency.
     pub fn of(received: &ReceivedTelemetryFrame) -> Self {
+        Self::with_local_frequency(received, qpc::frequency())
+    }
+
+    /// The digest against a given local QPC frequency (`None`: no clock in this process).
+    pub fn with_local_frequency(
+        received: &ReceivedTelemetryFrame,
+        local_frequency: Option<u64>,
+    ) -> Self {
         let frame = &received.frame;
         let paused = frame.plugin_state == PluginState::Paused;
+        let stamps = Stamps {
+            produced: frame.produced_qpc,
+            sent: frame.sent_qpc,
+            received: received.received_qpc,
+            plugin_frequency: frame.qpc_frequency,
+        };
+        let (produced_at, clock) = match qpc::evaluate(stamps, local_frequency) {
+            Ok(timing) => match received.received_at.checked_sub(timing.age_at_receive) {
+                Some(produced_at) => (
+                    Some(produced_at),
+                    ClockStatus::Verified {
+                        processing: timing.plugin_processing,
+                        transport: timing.transport,
+                    },
+                ),
+                // Older than the monotonic clock itself: cannot be represented, so not trusted.
+                None => (
+                    None,
+                    ClockStatus::Invalid(TimingError::Implausible {
+                        span: timing.age_at_receive,
+                    }),
+                ),
+            },
+            Err(TimingError::Missing(stamp)) => (None, ClockStatus::Missing(stamp)),
+            Err(error) => (None, ClockStatus::Invalid(error)),
+        };
         Self {
             received_at: received.received_at,
             identity: FrameIdentity::from_frame(frame),
             paused,
             state: (!paused).then(|| VehicleState::from_frame(frame)),
+            produced_at,
+            clock,
+        }
+    }
+
+    /// Why a running frame cannot be trusted for its age, if it cannot.
+    pub(super) fn clock_problem(&self) -> Option<InvalidFrame> {
+        match self.clock {
+            ClockStatus::Verified { .. } => None,
+            ClockStatus::Missing(stamp) => Some(InvalidFrame::ClockMissing(stamp)),
+            ClockStatus::Invalid(error) => Some(InvalidFrame::ClockInvalid(error)),
         }
     }
 }
@@ -149,6 +228,8 @@ pub enum Rejection {
     OutOfOrder,
     /// Higher sequence, but received before the newest accepted frame.
     ReceiveTimeRegressed,
+    /// The session was replaced by another one earlier; its frames are never accepted again.
+    RetiredSession,
 }
 
 /// What [`FreshnessMonitor::observe`] did with a frame.
@@ -188,7 +269,7 @@ pub struct Sample {
     pub state: VehicleState,
     /// Epoch the state belongs to. Control armed for another epoch must disarm.
     pub epoch: u64,
-    /// Local time since the frame was received.
+    /// The frame's absolute age: time since the game produced it (see the module rules).
     pub age: Duration,
 }
 
@@ -212,6 +293,9 @@ impl Assessment {
 struct Track {
     identity: FrameIdentity,
     received_at: Instant,
+    /// When the game produced the frame (verified QPC timing); `None` only for paused frames
+    /// without one.
+    produced_at: Option<Instant>,
     paused: bool,
     /// Local time at which the simulation clock last advanced.
     sim_advanced_at: Instant,
@@ -237,6 +321,9 @@ pub struct FreshnessMonitor {
     streak: Streak,
     /// State of the newest accepted frame; `None` while paused.
     latest: Option<VehicleState>,
+    /// Replaced sessions (ring, most recent at `next_retired - 1`).
+    retired: [Option<(GameId, u64)>; RETIRED_SESSIONS],
+    next_retired: usize,
 }
 
 impl FreshnessMonitor {
@@ -249,6 +336,8 @@ impl FreshnessMonitor {
             invalid: None,
             streak: Streak::default(),
             latest: None,
+            retired: [None; RETIRED_SESSIONS],
+            next_retired: 0,
         }
     }
 
@@ -270,6 +359,11 @@ impl FreshnessMonitor {
     pub fn last_frame_age(&self, now: Instant) -> Option<Duration> {
         self.track
             .map(|t| now.saturating_duration_since(t.received_at))
+    }
+
+    fn retire(&mut self, game: GameId, session: u64) {
+        self.retired[self.next_retired] = Some((game, session));
+        self.next_retired = (self.next_retired + 1) % RETIRED_SESSIONS;
     }
 
     fn bump(&mut self, cause: Discontinuity) {
@@ -330,6 +424,12 @@ impl FreshnessMonitor {
             Ok(identity) => identity,
             Err(reason) => return self.reject_invalid(reason),
         };
+        if self
+            .retired
+            .contains(&Some((identity.game, identity.session)))
+        {
+            return Observation::Rejected(Rejection::RetiredSession);
+        }
 
         if let Some(t) = &self.track
             && t.identity.session == identity.session
@@ -352,10 +452,21 @@ impl FreshnessMonitor {
             Some(Ok(state)) => Some(state),
             Some(Err(reason)) => return self.reject_invalid(reason),
         };
+        // A running frame must have a known age (see the module rules).
+        if !paused && let Some(reason) = digest.clock_problem() {
+            return self.reject_invalid(reason);
+        }
 
         let discontinuity = self.classify(&identity, at, paused);
         if let Some(cause) = discontinuity {
             self.bump(cause);
+        }
+        if matches!(
+            discontinuity,
+            Some(Discontinuity::SessionChanged | Discontinuity::GameChanged)
+        ) && let Some(t) = self.track
+        {
+            self.retire(t.identity.game, t.identity.session);
         }
         self.invalid = None;
 
@@ -385,6 +496,7 @@ impl FreshnessMonitor {
         self.track = Some(Track {
             identity,
             received_at: at,
+            produced_at: digest.produced_at,
             paused,
             sim_advanced_at,
             window_start,
@@ -405,7 +517,9 @@ impl FreshnessMonitor {
         let Some(t) = &self.track else {
             return Assessment::Unusable(Unusable::NoFrame);
         };
-        let age = now.saturating_duration_since(t.received_at);
+        // The absolute age (since the game produced the frame); it is never less than the time
+        // since the frame was received.
+        let age = now.saturating_duration_since(t.produced_at.unwrap_or(t.received_at));
         if age > self.config.max_age {
             return Assessment::Unusable(Unusable::Stale { age });
         }
@@ -486,11 +600,13 @@ mod tests {
         }
 
         fn feed(&mut self, frame: TelemetryFrame, at_ms: u64) -> Observation {
+            // Received the moment it was sent: the frame's own QPC stamps give its age.
+            let received_qpc = frame.sent_qpc;
             let received = ReceivedTelemetryFrame {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: self.at(at_ms),
-                received_qpc: None,
+                received_qpc,
             };
             self.monitor.observe(&received)
         }
@@ -785,15 +901,39 @@ mod tests {
     }
 
     #[test]
-    fn returning_to_an_older_session_is_another_new_epoch() {
+    fn an_older_session_is_never_accepted_again() {
+        // Session 7 was replaced by 8: late frames of 7 are refused for good and change
+        // nothing, even with a higher sequence and after a third session.
         let mut rig = Rig::settled();
         rig.run(8, 1, 80);
+        let epoch = rig.monitor.epoch();
         assert_eq!(
             rig.run(7, 6, 96),
-            Observation::Accepted {
-                epoch: 3,
-                discontinuity: Some(Discontinuity::SessionChanged)
-            }
+            Observation::Rejected(Rejection::RetiredSession)
+        );
+        assert_eq!(rig.monitor.epoch(), epoch);
+        rig.run(9, 1, 112);
+        assert_eq!(
+            rig.run(7, 7, 128),
+            Observation::Rejected(Rejection::RetiredSession)
+        );
+        assert_eq!(
+            rig.run(8, 2, 144),
+            Observation::Rejected(Rejection::RetiredSession)
+        );
+        // The current session goes on.
+        assert!(matches!(rig.run(9, 2, 160), Observation::Accepted { .. }));
+    }
+
+    #[test]
+    fn a_game_change_retires_the_previous_session_of_that_game() {
+        let mut rig = Rig::settled();
+        let mut ats = running_frame(7, 6, 80_000);
+        ats.game = GameId::Ats;
+        rig.feed(ats, 80);
+        assert_eq!(
+            rig.run(7, 7, 96),
+            Observation::Rejected(Rejection::RetiredSession)
         );
     }
 
@@ -1090,5 +1230,139 @@ mod tests {
         assert_eq!(s.state.identity.session, 4_242_424_242);
         assert_eq!(s.state.identity.sequence, 1238);
         assert_eq!(s.epoch, 1);
+    }
+
+    // ---- R2: absolute age from the QPC stamps ----
+
+    fn frequency() -> u64 {
+        qpc::frequency().expect("QPC on the test machine")
+    }
+
+    /// A running frame produced `delay` before it was sent (and received).
+    fn delayed(session: u64, seq: u64, at_ms: u64, delay_ticks: u64) -> TelemetryFrame {
+        let mut f = running_frame(session, seq, at_ms * 1_000);
+        f.produced_qpc = Some(1_000_000);
+        f.sent_qpc = Some(1_000_000 + delay_ticks);
+        f
+    }
+
+    #[test]
+    fn a_running_frame_without_qpc_stamps_is_clock_missing_and_never_usable() {
+        let mut rig = Rig::new();
+        for i in 0..10 {
+            let mut f = running_frame(7, i + 1, i * 16_000);
+            f.produced_qpc = None;
+            f.sent_qpc = None;
+            f.qpc_frequency = None;
+            let observation = rig.feed(f, i * 16);
+            assert_eq!(
+                observation,
+                Observation::Invalid(InvalidFrame::ClockMissing(Stamp::Produced))
+            );
+        }
+        assert_eq!(
+            rig.unusable(150),
+            Unusable::Invalid(InvalidFrame::ClockMissing(Stamp::Produced))
+        );
+        // A missing receive stamp (no clock in this process) is just as unusable.
+        let mut rig = Rig::new();
+        let received = ReceivedTelemetryFrame {
+            frame: running_frame(7, 1, 0),
+            dropped_fields: Vec::new(),
+            received_at: rig.at(0),
+            received_qpc: None,
+        };
+        assert_eq!(
+            rig.monitor.observe(&received),
+            Observation::Invalid(InvalidFrame::ClockMissing(Stamp::Received))
+        );
+    }
+
+    #[test]
+    fn invalid_qpc_stamps_are_clock_invalid_and_never_usable() {
+        let mut rig = Rig::new();
+        // Sent before it was produced.
+        let mut backwards = running_frame(7, 1, 0);
+        backwards.produced_qpc = Some(500);
+        backwards.sent_qpc = Some(400);
+        assert_eq!(
+            rig.feed(backwards, 0),
+            Observation::Invalid(InvalidFrame::ClockInvalid(TimingError::NotMonotonic {
+                earlier: Stamp::Produced,
+                later: Stamp::Sent
+            }))
+        );
+        // A different QPC frequency: not one clock.
+        let mut foreign = running_frame(7, 2, 16_000);
+        foreign.qpc_frequency = Some(frequency() + 1);
+        assert!(matches!(
+            rig.feed(foreign, 16),
+            Observation::Invalid(InvalidFrame::ClockInvalid(
+                TimingError::FrequencyMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            rig.unusable(20),
+            Unusable::Invalid(InvalidFrame::ClockInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn frames_200_ms_old_on_arrival_are_never_fresh() {
+        // A constant 200 ms delay before the receive (blocked plugin or a full pipe): the
+        // receive time alone would look fresh; the absolute age never does.
+        let delay = frequency() / 5;
+        let mut rig = Rig::new();
+        for i in 0..100 {
+            rig.feed(delayed(7, i + 1, i * 16, delay), i * 16);
+            let unusable = rig.unusable(i * 16);
+            assert!(
+                matches!(unusable, Unusable::Stale { age } if age >= ms(200)),
+                "frame {i}: {unusable:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_150_ms_limit_applies_to_the_absolute_age_to_the_microsecond() {
+        // Frames produced 50 ms before they are received: the limit is reached 100 ms after
+        // the newest one was received, not 150 ms after.
+        let delay = frequency() / 20;
+        let produced_before = ticks_to_age(delay);
+        assert_eq!(produced_before, ms(50));
+        let mut rig = Rig::new();
+        for i in 0..5 {
+            rig.feed(delayed(7, i + 1, i * 16, delay), i * 16);
+        }
+        let newest = rig.at(64);
+        let sample = rig
+            .monitor
+            .assess(newest + ms(100))
+            .usable()
+            .expect("exactly 150 ms is still usable");
+        assert_eq!(sample.age, ms(150));
+        assert_eq!(
+            rig.monitor
+                .assess(newest + ms(100) + Duration::from_micros(1)),
+            Assessment::Unusable(Unusable::Stale {
+                age: ms(150) + Duration::from_micros(1)
+            })
+        );
+        // The limit itself is unchanged.
+        assert_eq!(FreshnessConfig::default().max_age(), ms(150));
+        assert_eq!(DEFAULT_MAX_AGE, ms(150));
+    }
+
+    fn ticks_to_age(ticks: u64) -> Duration {
+        qpc::ticks_to_duration(ticks, frequency()).unwrap()
+    }
+
+    #[test]
+    fn a_paused_frame_without_stamps_is_still_recognised_as_paused() {
+        let mut rig = Rig::settled();
+        let mut f = paused_frame(7, 6, 80_000);
+        f.produced_qpc = None;
+        assert!(matches!(rig.feed(f, 80), Observation::Accepted { .. }));
+        assert_eq!(rig.unusable(90), Unusable::Paused);
     }
 }

@@ -29,7 +29,7 @@ use roadpilot_lib::control::freshness::FrameDigest;
 use roadpilot_lib::control::log::{ControlLog, LogObserver, Observed};
 use roadpilot_lib::control::mailbox::{self, Delivery, Received};
 use roadpilot_lib::control::sender::{ControlCore, CoreConfig, NeutralRequests};
-use roadpilot_lib::control::status::LogEntryDto;
+use roadpilot_lib::control::status::{LogEntryDto, freshness};
 use roadpilot_lib::control::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, Watchdog};
 use roadpilot_telemetry_client::qpc::{self, Stamps};
 use roadpilot_telemetry_client::{
@@ -45,17 +45,29 @@ const STAGE_B: &str = include_str!("fixtures/replay/stage-b-2026-11-13.txt");
 
 /// Counts the decisions the core logs, keyed like the recording (`epoch:backlog`, ...).
 #[derive(Default)]
-struct Decisions(Mutex<BTreeMap<String, u64>>);
+struct Decisions {
+    decisions: Mutex<BTreeMap<String, u64>>,
+    /// Changes of the freshness assessment, by code (`stale`, `paused`, ...).
+    assessments: Mutex<BTreeMap<String, u64>>,
+}
 
 impl LogObserver for Decisions {
     fn observe(&self, record: Observed) {
-        if let Observed::Decision(entry) = record {
-            let dto = serde_json::to_value(LogEntryDto::decision(&entry)).unwrap();
-            let key = match dto["cause"].as_str() {
-                Some(cause) => format!("{}:{cause}", dto["event"].as_str().unwrap()),
-                None => dto["event"].as_str().unwrap().to_owned(),
-            };
-            *self.0.lock().unwrap().entry(key).or_default() += 1;
+        match record {
+            Observed::Decision(entry) => {
+                let dto = serde_json::to_value(LogEntryDto::decision(&entry)).unwrap();
+                let key = match dto["cause"].as_str() {
+                    Some(cause) => format!("{}:{cause}", dto["event"].as_str().unwrap()),
+                    None => dto["event"].as_str().unwrap().to_owned(),
+                };
+                *self.decisions.lock().unwrap().entry(key).or_default() += 1;
+            }
+            Observed::Assessment { assessment, .. } => {
+                let code = serde_json::to_value(freshness(&assessment).0).unwrap();
+                let key = code.as_str().unwrap().to_owned();
+                *self.assessments.lock().unwrap().entry(key).or_default() += 1;
+            }
+            _ => {}
         }
     }
 }
@@ -63,6 +75,7 @@ impl LogObserver for Decisions {
 #[derive(Debug, PartialEq)]
 struct Outcome {
     decisions: BTreeMap<String, u64>,
+    assessments: BTreeMap<String, u64>,
     frames_accepted: u64,
     frames_rejected: u64,
     frames_invalid: u64,
@@ -224,9 +237,11 @@ fn replay_via(fixture: &Fixture, path: Path) -> Outcome {
     core.shutdown(end);
     let stats = core.stats();
     drop(core);
-    let decisions = decisions.0.lock().unwrap().clone();
+    let assessments = decisions.assessments.lock().unwrap().clone();
+    let decisions = decisions.decisions.lock().unwrap().clone();
     Outcome {
         decisions,
+        assessments,
         frames_accepted: stats.frames_accepted,
         frames_rejected: stats.frames_rejected,
         frames_invalid: stats.frames_invalid,
@@ -255,6 +270,19 @@ fn calibration_drive_baseline_reproduces_the_recorded_decisions() {
         "decisions of the recorded run"
     );
     assert_eq!(outcome.decisions["epoch:backlog"], 33);
+    // The freshness assessments are the same as before R2: the absolute age (at most 24 ms
+    // on arrival) causes no stale state of its own.
+    let assessments: BTreeMap<String, u64> = [
+        ("fresh", 31),
+        ("noFrame", 1),
+        ("paused", 8),
+        ("settling", 31),
+        ("stale", 5),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect();
+    assert_eq!(outcome.assessments, assessments);
     // Every frame carries a valid QPC timing; the reconstruction matches the recorder.
     assert_eq!(outcome.clock_valid, 46_389);
     assert_eq!(outcome.clock_missing_or_invalid, 0);
@@ -267,16 +295,24 @@ fn calibration_drive_baseline_reproduces_the_recorded_decisions() {
 }
 
 #[test]
-fn stage_b_baseline_reproduces_the_recorded_decisions() {
+fn stage_b_without_qpc_stamps_is_never_usable() {
+    // The plugin of Stage B had no QPC stamps. Before R2 (absolute age) the replay reproduced
+    // the recorded run exactly (58 backlog, 9 gap, 5 paused, 1 session-changed epochs;
+    // commit d6ea79e). Since R2 a running frame without a known age is invalid
+    // (ClockMissing): the state is never usable, only paused, stale or invalid.
     let fixture = fixture::parse(STAGE_B);
     assert_eq!(fixture.records.len(), 36_290);
     let outcome = replay(&fixture);
     print("stage B", &outcome);
-    assert_eq!(
-        outcome.decisions, fixture.expect,
-        "decisions of the recorded run"
+    assert!(
+        !outcome.assessments.contains_key("fresh"),
+        "{:?}",
+        outcome.assessments
     );
-    assert_eq!(outcome.decisions["epoch:backlog"], 58);
+    assert!(!outcome.assessments.contains_key("settling"));
+    assert!(outcome.assessments["invalid"] > 0);
+    assert!(outcome.frames_invalid > 30_000);
+    assert_eq!(outcome.decisions["epoch:sessionChanged"], 1);
     // The plugin of Stage B had no QPC stamps.
     assert_eq!(outcome.clock_valid, 0);
     assert_eq!(outcome.clock_missing_or_invalid, 36_290);
@@ -314,7 +350,11 @@ fn full_recordings_replay_like_their_fixtures() {
         let full = fixture::from_recording(std::io::BufReader::new(file), &source);
         let outcome = replay(&full);
         print(&source, &outcome);
-        assert_eq!(outcome.decisions, full.expect, "{source}");
+        // Recordings with QPC stamps replay like the recorded run; without them, R2 makes the
+        // state unusable (see stage_b_without_qpc_stamps_is_never_usable).
+        if outcome.clock_valid > 0 {
+            assert_eq!(outcome.decisions, full.expect, "{source}");
+        }
         for text in [CALIBRATION, STAGE_B] {
             let compact = fixture::parse(text);
             if compact.source == source {

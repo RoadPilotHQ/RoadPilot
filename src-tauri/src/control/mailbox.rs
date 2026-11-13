@@ -53,6 +53,9 @@ pub const CAPACITY: usize = 16;
 pub const NORMAL_QUOTA: usize = 12;
 
 /// What the relay hands to the control loop.
+// Fixed size on purpose: boxing the digest (as clippy suggests for the size difference) would
+// allocate per frame, which the mailbox exists to avoid.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Delivery {
     Frame {
@@ -66,6 +69,7 @@ pub enum Delivery {
 }
 
 /// What the control loop takes out, in order.
+#[allow(clippy::large_enum_variant)] // see Delivery
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Received {
     /// `count` items were dropped at this point of the sequence.
@@ -121,7 +125,8 @@ impl Condition {
                 Some((id.game, id.session)),
                 match digest.state {
                     Some(Err(reason)) => Some(reason),
-                    _ => None,
+                    Some(Ok(_)) => digest.clock_problem(),
+                    None => None,
                 },
             ),
             Err(reason) => (None, Some(reason)),
@@ -306,7 +311,7 @@ mod tests {
             frame,
             dropped_fields: Vec::new(),
             received_at: at,
-            received_qpc: None,
+            received_qpc: crate::control::vehicle::test_support::RECEIVED_QPC,
         })
     }
 
