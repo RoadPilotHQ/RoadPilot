@@ -11,16 +11,19 @@
 //! The UI is never the safety authority. The commands here only queue requests for the control
 //! task; the supervisor decides. Dry-run is the only mode, and no command can change that.
 
-use crate::control::runtime::{self, ControlHandle, FrameSource};
+use crate::control::runtime::{self, ControlHandle, ControlRuntime, FrameSource};
 use crate::control::sender::{CoreConfig, RequestSource, ShutdownReport};
 use crate::control::status::{
     self, CommandCode, ControlStatus, LogEntryDto, RejectionDto, RuntimeCode, StateCode,
 };
 use crate::control::supervisor::Command;
+use crate::control::timer::{PreciseTimer, TickTimer, TokioTimer};
+use crate::platform;
 use serde::Serialize;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::async_runtime::{self, JoinHandle};
+use tokio::sync::oneshot;
 
 /// Time the control task gets to disarm and stop on application exit.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -53,6 +56,8 @@ pub type StatusEmitter = Box<dyn Fn(ControlStatus) + Send + Sync + 'static>;
 pub enum StartError {
     /// A control runtime was already started in this slot; there is never a second one.
     AlreadyStarted,
+    /// The dedicated control thread or its runtime could not be created.
+    ThreadUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,16 +73,31 @@ pub enum ShutdownOutcome {
     NotRunning,
 }
 
+/// The dedicated control thread. It runs the sender task on its own single-threaded runtime,
+/// isolated from the dashboard's thread pool, at elevated thread priority.
+struct ControlThread {
+    thread: std::thread::JoinHandle<()>,
+    /// Resolves with the shutdown report when the sender task ends normally.
+    report: oneshot::Receiver<ShutdownReport>,
+    /// Cancels the sender task; dropping the control core then encodes any owed disarm.
+    abort: Option<oneshot::Sender<()>>,
+}
+
 struct Running {
     handle: ControlHandle,
-    sender: JoinHandle<ShutdownReport>,
+    control: ControlThread,
     watchdog: JoinHandle<()>,
+    /// Both control threads run at elevated priority.
+    elevated: bool,
 }
 
 enum Slot {
     Empty,
     Running(Running),
-    Stopped { handle: ControlHandle },
+    Stopped {
+        handle: ControlHandle,
+        elevated: bool,
+    },
 }
 
 /// Holds the application's single control runtime.
@@ -138,17 +158,25 @@ impl ControlSlot {
         if !matches!(*slot, Slot::Empty) {
             return Err(StartError::AlreadyStarted);
         }
-        let rt = runtime::build(feed, source, CoreConfig::default());
-        let sender = async_runtime::spawn(rt.sender_task);
-        let watchdog = async_runtime::spawn(rt.watchdog_task);
+        let (control, (handle, relay_task, watchdog_task, elevated)) =
+            start_control_thread(feed, source)?;
+        // The relay and the watchdog stay on the shared runtime; the watchdog is independent of
+        // the thread it watches. The relay ends by itself at shutdown.
+        drop(async_runtime::spawn(relay_task));
+        let watchdog = async_runtime::spawn(watchdog_task);
         if let Some(emit) = emitter {
             // Ends by itself once the control task has stopped.
-            drop(async_runtime::spawn(emit_status(rt.handle.clone(), emit)));
+            drop(async_runtime::spawn(emit_status(
+                handle.clone(),
+                emit,
+                elevated,
+            )));
         }
         *slot = Slot::Running(Running {
-            handle: rt.handle,
-            sender,
+            handle,
+            control,
             watchdog,
+            elevated,
         });
         Ok(())
     }
@@ -166,13 +194,15 @@ impl ControlSlot {
             Slot::Empty => ControlStatus::unavailable(),
             Slot::Running(r) => {
                 let mut status = r.handle.status();
-                if r.sender.inner().is_finished() {
+                status.timing.elevated_priority = r.elevated;
+                if r.control.thread.is_finished() {
                     status.runtime = RuntimeCode::Stopped;
                 }
                 status
             }
-            Slot::Stopped { handle, .. } => {
+            Slot::Stopped { handle, elevated } => {
                 let mut status = handle.status();
+                status.timing.elevated_priority = *elevated;
                 status.runtime = RuntimeCode::Stopped;
                 status
             }
@@ -244,50 +274,141 @@ impl ControlSlot {
         };
         let Running {
             handle,
-            mut sender,
+            control,
             watchdog,
+            elevated,
         } = running;
+        let ControlThread {
+            thread,
+            mut report,
+            mut abort,
+        } = control;
         let log = handle.log();
-        let already_finished = sender.inner().is_finished();
+        let already_finished = thread.is_finished();
         handle.shutdown();
 
         // The timeout must be created inside the future that block_on runs: its timer needs the
         // runtime context, which the calling (main) thread does not have.
         let waited =
-            async_runtime::block_on(async { tokio::time::timeout(grace, &mut sender).await });
+            async_runtime::block_on(async { tokio::time::timeout(grace, &mut report).await });
         let outcome = match waited {
             Ok(Ok(report)) if !already_finished => ShutdownOutcome::Completed(report),
+            // The thread ended without a report (it was aborted or panicked).
             Ok(_) => ShutdownOutcome::AlreadyStopped {
                 disarm_settled: !log.owes_disarm(),
             },
             Err(_elapsed) => {
-                sender.abort();
-                // Dropping the core encodes the owed disarm; give it time to happen.
-                let _ = async_runtime::block_on(async {
-                    tokio::time::timeout(abort_grace, &mut sender).await
-                });
+                if let Some(abort) = abort.take() {
+                    let _ = abort.send(());
+                }
+                // Dropping the core encodes the owed disarm; give it time to happen. The abort
+                // takes effect when the stuck tick returns, exactly as a task abort would.
+                let until = Instant::now() + abort_grace;
+                while !thread.is_finished() && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 ShutdownOutcome::Aborted {
                     disarm_settled: !log.owes_disarm(),
                 }
             }
         };
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
         watchdog.abort();
-        *self.lock() = Slot::Stopped { handle };
+        *self.lock() = Slot::Stopped { handle, elevated };
         outcome
     }
+}
+
+type SharedTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+/// What the control thread hands back once it runs: the handle, the tasks for the shared
+/// runtime (relay, watchdog) and whether both control threads run elevated.
+type Started = (ControlHandle, SharedTask, SharedTask, bool);
+
+/// Starts the dedicated control thread: it raises its own priority, starts the precise timer
+/// thread (which raises its own priority too), builds the control runtime and runs the sender
+/// task on a single-threaded tokio runtime until shutdown or abort.
+///
+/// Measured on Windows (see `docs/timing.md`): tokio's timer on the shared runtime wakes up to
+/// 16 ms late, and threads at normal priority are delayed by tens of milliseconds under CPU
+/// load. Both control threads only wake briefly every 40 ms.
+fn start_control_thread(
+    feed: impl FrameSource,
+    source: Box<dyn RequestSource>,
+) -> Result<(ControlThread, Started), StartError> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Started>();
+    let (report_tx, report) = oneshot::channel();
+    let (abort, abort_rx) = oneshot::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("roadpilot-control".into())
+        .spawn(move || {
+            let loop_elevated = platform::raise_current_thread_priority();
+            let (timer, timer_elevated): (Box<dyn TickTimer>, bool) =
+                match PreciseTimer::start(platform::raise_current_thread_priority) {
+                    Ok((timer, elevated)) => (Box::new(timer), elevated),
+                    // Still bounded by the scheduler's gap limit and the watchdog; the status
+                    // reports the coarse timer.
+                    Err(_) => (Box::new(TokioTimer), false),
+                };
+            let Ok(executor) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return; // ready_tx is dropped: start reports the failure
+            };
+            let ControlRuntime {
+                handle,
+                sender_task,
+                relay_task,
+                watchdog_task,
+            } = runtime::build_with_timer(feed, source, CoreConfig::default(), timer);
+            let elevated = loop_elevated && timer_elevated;
+            if ready_tx
+                .send((handle, relay_task, watchdog_task, elevated))
+                .is_err()
+            {
+                return;
+            }
+            let finished = executor.block_on(async move {
+                tokio::select! {
+                    biased;
+                    // An abort, or the slot was dropped: cancel the sender task. Dropping the
+                    // control core encodes any owed disarm.
+                    _ = abort_rx => None,
+                    report = sender_task => Some(report),
+                }
+            });
+            if let Some(report) = finished {
+                let _ = report_tx.send(report);
+            }
+        })
+        .map_err(|_| StartError::ThreadUnavailable)?;
+    let started = ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| StartError::ThreadUnavailable)?;
+    Ok((
+        ControlThread {
+            thread,
+            report,
+            abort: Some(abort),
+        },
+        started,
+    ))
 }
 
 /// Sends the status at a fixed rate, independently of the control loop, so a stalled loop
 /// shows up as a growing `loopSilentMs` rather than as silence. Sends a final status marked
 /// stopped once the control task has ended.
-async fn emit_status(handle: ControlHandle, emit: StatusEmitter) {
-    let changes = handle.status_changes();
+async fn emit_status(handle: ControlHandle, emit: StatusEmitter, elevated: bool) {
     let mut ticker = tokio::time::interval(STATUS_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        let stopped = changes.has_changed().is_err();
+        let stopped = handle.is_stopped();
         let mut status = handle.status();
+        status.timing.elevated_priority = elevated;
         if stopped {
             status.runtime = RuntimeCode::Stopped;
         }
@@ -378,7 +499,13 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let flag = stop.clone();
             let base = Instant::now();
+            // Measurement knobs (timing investigation only): frame period and feeder priority.
+            let period = Duration::from_micros(env_u64("ROADPILOT_TIMING_FEEDER_US", 16_000));
+            let elevate = env_u64("ROADPILOT_TIMING_FEEDER_HIGH", 0) == 1;
             let thread = std::thread::spawn(move || {
+                if elevate {
+                    crate::platform::raise_current_thread_priority();
+                }
                 while !flag.load(Ordering::SeqCst) {
                     let at = Instant::now();
                     let seq = sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -388,7 +515,7 @@ mod tests {
                         dropped_fields: Vec::new(),
                         received_at: at,
                     }));
-                    std::thread::sleep(ms(16));
+                    std::thread::sleep(period);
                 }
             });
             Self {
@@ -536,6 +663,10 @@ mod tests {
         let rig = Rig::start();
         let s = rig.slot.status();
         assert_eq!(s.runtime, RuntimeCode::Running);
+        // The application runs the loop on its dedicated thread with the precise timer, at
+        // elevated thread priority where the platform supports it.
+        assert_eq!(s.timing.timer, status::TimerCode::Precise);
+        assert_eq!(s.timing.elevated_priority, cfg!(windows));
         assert_eq!(s.mode, ModeCode::DryRun);
         assert_eq!(s.state, StateCode::Disabled);
         assert!(!s.permits_output);
@@ -688,6 +819,52 @@ mod tests {
         let s = rig.slot.status();
         assert_eq!(s.state, StateCode::Disabled, "the reset does not arm");
         assert_eq!(s.counters.commands_encoded, commands);
+    }
+
+    // ---- no blocking on readers ----
+
+    #[test]
+    fn a_reader_holding_the_status_never_blocks_the_control_ticks() {
+        // A reader of normal priority that holds the status (for example while it is preempted)
+        // must not stop the elevated control loop: ticks keep encoding commands meanwhile.
+        let rig = Rig::active();
+        let handle = handle_of(&rig.slot);
+        let log = handle.log();
+        let count = |log: &crate::control::log::ControlLog| {
+            log.snapshot()
+                .messages
+                .iter()
+                .filter(|e| e.event.kind == crate::control::log::MessageKind::Command)
+                .count()
+        };
+        let before = count(&log);
+        {
+            let _reader = handle.hold_status();
+            std::thread::sleep(ms(300));
+            let during = count(&log) - before;
+            assert!(
+                during >= 5,
+                "only {during} commands were encoded while a reader held the status"
+            );
+        }
+        // Once the reader is gone, the status is published again.
+        let ticks = rig.slot.status().timing.ticks;
+        wait_until("a newer status", ms(1_000), || {
+            rig.slot.status().timing.ticks > ticks
+        });
+    }
+
+    #[test]
+    fn commands_are_answered_within_a_few_tick_periods() {
+        let rig = Rig::start();
+        let started = Instant::now();
+        let reply = run(&rig.slot, Command::Disarm);
+        assert_eq!(reply.outcome, OutcomeCode::Accepted);
+        assert!(
+            started.elapsed() < COMMAND_TIMEOUT,
+            "a disarm is processed at the next tick: {:?}",
+            started.elapsed()
+        );
     }
 
     // ---- status and log ----
@@ -871,8 +1048,10 @@ mod tests {
     fn a_task_that_already_died_is_reported_and_its_disarm_checked() {
         let rig = Rig::active();
         // Simulate a crash of the control task.
-        if let Slot::Running(r) = &*rig.slot.lock() {
-            r.sender.abort();
+        if let Slot::Running(r) = &mut *rig.slot.lock()
+            && let Some(abort) = r.control.abort.take()
+        {
+            let _ = abort.send(());
         }
         wait_until("the task to end", ms(2_000), || {
             rig.slot.status().runtime == RuntimeCode::Stopped
@@ -919,6 +1098,27 @@ mod tests {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
     }
 
+    /// Prints the wall-clock time of every late tick still in the log, so outliers can be
+    /// correlated with other processes (an independent probe sees system-wide stalls too).
+    fn print_late_ticks(slot: &ControlSlot, status: &ControlStatus) {
+        let wall_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // Read the timing ring itself: the merged log view is dominated by the 25 messages per
+        // second and would hide older timing records.
+        for entry in handle_of(slot).log().snapshot().timing {
+            let at_ms = entry.at.as_millis() as u64;
+            let wall = wall_now.saturating_sub(status.now_ms.saturating_sub(at_ms));
+            println!(
+                "late tick at t+{:.1}s wall {} : {:?}",
+                at_ms as f64 / 1_000.0,
+                wall % 1_000_000,
+                entry.event
+            );
+        }
+    }
+
     fn assert_acceptance(timing: &status::TimingDto) {
         assert_eq!(timing.intervals.over_50, 0, "tick intervals above 50 ms");
         assert_eq!(
@@ -942,6 +1142,7 @@ mod tests {
             started.elapsed().as_secs_f64(),
             &status.timing,
         );
+        print_late_ticks(&rig.slot, &status);
         assert_eq!(status.state, StateCode::Active, "still active at the end");
         assert_acceptance(&status.timing);
     }

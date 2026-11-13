@@ -8,24 +8,30 @@
 //! Usage: `cargo run --release --example telemetry_feeder -- [seconds] [speed_mps]`
 //! Defaults: 300 seconds, 3.0 m/s. The application must be running.
 
-use serde_json::Value;
-use std::io::Write;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const PIPE: &str = r"\.\pipe\RoadPilot.Telemetry.v1";
-const FIXTURE: &str = include_str!("../tests/fixtures/frame-v2-full.json");
-const PERIOD: Duration = Duration::from_micros(16_667);
-
+#[cfg(not(windows))]
 fn main() {
+    eprintln!("telemetry_feeder: the telemetry pipe exists on Windows only");
+}
+
+#[cfg(windows)]
+fn main() {
+    use roadpilot_telemetry_client::named_pipe::PIPE_NAME;
+    use serde_json::Value;
+    use std::io::Write;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/frame-v2-full.json");
+    const PERIOD: Duration = Duration::from_micros(16_667);
+
     let args: Vec<String> = std::env::args().collect();
     let seconds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(300);
     let speed: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3.0);
 
     let mut pipe = loop {
-        match std::fs::OpenOptions::new().write(true).open(PIPE) {
+        match std::fs::OpenOptions::new().write(true).open(PIPE_NAME) {
             Ok(pipe) => break pipe,
             Err(error) => {
-                eprintln!("waiting for the application's telemetry pipe: {error}");
+                eprintln!("waiting for the application's telemetry pipe {PIPE_NAME}: {error}");
                 std::thread::sleep(Duration::from_secs(1));
             }
         }

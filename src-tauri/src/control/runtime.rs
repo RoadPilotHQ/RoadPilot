@@ -1,43 +1,56 @@
 //! Async drivers for the control core. Thin on purpose: all decisions are made by the
 //! deterministic [`ControlCore`]; this layer only moves events into it.
 //!
-//! * **Telemetry.** The sender task reads raw schema 2 frames from a **second receiver** on the
-//!   telemetry engine's own `watch` channel (see [`FrameFeed`]). There is exactly one pipe
-//!   server, owned by the dashboard engine; control never creates another. Frames are observed
-//!   as they arrive, independently of the dashboard's 10 Hz sampling. When the engine replaces
-//!   its channel after restarting the pipe server, the task re-attaches on its next tick.
-//! * **Timing.** The sender task sleeps until the core's next 40 ms deadline on the monotonic
-//!   clock and ticks. Missed deadlines are skipped by the scheduler, never replayed.
-//! * **Operator commands** arrive over a channel. Everything queued at once is drained
-//!   together and any disarm is processed first, so a disarm is never stuck behind other
-//!   commands.
+//! * **Telemetry.** A relay task on the shared runtime reads raw schema 2 frames from a
+//!   **second receiver** on the telemetry engine's own `watch` channel (see [`FrameFeed`]).
+//!   There is exactly one pipe server, owned by the dashboard engine; control never creates
+//!   another. The relay forwards every frame, with the time it observed it, over a queue that
+//!   the sender task drains at each tick. When the engine replaces its channel after
+//!   restarting the pipe server, the relay re-attaches and reports the change.
+//! * **Timing.** The sender task waits for the core's next 40 ms deadline on the monotonic clock
+//!   through a [`TickTimer`] and ticks. Missed deadlines are skipped by the scheduler, never
+//!   replayed. The application uses a precise timer thread; tests use tokio's timer.
+//! * **Operator commands** are queued and processed at the start of the next tick (at most one
+//!   period later). Everything queued is processed together and any disarm first, so a disarm
+//!   is never stuck behind other commands.
+//! * **No blocking on other threads.** The sender task never waits for a lock held by, and is
+//!   never woken by, a thread of normal priority: it is woken only by its timer (and once by
+//!   shutdown), it takes telemetry and commands with `try_recv` from queues that need no lock,
+//!   and at each tick it publishes its status only if no reader holds it at that moment.
+//!   Otherwise a reader preempted while holding a lock would delay the elevated control
+//!   thread (priority inversion; measured, see `docs/timing.md`).
 //! * **Watchdog.** A separate task checks the supervisor loop's heartbeat every 20 ms and
 //!   trips a flag the loop consumes (see `watchdog`).
 //! * **Shutdown.** [`ControlHandle::shutdown`] makes the sender task disarm and return a
 //!   [`ShutdownReport`]. If the task is aborted instead, dropping the core still encodes the
 //!   owed disarm.
 //!
-//! The drivers are returned as futures so that the application can spawn them on its own
-//! runtime. Time comes from tokio's clock, which in tests is paused and advanced explicitly.
-//! Dry-run only: see `sink`.
+//! The drivers are returned as futures so that the application can spawn them on the runtimes
+//! of its choice. Time comes from tokio's clock, which in tests is paused and advanced
+//! explicitly. Dry-run only: see `sink`.
 
 use super::log::{ControlLog, DecisionEvent};
 use super::sender::{ControlCore, CoreConfig, RequestSource, ShutdownReport};
 use super::sink::DryRunSink;
 use super::status::ControlStatus;
 use super::supervisor::{Command, Response, State};
+use super::timer::{TickTimer, TokioTimer};
 use super::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, WATCHDOG_PERIOD, Watchdog};
 use crate::telemetry::engine::FrameFeed;
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Instant as TokioInstant, sleep, sleep_until};
+use tokio::time::{Instant as TokioInstant, sleep};
 
 type FrameReceiver = watch::Receiver<Option<ReceivedTelemetryFrame>>;
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// How often the relay looks for a replaced frame channel while the feed is lost.
+const FEED_RETRY: Duration = Duration::from_millis(40);
 
 /// Where raw telemetry frames come from. The application uses the engine's [`FrameFeed`].
 pub trait FrameSource: Send + 'static {
@@ -57,6 +70,16 @@ fn now() -> Instant {
     TokioInstant::now().into_std()
 }
 
+/// What the relay hands to the sender task, in order.
+enum Input {
+    Frame {
+        frame: Box<ReceivedTelemetryFrame>,
+        observed_at: Instant,
+    },
+    FeedLost(Instant),
+    FeedRestored(Instant),
+}
+
 /// What the control task answered to an operator command.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CommandReply {
@@ -70,13 +93,51 @@ struct Request {
     reply: Option<oneshot::Sender<CommandReply>>,
 }
 
+/// The published status. Readers lock it briefly; the sender task never waits for it at a tick.
+struct StatusCell {
+    status: Mutex<ControlStatus>,
+    stopped: AtomicBool,
+}
+
+impl StatusCell {
+    /// Waits for the lock. Used only for command batches and shutdown, never at a tick.
+    fn publish(&self, status: ControlStatus) {
+        *self.status.lock().unwrap_or_else(PoisonError::into_inner) = status;
+    }
+
+    /// Publishes only if no reader holds the status right now; otherwise the next tick will.
+    fn publish_if_free(&self, status: ControlStatus) {
+        match self.status.try_lock() {
+            Ok(mut slot) => *slot = status,
+            Err(TryLockError::Poisoned(poisoned)) => *poisoned.into_inner() = status,
+            Err(TryLockError::WouldBlock) => {}
+        }
+    }
+
+    fn read(&self) -> ControlStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Marks the status as stopped when the sender task ends, however it ends.
+struct StoppedOnDrop(Arc<StatusCell>);
+
+impl Drop for StoppedOnDrop {
+    fn drop(&mut self) {
+        self.0.stopped.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Operator access to the running control tasks. Cheap to clone.
 #[derive(Clone)]
 pub struct ControlHandle {
     commands: mpsc::UnboundedSender<Request>,
     shutdown: Arc<watch::Sender<bool>>,
     log: ControlLog,
-    status: watch::Receiver<ControlStatus>,
+    status: Arc<StatusCell>,
     heartbeat: Heartbeat,
 }
 
@@ -93,7 +154,7 @@ impl ControlHandle {
     }
 
     /// Queues an operator command; the receiver resolves with the answer once the control
-    /// task has processed it. `None` if the control task is gone.
+    /// task has processed it at its next tick. `None` if the control task is gone.
     pub fn request(&self, command: Command) -> Option<oneshot::Receiver<CommandReply>> {
         let (tx, rx) = oneshot::channel();
         self.commands
@@ -108,18 +169,18 @@ impl ControlHandle {
     /// The newest status the control task published, with the loop silence measured now,
     /// independently of the loop, so a stalled loop is visible.
     pub fn status(&self) -> ControlStatus {
-        let mut status = self.status.borrow().clone();
+        let mut status = self.status.read();
         status.watchdog.loop_silent_ms =
             u64::try_from(self.heartbeat.silent_for(now()).as_millis()).unwrap_or(u64::MAX);
         status
     }
 
-    /// Notifies whenever the control task publishes a new status. Closed once it has stopped.
-    pub fn status_changes(&self) -> watch::Receiver<ControlStatus> {
-        self.status.clone()
+    /// True once the sender task has ended (shutdown, abort or failure).
+    pub fn is_stopped(&self) -> bool {
+        self.status.stopped.load(Ordering::SeqCst)
     }
 
-    /// Asks the sender task to disarm and stop, and the watchdog to stop.
+    /// Asks the sender task to disarm and stop, and the relay and watchdog to stop.
     pub fn shutdown(&self) {
         self.shutdown.send_replace(true);
     }
@@ -127,23 +188,49 @@ impl ControlHandle {
     pub fn log(&self) -> ControlLog {
         self.log.clone()
     }
+
+    /// Holds the status lock as a slow reader would; for tests of the non-blocking publish.
+    #[cfg(test)]
+    pub(crate) fn hold_status(&self) -> std::sync::MutexGuard<'_, ControlStatus> {
+        self.status
+            .status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// The control tasks, ready to be spawned, and the handle to operate them.
 pub struct ControlRuntime {
     pub handle: ControlHandle,
-    /// Runs until shutdown; resolves with what the shutdown did.
+    /// The control loop. Runs until shutdown; resolves with what the shutdown did. The
+    /// application runs it on its own elevated thread.
     pub sender_task: BoxFuture<ShutdownReport>,
-    /// Runs until shutdown.
+    /// Forwards telemetry frames to the control loop. Runs until shutdown, on the shared
+    /// runtime.
+    pub relay_task: BoxFuture<()>,
+    /// Runs until shutdown, on the shared runtime.
     pub watchdog_task: BoxFuture<()>,
 }
 
-/// Builds the dry-run control runtime. Nothing runs until the returned futures are spawned.
+/// Builds the dry-run control runtime with tokio's timer (deterministic tests). Nothing runs
+/// until the returned futures are spawned.
 pub fn build(
     feed: impl FrameSource,
     source: Box<dyn RequestSource>,
     config: CoreConfig,
 ) -> ControlRuntime {
+    build_with_timer(feed, source, config, Box::new(TokioTimer))
+}
+
+/// Builds the dry-run control runtime with the given tick timer. The application uses a
+/// precise timer and runs the sender task on its own thread (see `control_app`).
+pub fn build_with_timer(
+    feed: impl FrameSource,
+    source: Box<dyn RequestSource>,
+    mut config: CoreConfig,
+    timer: Box<dyn TickTimer>,
+) -> ControlRuntime {
+    config.timer = timer.kind();
     let start = now();
     let log = ControlLog::new(start);
     let heartbeat = Heartbeat::new(start);
@@ -152,49 +239,116 @@ pub fn build(
     let core = ControlCore::dry_run(config, source, log.clone(), heartbeat.clone(), trip, start);
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (status_tx, status_rx) = watch::channel(core.status(start));
+    let status = Arc::new(StatusCell {
+        status: Mutex::new(core.status(start)),
+        stopped: AtomicBool::new(false),
+    });
     ControlRuntime {
         handle: ControlHandle {
             commands: command_tx,
             shutdown: Arc::new(shutdown_tx),
             log: log.clone(),
-            status: status_rx,
+            status: status.clone(),
             heartbeat,
         },
         sender_task: Box::pin(run_sender(
             core,
-            feed,
+            input_rx,
             command_rx,
             shutdown_rx.clone(),
-            status_tx,
+            status,
+            timer,
         )),
+        relay_task: Box::pin(run_relay(feed, input_tx, shutdown_rx.clone())),
         watchdog_task: Box::pin(run_watchdog(watchdog, log, shutdown_rx)),
     }
 }
 
-/// Observes the newest frame of a receiver, if there is one.
-fn observe(core: &mut ControlCore<DryRunSink>, receiver: &mut FrameReceiver) {
-    let at = now();
-    let frame = receiver.borrow_and_update();
-    if let Some(received) = frame.as_ref() {
-        core.on_frame(received, at);
+/// Forwards the receiver's current frame, if there is one.
+fn forward(receiver: &mut FrameReceiver, inputs: &mpsc::UnboundedSender<Input>) {
+    let observed_at = now();
+    let frame = receiver.borrow_and_update().clone();
+    if let Some(frame) = frame {
+        let _ = inputs.send(Input::Frame {
+            frame: Box::new(frame),
+            observed_at,
+        });
     }
 }
 
-/// Processes everything queued at once, any disarm first, publishes the resulting status, and
-/// only then answers each request, so a requester never sees a status older than its answer.
-fn handle_commands(
-    core: &mut ControlCore<DryRunSink>,
-    first: Request,
-    queue: &mut mpsc::UnboundedReceiver<Request>,
-    status: &watch::Sender<ControlStatus>,
+/// Runs on the shared runtime: forwards every frame of the engine's channel to the control
+/// loop and reports when the channel is lost and found again. The control loop never registers
+/// a waker on this queue, so the relay cannot wake (or block) the elevated control thread.
+async fn run_relay(
+    feed: impl FrameSource,
+    inputs: mpsc::UnboundedSender<Input>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut batch = vec![first];
+    let mut receiver = feed.receiver();
+    let mut open = receiver.has_changed().is_ok();
+    if open {
+        forward(&mut receiver, &inputs);
+    } else {
+        let _ = inputs.send(Input::FeedLost(now()));
+    }
+    let mut retry = tokio::time::interval(FEED_RETRY);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    while !inputs.is_closed() {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            changed = receiver.changed(), if open => {
+                if changed.is_ok() {
+                    forward(&mut receiver, &inputs);
+                } else {
+                    open = false;
+                    let _ = inputs.send(Input::FeedLost(now()));
+                }
+            }
+            _ = retry.tick(), if !open => {
+                // The engine may have restarted its pipe server and replaced the channel.
+                receiver = feed.receiver();
+                if receiver.has_changed().is_ok() {
+                    open = true;
+                    let _ = inputs.send(Input::FeedRestored(now()));
+                    forward(&mut receiver, &inputs);
+                }
+            }
+        }
+    }
+}
+
+/// Hands everything the relay queued to the core, in order. Never waits.
+fn drain_inputs(core: &mut ControlCore<DryRunSink>, inputs: &mut mpsc::UnboundedReceiver<Input>) {
+    while let Ok(input) = inputs.try_recv() {
+        match input {
+            Input::Frame { frame, observed_at } => {
+                core.on_frame(&frame, observed_at);
+            }
+            Input::FeedLost(at) => core.note_feed(false, at),
+            Input::FeedRestored(at) => core.note_feed(true, at),
+        }
+    }
+}
+
+/// Processes every queued command, any disarm first, publishes the resulting status, and only
+/// then answers each request, so a requester never sees a status older than its answer.
+/// Never waits for new commands.
+fn drain_commands(
+    core: &mut ControlCore<DryRunSink>,
+    queue: &mut mpsc::UnboundedReceiver<Request>,
+    status: &StatusCell,
+    at: Instant,
+) {
+    let mut batch = Vec::new();
     while let Ok(request) = queue.try_recv() {
         batch.push(request);
     }
-    let at = now();
+    if batch.is_empty() {
+        return;
+    }
     let (disarms, others): (Vec<Request>, Vec<Request>) = batch
         .into_iter()
         .partition(|r| r.command == Command::Disarm);
@@ -204,7 +358,7 @@ fn handle_commands(
         answered.push((request.reply, response));
     }
     let state = core.state();
-    status.send_replace(core.status(now()));
+    status.publish(core.status(at));
     for (reply, response) in answered {
         if let Some(reply) = reply {
             // The requester may have given up waiting; that is not an error.
@@ -215,59 +369,33 @@ fn handle_commands(
 
 async fn run_sender(
     mut core: ControlCore<DryRunSink>,
-    feed: impl FrameSource,
+    mut inputs: mpsc::UnboundedReceiver<Input>,
     mut commands: mpsc::UnboundedReceiver<Request>,
     mut shutdown: watch::Receiver<bool>,
-    status: watch::Sender<ControlStatus>,
+    status: Arc<StatusCell>,
+    mut timer: Box<dyn TickTimer>,
 ) -> ShutdownReport {
-    let mut receiver = feed.receiver();
-    let mut open = receiver.has_changed().is_ok();
-    if open {
-        observe(&mut core, &mut receiver);
-    } else {
-        core.note_feed(false, now());
-    }
-
+    let _stopped = StoppedOnDrop(status.clone());
     loop {
-        let deadline = TokioInstant::from_std(core.next_deadline());
+        let deadline = core.next_deadline();
         tokio::select! {
             biased;
             // Shutdown, or the handle was dropped: either way, disarm and stop.
             _ = shutdown.changed() => break,
-            request = commands.recv() => {
-                if let Some(request) = request {
-                    handle_commands(&mut core, request, &mut commands, &status);
-                }
-            }
-            () = sleep_until(deadline) => {
+            () = timer.wait_until(deadline) => {
                 let at = now();
-                if !open {
-                    // The engine may have restarted its pipe server and replaced the channel.
-                    receiver = feed.receiver();
-                    if receiver.has_changed().is_ok() {
-                        open = true;
-                        core.note_feed(true, at);
-                        observe(&mut core, &mut receiver);
-                    }
-                }
+                drain_inputs(&mut core, &mut inputs);
+                drain_commands(&mut core, &mut commands, &status, at);
                 core.tick(at);
                 core.tick_finished(now());
-                status.send_replace(core.status(at));
-            }
-            changed = receiver.changed(), if open => {
-                if changed.is_ok() {
-                    observe(&mut core, &mut receiver);
-                } else {
-                    open = false;
-                    core.note_feed(false, now());
-                }
+                status.publish_if_free(core.status(at));
             }
         }
     }
     let at = now();
     let report = core.shutdown(at);
-    // The final status (disarmed) is published before the task ends; the channel then closes.
-    status.send_replace(core.status(at));
+    // The final status (disarmed) is published before the task ends.
+    status.publish(core.status(at));
     report
 }
 
@@ -358,6 +486,8 @@ mod tests {
 
     fn spawn_runtime(feed: &FrameFeed, request: Box<dyn RequestSource>) -> Setup {
         let rt = build(feed.clone(), request, CoreConfig::default());
+        // The relay ends by itself at shutdown.
+        drop(tokio::spawn(rt.relay_task));
         Setup {
             handle: rt.handle,
             sender: tokio::spawn(rt.sender_task),
@@ -391,9 +521,9 @@ mod tests {
 
     async fn arm_and_activate(handle: &ControlHandle) {
         assert!(handle.send(Command::Arm));
-        run_for(10).await;
+        run_for(45).await;
         assert!(handle.send(Command::Activate));
-        run_for(10).await;
+        run_for(45).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -461,7 +591,7 @@ mod tests {
         // Arming works only if telemetry is usable, which needs the monitor to have seen
         // several consecutive frames.
         assert!(setup.handle.send(Command::Arm));
-        run_for(5).await;
+        run_for(45).await;
         let log = setup.handle.log().snapshot();
         assert!(
             decisions(&log).iter().any(|d| matches!(
@@ -546,7 +676,7 @@ mod tests {
 
         // The deliberate sequence works on the new channel, which proves it is being read.
         assert!(setup.handle.send(Command::ResetFault));
-        run_for(10).await;
+        run_for(45).await;
         arm_and_activate(&setup.handle).await;
         run_for(400).await;
         assert!(
@@ -574,7 +704,7 @@ mod tests {
         assert!(d.iter().any(|e| matches!(e, DecisionEvent::FeedRestored)));
         // Telemetry is usable now: arming succeeds.
         assert!(setup.handle.send(Command::Arm));
-        run_for(10).await;
+        run_for(45).await;
         assert!(
             decisions(&setup.handle.log().snapshot())
                 .iter()
@@ -663,7 +793,7 @@ mod tests {
         // Both are queued before the loop runs; the disarm goes first.
         assert!(setup.handle.send(Command::Activate));
         assert!(setup.handle.send(Command::Disarm));
-        run_for(5).await;
+        run_for(45).await;
         let d = decisions(&setup.handle.log().snapshot());
         let disarm_at = d
             .iter()

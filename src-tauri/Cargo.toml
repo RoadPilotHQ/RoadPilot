@@ -24,7 +24,7 @@ tokio = { version = "1.54.1", features = ["sync", "time", "macros", "net"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tauri = { version = "2.12.5", features = ["test"] }

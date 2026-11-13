@@ -88,7 +88,7 @@ Four levels, from weakest to strongest evidence. Nothing in the control pipeline
 - The Control section renders at 1280×900, 900×800 and 380×800 (logical pixels): Disarm stays first and fully visible, the buttons wrap at narrow widths, the Dry Run badge and the not-transmitted note are visible.
 - Arm through the real IPC path was refused by the supervisor ("telemetry not ready") and both refusals appeared in the recent decisions with their age.
 - Closing the window ran the orderly control shutdown; the application exited in under one second without any shutdown warning.
-- Tick timing on the same machine: see the outstanding risks below.
+- Tick timing on the same machine, with no game running: see [timing.md](timing.md).
 
 **3. Verified in ATS or ETS2 gameplay:** nothing in the control pipeline. Only the schema 1 telemetry plugin (speed, RPM, gear) was live-tested, in ATS.
 
@@ -102,7 +102,7 @@ On Windows, test executables need the same application manifest as the app (Comm
 - **The input plugin is not verified in-game.** Axis binding, steering sign and range, and the effect of the plugin's own limits are unknown.
 - **Manual override is not verified.** How the game combines a bound RoadPilot axis with the player's wheel or keyboard is unknown; until it is, the only reliable override is to disarm, unbind the axis or remove the plugin.
 - **Thresholds are not calibrated against live gameplay.** The 150 ms age limit, 50 ms settling, 100 ms backlog tolerance, 40 ms period and 100 ms watchdog timeout come from documented frame rates and protocol limits, not from measurements in a game.
-- **Windows timer granularity.** Measured on the development machine (250 ticks of the same tokio timer the sender uses): lateness median 8.2 ms, 95th percentile 15.3 ms, maximum 25.2 ms; 40 % of ticks exceed the 10 ms "late" threshold. Tick intervals: median 45.7 ms, maximum 55.3 ms, and about 1 % exceed the input protocol's 50 ms refresh requirement. This is harmless in dry run (the safety limits are 100 ms for gaps and the watchdog, 150 ms for the plugin's steering timeout), but it must be resolved before any live transmission, for example with a high-resolution timer or a shorter period, and the late threshold needs calibrating.
+- **Tick timing with a game running is not measured.** The sender now runs on a dedicated thread with a precise timer at elevated thread priority. On a quiet desktop and under full CPU load no tick interval exceeded 50 ms (maximum 45.3 ms idle, 40.4 ms under load; see [timing.md](timing.md)). Before that, tokio's timer produced intervals up to 55.3 ms. It is not yet measured with ATS or ETS2 running, and the 10 ms "late" threshold is not recalibrated.
 - **No single-instance protection across processes.** A second application instance cannot open the telemetry pipe, but its own dry-run control runtime still starts.
 - **Control section size.** In the desktop window at 1280×900 the section takes most of the first screen and pushes the overview cards below the fold; the status rows could be laid out more compactly.
 - **No autonomous steering or speed controller exists.** The request source is neutral.
