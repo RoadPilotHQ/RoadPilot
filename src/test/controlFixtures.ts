@@ -3,9 +3,24 @@ import type { ControlBridge } from '@/backend/controlSource'
 import type {
   CommandReply,
   ControlStatus,
+  LatencyMeasure,
   OperatorCommand,
   TimingHistogram,
 } from '@/domain/control'
+
+/** A latency measure whose newest sample is normal. */
+export function measure(lastMs: number): LatencyMeasure {
+  return {
+    class: 'normal',
+    lastMs,
+    normal: 600,
+    delayed: 0,
+    critical: 0,
+    unusable: 0,
+    degraded: false,
+    degradedEpisodes: 0,
+  }
+}
 
 /** A narrow distribution around `centerMs`. */
 export function histogram(centerMs: number): TimingHistogram {
@@ -81,6 +96,13 @@ export function controlStatus(overrides: Partial<ControlStatus> = {}): ControlSt
       lateTicks: 0,
       gapViolations: 0,
       watchdogTrips: 0,
+    },
+    latency: {
+      shadowMode: true,
+      processing: measure(3.3),
+      transport: measure(0.13),
+      ageAtReceive: measure(3.4),
+      ageAtDecision: measure(25.5),
     },
     ...overrides,
   }

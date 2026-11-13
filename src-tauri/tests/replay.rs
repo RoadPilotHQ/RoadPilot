@@ -26,6 +26,7 @@ mod fixture;
 
 use fixture::{Fixture, Record};
 use roadpilot_lib::control::freshness::FrameDigest;
+use roadpilot_lib::control::latency::{Measure, MeasureSnapshot};
 use roadpilot_lib::control::log::{ControlLog, LogObserver, Observed};
 use roadpilot_lib::control::mailbox::{self, Delivery, Received};
 use roadpilot_lib::control::sender::{ControlCore, CoreConfig, NeutralRequests};
@@ -87,6 +88,8 @@ struct Outcome {
     max_age_at_receive: Option<Duration>,
     /// Items the mailbox dropped (0 on the direct path).
     handoff_lost: u64,
+    /// Latency diagnosis (R6, shadow mode) per measure.
+    latency: BTreeMap<&'static str, MeasureSnapshot>,
 }
 
 fn game(fixture: &Fixture) -> GameId {
@@ -156,6 +159,15 @@ enum Path {
     /// the frame is received; the control loop drains at each tick, except while `stalled`
     /// (µs since the recording started, start and length).
     Mailbox { stall: Option<(i64, i64)> },
+}
+
+fn measure_name(m: Measure) -> &'static str {
+    match m {
+        Measure::Processing => "processing",
+        Measure::Transport => "transport",
+        Measure::AgeAtReceive => "ageAtReceive",
+        Measure::AgeAtDecision => "ageAtDecision",
+    }
 }
 
 fn replay(fixture: &Fixture) -> Outcome {
@@ -236,6 +248,10 @@ fn replay_via(fixture: &Fixture, path: Path) -> Outcome {
     }
     core.shutdown(end);
     let stats = core.stats();
+    let latency = Measure::ALL
+        .into_iter()
+        .map(|m| (measure_name(m), core.latency().snapshot(m)))
+        .collect();
     drop(core);
     let assessments = decisions.assessments.lock().unwrap().clone();
     let decisions = decisions.decisions.lock().unwrap().clone();
@@ -250,6 +266,7 @@ fn replay_via(fixture: &Fixture, path: Path) -> Outcome {
         clock_missing_or_invalid,
         max_age_at_receive,
         handoff_lost: lost,
+        latency,
     }
 }
 
@@ -426,4 +443,67 @@ fn a_control_thread_stalled_for_500_ms_across_a_real_pause_loses_no_event() {
         baseline.decisions["epoch:gap"] + 1
     );
     assert_eq!(stalled.frames_invalid, 0);
+}
+
+// ---- R6: latency diagnosis in shadow mode ----
+
+#[test]
+fn latency_diagnosis_of_the_calibration_drive() {
+    let fixture = fixture::parse(CALIBRATION);
+    let outcome = replay(&fixture);
+    let l = |m: &str| outcome.latency[m];
+    // Transport: 3 frames over 10 ms (max 20.85 ms), none critical, no episode.
+    assert_eq!(
+        (
+            l("transport").delayed,
+            l("transport").critical,
+            l("transport").degraded_episodes
+        ),
+        (3, 0, 0)
+    );
+    // Plugin processing: one frame over 20 ms (max 23.68 ms).
+    assert_eq!(
+        (
+            l("processing").delayed,
+            l("processing").critical,
+            l("processing").degraded_episodes
+        ),
+        (1, 0, 0)
+    );
+    // Age at receive: none over 30 ms (max 23.90 ms).
+    assert_eq!(
+        (l("ageAtReceive").delayed, l("ageAtReceive").critical),
+        (0, 0)
+    );
+    // Age at decision (per tick): two ticks over 100 ms (max 111.6 ms at 16-24 FPS).
+    assert_eq!(
+        (
+            l("ageAtDecision").delayed,
+            l("ageAtDecision").critical,
+            l("ageAtDecision").degraded_episodes
+        ),
+        (2, 0, 0)
+    );
+    // Every running frame has a valid clock: nothing is unusable while the game runs.
+    for m in ["processing", "transport", "ageAtReceive", "ageAtDecision"] {
+        assert_eq!(l(m).unusable, 0, "{m}");
+    }
+    assert_eq!(
+        l("transport").normal + 3,
+        43_185,
+        "every running frame was measured"
+    );
+    // Shadow mode: the decisions and freshness states are exactly those without the
+    // diagnosis (see calibration_drive_baseline_reproduces_the_recorded_decisions), and the
+    // simulation-time backlog check (R7) still raises its 33 epochs.
+    assert_eq!(outcome.decisions["epoch:backlog"], 33);
+}
+
+#[test]
+fn latency_diagnosis_without_qpc_is_never_normal() {
+    let outcome = replay(&fixture::parse(STAGE_B));
+    let transport = outcome.latency["transport"];
+    assert_eq!(transport.normal, 0);
+    assert!(transport.unusable > 30_000);
+    assert!(transport.degraded);
 }

@@ -194,6 +194,30 @@ export interface ControlStatus {
   /** Newest first. */
   recentDecisions: LogEntry[]
   timing: ControlTiming
+  /** Telemetry latency diagnosis (R6). Shadow mode: shown, never used for a decision. */
+  latency: ControlLatency
+}
+
+export type LatencyClassCode = 'normal' | 'delayed' | 'critical' | 'unusable'
+
+/** One latency measure: class of the newest sample, counts since start, degraded episode. */
+export interface LatencyMeasure {
+  class: LatencyClassCode | null
+  lastMs: number | null
+  normal: number
+  delayed: number
+  critical: number
+  unusable: number
+  degraded: boolean
+  degradedEpisodes: number
+}
+
+export interface ControlLatency {
+  shadowMode: boolean
+  processing: LatencyMeasure
+  transport: LatencyMeasure
+  ageAtReceive: LatencyMeasure
+  ageAtDecision: LatencyMeasure
 }
 
 /** One timing distribution in milliseconds; `over40`, `over45` and `over50` are exact counts. */

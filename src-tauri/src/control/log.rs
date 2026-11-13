@@ -29,6 +29,7 @@
 
 use super::command::{Adjustments, ControlRequest, Withheld};
 use super::freshness::{Assessment, Discontinuity};
+use super::latency::LatencyEvent;
 use super::protocol::MESSAGE_LEN;
 use super::sink::Delivery;
 use super::supervisor::{Command, Rejection, Transition};
@@ -126,6 +127,11 @@ pub enum Observed {
     Assessment {
         at: Duration,
         assessment: Assessment,
+    },
+    /// A latency diagnosis event (shadow mode, see `latency`); no ring keeps it.
+    Latency {
+        at: Duration,
+        event: LatencyEvent,
     },
 }
 
@@ -246,6 +252,14 @@ impl ControlLog {
         if let Some(observer) = &self.observer {
             observer.observe(record);
         }
+    }
+
+    /// Reports a latency diagnosis event to the observer only (shadow mode).
+    pub fn latency(&self, now: Instant, event: LatencyEvent) {
+        self.notify(Observed::Latency {
+            at: now.saturating_duration_since(self.origin),
+            event,
+        });
     }
 
     /// Reports a changed freshness assessment to the observer only. No ring keeps it, so the
@@ -530,7 +544,7 @@ mod tests {
                 Observed::Decision(e) => e.n,
                 Observed::Timing(e) => e.n,
                 Observed::Message(e) => e.n,
-                Observed::Assessment { .. } => unreachable!(),
+                Observed::Assessment { .. } | Observed::Latency { .. } => unreachable!(),
             })
             .collect();
         assert_eq!(positions, (0..30).collect::<Vec<_>>());

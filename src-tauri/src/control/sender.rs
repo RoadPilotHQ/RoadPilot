@@ -33,6 +33,7 @@ use super::freshness::{
     Assessment, Discontinuity, FrameDigest, FreshnessConfig, FreshnessMonitor, Observation,
     Unusable,
 };
+use super::latency::LatencyMonitor;
 use super::log::{
     Bounded, ControlLog, DecisionEvent, DisarmStatus, MessageKind, MessageRecord, TimingEvent,
 };
@@ -149,6 +150,11 @@ pub struct ControlCore<S: MessageSink> {
     last_command_at: Option<Instant>,
     /// Kind of the last assessment handed to the log observer (diagnostics only).
     last_assessment: Option<AssessmentKey>,
+    /// Latency diagnosis (R6, shadow mode): never read by any decision.
+    latency: LatencyMonitor,
+    /// Production time of the newest running frame for the age at decision (`Some(None)`: it
+    /// had no valid timing); `None` while paused and before the first running frame.
+    newest_running: Option<Option<Instant>>,
 }
 
 impl ControlCore<DryRunSink> {
@@ -202,6 +208,8 @@ impl<S: MessageSink> ControlCore<S> {
             tick_started: None,
             last_command_at: None,
             last_assessment: None,
+            latency: LatencyMonitor::default(),
+            newest_running: None,
         }
     }
 
@@ -223,6 +231,11 @@ impl<S: MessageSink> ControlCore<S> {
 
     pub fn stats(&self) -> CoreStats {
         self.stats
+    }
+
+    /// The latency diagnosis (R6, shadow mode).
+    pub fn latency(&self) -> &LatencyMonitor {
+        &self.latency
     }
 
     pub fn log(&self) -> &ControlLog {
@@ -288,6 +301,7 @@ impl<S: MessageSink> ControlCore<S> {
             loop_silent: self.heartbeat.silent_for(now),
             stats: self.stats,
             recent_decisions: self.log.recent_decisions(RECENT_DECISIONS),
+            latency: &self.latency,
             timing: &self.timing,
         })
     }
@@ -389,6 +403,19 @@ impl<S: MessageSink> ControlCore<S> {
                 }
                 self.last_frame_invalid = true;
             }
+        }
+        // Latency diagnosis (shadow mode): measured and reported, never used for a decision.
+        match observation {
+            Observation::Accepted { .. } | Observation::Invalid(_) if !digest.paused => {
+                self.newest_running = Some(digest.produced_at);
+            }
+            Observation::Accepted { .. } => self.newest_running = None,
+            _ => {}
+        }
+        if !matches!(observation, Observation::Rejected(_)) {
+            let log = &self.log;
+            self.latency
+                .on_frame(digest, |event| log.latency(now, event));
         }
         observation
     }
@@ -492,6 +519,10 @@ impl<S: MessageSink> ControlCore<S> {
             self.last_assessment = Some(key);
             self.log.assessment(now, assessment);
         }
+        // Latency diagnosis of the age at decision (shadow mode, no effect on what follows).
+        let log = &self.log;
+        self.latency
+            .on_tick(now, self.newest_running, |event| log.latency(now, event));
         if let Some(t) = self.supervisor.update(&assessment) {
             self.log_transition(now, t);
             transition = transition.or(Some(t));

@@ -29,6 +29,17 @@ telemetry plugin --pipe--> telemetry engine (one pipe server)
   - **Every loss is reported where it happened:** each item carries the count of items dropped before it; the control loop starts a new freshness epoch (`handoffOverflow`) at that point, so the state must settle again and the supervisor reacts through its existing rules (Armed disarms, Active faults). A loss with no item after it is reported once the queue is found empty.
   - Disconnects and the end of the game have no item of their own (the pipe gives no signal); they are detected from time at every tick and cannot be lost in the queue.
   - Replay of both recorded drives through the mailbox gives exactly the decisions of the direct path. With the control thread stalled for 500 ms across a real pause, 8 frames are dropped, one `handoffOverflow` epoch and one extra gap epoch follow, and the pause is still detected.
+- **Latency diagnosis, shadow mode** (R6, `control/latency.rs`). Four measures, each classified per sample as normal, delayed, critical or unusable (no valid QPC timing, never normal):
+
+  | Measure                                                       | Delayed  | Critical | Calibration drive        |
+  | ------------------------------------------------------------- | -------- | -------- | ------------------------ |
+  | Plugin processing (`sent − produced`, includes ~16 ms pacing) | > 20 ms  | > 50 ms  | 1 delayed (max 23.7 ms)  |
+  | Transport (`received − sent`)                                 | > 10 ms  | > 50 ms  | 3 delayed (max 20.9 ms)  |
+  | Age at receive (`received − produced`)                        | > 30 ms  | > 50 ms  | none (max 23.9 ms)       |
+  | Age at decision (tick − produced, newest running frame)       | > 100 ms | > 150 ms | 2 delayed (max 111.6 ms) |
+
+  A measure is _degraded_ while at least 3 of its last 10 samples are not normal; the episode ends after 30 normal samples. A critical sample is reported at once when a measure becomes critical. The results appear in the status (`latency`) and in the diagnostic recording (`control` lines of category `latency`); **no decision reads them**: freshness, supervisor, command generation and the simulation-time backlog check (R7) are unchanged, and the replays give exactly the same decisions and freshness states with the diagnosis. The limits were checked against the calibration drive and kept as proposed; none of them is a safety limit (the 150 ms age limit is enforced by the freshness check).
+
 - The sender ticks every 40 ms on the monotonic clock. Missed deadlines are skipped, never replayed; a gap over 100 ms between ticks is a safety event.
 - An independent watchdog task checks every 20 ms that the control loop updated the supervisor within the last 100 ms.
 

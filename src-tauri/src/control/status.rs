@@ -12,6 +12,7 @@
 
 use super::command::{Adjustments, CommandError, ControlRequest, Field, Withheld};
 use super::freshness::{Assessment, Discontinuity, Unusable};
+use super::latency::{LatencyClass, LatencyMonitor, Measure, MeasureSnapshot};
 use super::log::{
     Bounded, DecisionEvent, DisarmStatus, Entry, LogSnapshot, MessageKind, MessageRecord,
     TimingEvent,
@@ -636,6 +637,8 @@ pub struct ControlStatus {
     pub counters: CountersDto,
     pub recent_decisions: Vec<LogEntryDto>,
     pub timing: TimingDto,
+    /// Telemetry latency diagnosis (R6). Shadow mode: shown, never used for a decision.
+    pub latency: LatencyDto,
 }
 
 impl ControlStatus {
@@ -671,6 +674,7 @@ impl ControlStatus {
             counters: CountersDto::from(CoreStats::default()),
             recent_decisions: Vec::new(),
             timing: TimingDto::from_stats(&TimingStats::default(), 0),
+            latency: LatencyDto::from_monitor(&LatencyMonitor::default()),
         }
     }
 }
@@ -697,6 +701,7 @@ pub struct StatusInput<'a> {
     pub stats: CoreStats,
     pub recent_decisions: Vec<Entry<DecisionEvent>>,
     pub timing: &'a TimingStats,
+    pub latency: &'a LatencyMonitor,
 }
 
 pub fn build(input: &StatusInput<'_>) -> ControlStatus {
@@ -759,6 +764,7 @@ pub fn build(input: &StatusInput<'_>) -> ControlStatus {
             .map(LogEntryDto::decision)
             .collect(),
         timing: TimingDto::from_stats(input.timing, input.watchdog_trips),
+        latency: LatencyDto::from_monitor(input.latency),
     }
 }
 
@@ -1057,6 +1063,81 @@ pub fn recent_log(snapshot: &LogSnapshot, limit: usize) -> Vec<LogEntryDto> {
     all.sort_by_key(|e| std::cmp::Reverse(e.n));
     all.truncate(limit);
     all
+}
+
+// ---- latency diagnosis (R6, shadow mode) ----
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LatencyClassCode {
+    Normal,
+    Delayed,
+    Critical,
+    Unusable,
+}
+
+impl From<LatencyClass> for LatencyClassCode {
+    fn from(class: LatencyClass) -> Self {
+        match class {
+            LatencyClass::Normal => Self::Normal,
+            LatencyClass::Delayed => Self::Delayed,
+            LatencyClass::Critical => Self::Critical,
+            LatencyClass::Unusable => Self::Unusable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatencyMeasureDto {
+    /// Class of the newest sample; `None` before the first.
+    pub class: Option<LatencyClassCode>,
+    pub last_ms: Option<f64>,
+    pub normal: u64,
+    pub delayed: u64,
+    pub critical: u64,
+    pub unusable: u64,
+    /// A degraded episode is in progress (3 of the last 10 samples not normal).
+    pub degraded: bool,
+    pub degraded_episodes: u64,
+}
+
+impl From<MeasureSnapshot> for LatencyMeasureDto {
+    fn from(s: MeasureSnapshot) -> Self {
+        Self {
+            class: s.last_class.map(Into::into),
+            last_ms: s.last_value.map(millis_f64),
+            normal: s.normal,
+            delayed: s.delayed,
+            critical: s.critical,
+            unusable: s.unusable,
+            degraded: s.degraded,
+            degraded_episodes: s.degraded_episodes,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatencyDto {
+    /// Always true in this phase: the diagnosis takes part in no decision.
+    pub shadow_mode: bool,
+    pub processing: LatencyMeasureDto,
+    pub transport: LatencyMeasureDto,
+    pub age_at_receive: LatencyMeasureDto,
+    pub age_at_decision: LatencyMeasureDto,
+}
+
+impl LatencyDto {
+    pub fn from_monitor(monitor: &LatencyMonitor) -> Self {
+        Self {
+            shadow_mode: true,
+            processing: monitor.snapshot(Measure::Processing).into(),
+            transport: monitor.snapshot(Measure::Transport).into(),
+            age_at_receive: monitor.snapshot(Measure::AgeAtReceive).into(),
+            age_at_decision: monitor.snapshot(Measure::AgeAtDecision).into(),
+        }
+    }
 }
 
 #[cfg(test)]

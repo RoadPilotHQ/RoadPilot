@@ -47,6 +47,7 @@
 //!   this file for it.
 
 use crate::control::freshness::{Assessment, Unusable};
+use crate::control::latency::{LatencyEvent, Measure};
 use crate::control::log::{LogObserver, Observed};
 use crate::control::runtime::FrameSource;
 use crate::control::status::{LogEntryDto, freshness};
@@ -517,12 +518,37 @@ fn entry_json(category: &str, n: u64, at: Duration, entry: Value) -> Value {
     json!({ "category": category, "n": n, "atUs": micros(at), "entry": entry })
 }
 
+fn measure_code(measure: Measure) -> &'static str {
+    match measure {
+        Measure::Processing => "processing",
+        Measure::Transport => "transport",
+        Measure::AgeAtReceive => "ageAtReceive",
+        Measure::AgeAtDecision => "ageAtDecision",
+    }
+}
+
 fn control_json(record: Observed) -> Value {
     let dto = |dto: LogEntryDto| serde_json::to_value(dto).unwrap_or(Value::Null);
     match record {
         Observed::Decision(e) => entry_json("decision", e.n, e.at, dto(LogEntryDto::decision(&e))),
         Observed::Timing(e) => entry_json("timing", e.n, e.at, dto(LogEntryDto::timing(&e))),
         Observed::Message(e) => entry_json("message", e.n, e.at, dto(LogEntryDto::message(&e))),
+        Observed::Latency { at, event } => {
+            let (event, measure, value) = match event {
+                LatencyEvent::Critical { measure, value } => {
+                    ("critical", measure, Some(micros(value)))
+                }
+                LatencyEvent::DegradedStarted { measure } => ("degradedStarted", measure, None),
+                LatencyEvent::DegradedEnded { measure } => ("degradedEnded", measure, None),
+            };
+            json!({
+                "category": "latency",
+                "atUs": micros(at),
+                "event": event,
+                "measure": measure_code(measure),
+                "valueUs": value,
+            })
+        }
         Observed::Assessment { at, assessment } => {
             let (code, detail) = freshness(&assessment);
             let mut value = json!({
