@@ -29,7 +29,7 @@
 //!   aborted).
 
 use super::command::{Adjustments, CommandGenerator, ControlLimits, ControlRequest, Withheld};
-use super::freshness::{Assessment, FreshnessConfig, FreshnessMonitor, Observation};
+use super::freshness::{Assessment, FreshnessConfig, FreshnessMonitor, Observation, Unusable};
 use super::log::{
     Bounded, ControlLog, DecisionEvent, DisarmStatus, MessageKind, MessageRecord, TimingEvent,
 };
@@ -144,6 +144,8 @@ pub struct ControlCore<S: MessageSink> {
     timing: TimingStats,
     tick_started: Option<Instant>,
     last_command_at: Option<Instant>,
+    /// Kind of the last assessment handed to the log observer (diagnostics only).
+    last_assessment: Option<AssessmentKey>,
 }
 
 impl ControlCore<DryRunSink> {
@@ -196,6 +198,7 @@ impl<S: MessageSink> ControlCore<S> {
             timing: TimingStats::new(config.timer),
             tick_started: None,
             last_command_at: None,
+            last_assessment: None,
         }
     }
 
@@ -460,6 +463,11 @@ impl<S: MessageSink> ControlCore<S> {
 
         // 3. Vehicle assessment and supervisor.
         let assessment = self.monitor.assess(now);
+        let key = AssessmentKey::of(&assessment);
+        if self.last_assessment != Some(key) {
+            self.last_assessment = Some(key);
+            self.log.assessment(now, assessment);
+        }
         if let Some(t) = self.supervisor.update(&assessment) {
             self.log_transition(now, t);
             transition = transition.or(Some(t));
@@ -565,6 +573,37 @@ impl<S: MessageSink> ControlCore<S> {
     }
 }
 
+/// What counts as a change of the freshness assessment for the log observer: the kind, the
+/// invalid reason, and the epoch of a usable state. Ages and stall durations grow every tick
+/// and are deliberately not part of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AssessmentKey {
+    Usable {
+        epoch: u64,
+    },
+    Unusable {
+        kind: std::mem::Discriminant<Unusable>,
+        invalid: Option<super::vehicle::InvalidFrame>,
+    },
+}
+
+impl AssessmentKey {
+    fn of(assessment: &Assessment) -> Self {
+        match assessment {
+            Assessment::Usable(sample) => Self::Usable {
+                epoch: sample.epoch,
+            },
+            Assessment::Unusable(u) => Self::Unusable {
+                kind: std::mem::discriminant(u),
+                invalid: match u {
+                    Unusable::Invalid(reason) => Some(*reason),
+                    _ => None,
+                },
+            },
+        }
+    }
+}
+
 impl<S: MessageSink> Drop for ControlCore<S> {
     /// Last resort when the core is torn down without a shutdown (for example its task was
     /// aborted): the owed disarm is still encoded.
@@ -652,8 +691,15 @@ mod tests {
         }
 
         fn with_request(request: ControlRequest) -> Self {
+            Self::with_observer(request, None)
+        }
+
+        fn with_observer(
+            request: ControlRequest,
+            observer: Option<Arc<dyn super::super::log::LogObserver>>,
+        ) -> Self {
             let t0 = Instant::now();
-            let log = ControlLog::new(t0);
+            let log = ControlLog::with_observer(t0, observer);
             let heartbeat = Heartbeat::new(t0);
             let watchdog = Watchdog::new(heartbeat.clone(), SUPERVISOR_TIMEOUT);
             let trip = watchdog.flag();
@@ -1576,5 +1622,64 @@ mod tests {
         assert_eq!(status.timing.intervals.count, 14);
         assert_eq!(status.timing.timer, super::super::status::TimerCode::Tokio);
         assert!(!status.timing.elevated_priority);
+    }
+
+    #[derive(Default)]
+    struct Observed(Mutex<Vec<super::super::log::Observed>>);
+
+    impl super::super::log::LogObserver for Observed {
+        fn observe(&self, record: super::super::log::Observed) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    #[test]
+    fn assessment_changes_reach_the_log_observer_once_per_change() {
+        use super::super::log::Observed as O;
+        let seen = Arc::new(Observed::default());
+        let mut rig = Rig::with_observer(neutral(), Some(seen.clone()));
+        rig.frames_on = false;
+        rig.run_to(200); // no frame yet
+        rig.frames_on = true;
+        rig.run_to(1_000); // settling, then usable
+        rig.paused = true;
+        rig.run_to(1_400);
+        rig.paused = false;
+        rig.run_to(2_400);
+        rig.frames_on = false;
+        rig.run_to(3_000); // stale
+        let kinds: Vec<String> = seen
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| match r {
+                O::Assessment { assessment, .. } => Some(match assessment {
+                    Assessment::Usable(s) => format!("usable@{}", s.epoch),
+                    Assessment::Unusable(u) => format!("{u:?}")
+                        .split([' ', '(', '{'])
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "NoFrame", "Settling", "usable@1", "Paused", "Settling", "usable@2", "Stale"
+            ],
+            "{kinds:?}"
+        );
+        // Every decision also reached the observer, in log order.
+        let decisions = seen
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r, O::Decision(_)))
+            .count();
+        assert_eq!(decisions, rig.core.log().snapshot().decisions.len());
     }
 }

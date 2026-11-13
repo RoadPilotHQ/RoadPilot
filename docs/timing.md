@@ -28,11 +28,11 @@ The schedule itself is unchanged: fixed 40 ms grid on the monotonic clock, misse
 **Setup:** the production control slot with telemetry arriving at about 60 Hz, supervisor Active in dry run, so every tick generates and encodes a command.
 **Acceptance criterion:** no tick interval and no command refresh interval above 50 ms, no timing fault, no watchdog trip.
 
-| Run                                     | Ticks | Interval p99 | p99.9   | Max     | > 45 ms | > 50 ms | Lateness max | Result |
-| --------------------------------------- | ----- | ------------ | ------- | ------- | ------- | ------- | ------------ | ------ |
-| Idle, 60 s                              | 1504  | 40.5 ms      | 41.6 ms | 45.3 ms | 1       | 0       | 5.8 ms       | pass   |
-| 16 busy threads (`cpu_load`), 60 s      | 1504  | 40.4 ms      | 40.4 ms | 40.4 ms | 0       | 0       | 0.6 ms       | pass   |
-| Idle, 20 start/stop cycles of 5 s each  | 2573  | ≤ 40.6 ms    | —       | 40.7 ms | 0       | 0       | —            | pass   |
+| Run                                    | Ticks | Interval p99 | p99.9   | Max     | > 45 ms | > 50 ms | Lateness max | Result |
+| -------------------------------------- | ----- | ------------ | ------- | ------- | ------- | ------- | ------------ | ------ |
+| Idle, 60 s                             | 1504  | 40.5 ms      | 41.6 ms | 45.3 ms | 1       | 0       | 5.8 ms       | pass   |
+| 16 busy threads (`cpu_load`), 60 s     | 1504  | 40.4 ms      | 40.4 ms | 40.4 ms | 0       | 0       | 0.6 ms       | pass   |
+| Idle, 20 start/stop cycles of 5 s each | 2573  | ≤ 40.6 ms    | —       | 40.7 ms | 0       | 0       | —            | pass   |
 
 In all runs the command refresh intervals matched the tick intervals, and there were no late ticks, missed deadlines, timing faults or watchdog trips. Processing per tick stayed under 0.35 ms.
 
@@ -55,4 +55,5 @@ Record whether the machine was otherwise idle: a game, a virus scan or a WSL vir
 - The figures for normal priority under load (17 % over 50 ms) come from a run while a full-screen game was active. They were not repeated on the quiet desktop. They show the direction of the effect, not its exact size.
 - One machine only. Other CPUs, power plans and laptops on battery may behave differently.
 - No measurement with ATS or ETS2 running. A game competes for CPU time and may change the timer behaviour; this must be measured before any live transmission.
-- The 10 ms "late" threshold has not been recalibrated. With the precise timer no tick came close to it.
+- The 10 ms "late" threshold has not been recalibrated. In the tests above no tick came close to it.
+- **Application start (2026-11-13):** in the first start of a freshly built release application (synthetic 60 Hz telemetry, recorder on) one tick was 11.3 ms late, about 2 s after start and before any telemetry arrived; the maximum interval was 51.2 ms (1 of 246 above 50 ms). It did not recur in four further starts, two with and two without the recorder (maximum 40.5–41.4 ms, no late tick). The cause is not established; a virus scan of the new executable is plausible but unproven. Supervisor and watchdog limits (100 ms) were not reached.

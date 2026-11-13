@@ -29,7 +29,7 @@
 //! of its choice. Time comes from tokio's clock, which in tests is paused and advanced
 //! explicitly. Dry-run only: see `sink`.
 
-use super::log::{ControlLog, DecisionEvent};
+use super::log::{ControlLog, DecisionEvent, LogObserver};
 use super::sender::{ControlCore, CoreConfig, RequestSource, ShutdownReport};
 use super::sink::DryRunSink;
 use super::status::ControlStatus;
@@ -219,20 +219,22 @@ pub fn build(
     source: Box<dyn RequestSource>,
     config: CoreConfig,
 ) -> ControlRuntime {
-    build_with_timer(feed, source, config, Box::new(TokioTimer))
+    build_with_timer(feed, source, config, Box::new(TokioTimer), None)
 }
 
 /// Builds the dry-run control runtime with the given tick timer. The application uses a
 /// precise timer and runs the sender task on its own thread (see `control_app`).
+/// `observer`, if given, receives a copy of every log record (diagnostics only; see `log`).
 pub fn build_with_timer(
     feed: impl FrameSource,
     source: Box<dyn RequestSource>,
     mut config: CoreConfig,
     timer: Box<dyn TickTimer>,
+    observer: Option<Arc<dyn LogObserver>>,
 ) -> ControlRuntime {
     config.timer = timer.kind();
     let start = now();
-    let log = ControlLog::new(start);
+    let log = ControlLog::with_observer(start, observer);
     let heartbeat = Heartbeat::new(start);
     let watchdog = Watchdog::new(heartbeat.clone(), SUPERVISOR_TIMEOUT);
     let trip = watchdog.flag();

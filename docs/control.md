@@ -69,6 +69,8 @@ The UI is never the safety authority. Its buttons only send requests; the superv
 
 Three bounded rings, so high-rate records cannot evict safety decisions: decisions (256), timing (128) and encoded messages (256). Message records hold the encoded bytes, the requested and the bounded values, the adjustments (limited, brake override, rate limited) and the delivery status, which is always "not transmitted".
 
+For test drives, the optional diagnostic recorder writes every log record, and every change of the freshness assessment, to a file without the rings' limits. It is off unless `ROADPILOT_TELEMETRY_RECORD` is set; see [Diagnostic recording](telemetry.md#diagnostic-recording).
+
 ## Verification status
 
 Four levels, from weakest to strongest evidence. Nothing in the control pipeline has reached the last one.

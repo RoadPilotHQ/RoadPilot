@@ -80,6 +80,34 @@ Open the Visualization app with `?source=live` to connect to this stream. It sen
 
 The bridge is newly implemented and **has not yet been verified live in ATS or ETS2**. The socket's origin check limits browser access; binding to loopback does not authenticate other local processes.
 
+## Diagnostic recording
+
+For the analysis of test drives, RoadPilot can write every telemetry frame and every control log record to a JSON Lines file. It is a diagnostic tool only: it reads the same frame channel as control, opens no other pipe, sends nothing to the game and changes no control decision or limit.
+
+**Activation:** only through the environment variable `ROADPILOT_TELEMETRY_RECORD`, whose value is the path of a new file. Without it (or with an empty value) nothing is recorded and no recorder thread exists. An existing file is never overwritten; recording is then disabled and the application runs normally. Example (PowerShell):
+
+```
+$env:ROADPILOT_TELEMETRY_RECORD = "C:\RoadPilotLogs\drive-2026-11-13.jsonl"
+.\src-tauri\target\release\roadpilot.exe
+```
+
+**Records** (one JSON object per line, `formatVersion` 1; every line has `type`, `monoUs` and `unixUs`):
+
+| `type`    | Content                                                                                                                                                                                                                                                                                               |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start`   | First line: format version, application version, queue capacity.                                                                                                                                                                                                                                      |
+| `frame`   | Every observed frame: `session`, `sequence`, `sequenceGap` (sequence numbers skipped within the session), `sessionChanged`, `game`, `gameVersion`, `pluginState`, `paused`, `simulationTimeUs`, `droppedFields` and the complete frame (`frame`) with all vehicle data. `monoUs` is the receive time. |
+| `control` | Every control log record as it is logged (`category` `decision`, `timing` or `message`, with `n`, `atUs` and the same `entry` as the dashboard log), and every change of the freshness assessment (`category` `assessment`, with `freshness`, `epoch`, `ageUs`).                                      |
+| `feed`    | The frame channel was `attached` or `lost` (pipe server stopped or restarted).                                                                                                                                                                                                                        |
+| `loss`    | Records lost since the previous loss record: queue overflow (`queueFull`) or failed writes (`writeFailed`), with totals.                                                                                                                                                                              |
+| `end`     | Last line: records queued, written, lost to a full queue, lost to write errors and rejected after the stop, and `complete`.                                                                                                                                                                           |
+
+`monoUs` is microseconds on the monotonic clock since the recorder started; `unixUs` is the wall clock derived from it. A recording is complete only if its last line is `end` with `"complete": true`. A missing `end` line means the application did not exit normally.
+
+**Effect on control:** the control thread only hands each record to a bounded queue (16,384 records) with a non-blocking `try_send`; when the queue is full the record is dropped and counted, never waited for. Serialization and file writes run on a separate writer thread, which polls the queue and never blocks in a receive, so a sender never contends a lock with it. Frames are observed on their own thread at above-normal priority, below the two control threads. A frame that was replaced in the channel before the recorder saw it appears as a `sequenceGap`, never silently. On exit the application stops control first, then writes out the queue completely and closes the file with the `end` record.
+
+**Status:** unit-tested (on/off, format, sequence gaps, session change, pause, feed loss, control records beyond the ring capacity, queue overflow, write errors, complete drain on finish) and dry-run tested in the release application with synthetic 60 Hz frames (300 of 300 frames, no gap, complete). Not yet used in ATS or ETS2.
+
 ## Connection states
 
 | State          | Meaning                                                                        | Dashboard                           |

@@ -23,6 +23,23 @@ pub fn raise_current_thread_priority() -> bool {
     false
 }
 
+/// Sets the calling thread to `THREAD_PRIORITY_ABOVE_NORMAL`: above ordinary threads, but
+/// below the two control threads, which therefore always preempt it. Used only by the
+/// diagnostic recorder's frame observer, so that it keeps up with 60 Hz telemetry under load.
+#[cfg(windows)]
+pub fn raise_current_thread_priority_above_normal() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+    };
+    // SAFETY: as in `raise_current_thread_priority`.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn raise_current_thread_priority_above_normal() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -31,5 +48,9 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(raised, cfg!(windows));
+        let above_normal = std::thread::spawn(super::raise_current_thread_priority_above_normal)
+            .join()
+            .unwrap();
+        assert_eq!(above_normal, cfg!(windows));
     }
 }

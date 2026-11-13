@@ -16,9 +16,19 @@
 //!
 //! A message record states truthfully what happened to the message through [`Delivery`]; in
 //! this phase it is always "not transmitted".
+//!
+//! # Observer (diagnostics only)
+//!
+//! A log can be created with a [`LogObserver`] ([`ControlLog::with_observer`]). The observer
+//! receives a copy of every record as it is logged, before any ring could drop it, plus the
+//! freshness assessment whenever it changes ([`ControlLog::assessment`], which no ring keeps).
+//! The application uses it for the optional telemetry recorder. The observer is called after
+//! the log's lock is released, on the thread that logged the record (the elevated control
+//! thread for most records), so an implementation must return immediately and must never
+//! block, wait for a lock or do I/O. Without an observer nothing changes.
 
 use super::command::{Adjustments, ControlRequest, Withheld};
-use super::freshness::Discontinuity;
+use super::freshness::{Assessment, Discontinuity};
 use super::protocol::MESSAGE_LEN;
 use super::sink::Delivery;
 use super::supervisor::{Command, Rejection, Transition};
@@ -105,7 +115,27 @@ pub struct MessageRecord {
     pub delivery: Delivery,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// A record as seen by a [`LogObserver`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Observed {
+    Decision(Entry<DecisionEvent>),
+    Timing(Entry<TimingEvent>),
+    Message(Entry<MessageRecord>),
+    /// The freshness assessment changed (kind, invalid reason or epoch). `at` is relative to
+    /// the log's origin like every entry; there is no position `n` because no ring keeps it.
+    Assessment {
+        at: Duration,
+        assessment: Assessment,
+    },
+}
+
+/// Receives every record of a [`ControlLog`]. See the module documentation: it runs on the
+/// logging thread and must never block.
+pub trait LogObserver: Send + Sync {
+    fn observe(&self, record: Observed);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entry<T> {
     /// Position in the order of all records of all rings.
     pub n: u64,
@@ -165,14 +195,36 @@ pub struct LogSnapshot {
 }
 
 /// Shared handle to the log.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ControlLog {
     inner: Arc<Mutex<Inner>>,
+    /// Copy of the origin, so the observer path needs no lock.
+    origin: Instant,
+    /// Fixed at creation and never changed.
+    observer: Option<Arc<dyn LogObserver>>,
+}
+
+impl std::fmt::Debug for ControlLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlLog")
+            .field("inner", &self.inner)
+            .field("observed", &self.observer.is_some())
+            .finish()
+    }
 }
 
 impl ControlLog {
     pub fn new(origin: Instant) -> Self {
-        Self::with_capacities(origin, DECISION_CAPACITY, TIMING_CAPACITY, MESSAGE_CAPACITY)
+        Self::with_observer(origin, None)
+    }
+
+    /// A log whose records are also handed to `observer` (diagnostics). `None` is identical
+    /// to [`ControlLog::new`].
+    pub fn with_observer(origin: Instant, observer: Option<Arc<dyn LogObserver>>) -> Self {
+        let mut log =
+            Self::with_capacities(origin, DECISION_CAPACITY, TIMING_CAPACITY, MESSAGE_CAPACITY);
+        log.observer = observer;
+        log
     }
 
     fn with_capacities(origin: Instant, decisions: usize, timing: usize, messages: usize) -> Self {
@@ -184,7 +236,25 @@ impl ControlLog {
                 timing: Ring::new(timing.max(1)),
                 messages: Ring::new(messages.max(1)),
             })),
+            origin,
+            observer: None,
         }
+    }
+
+    /// Hands a record to the observer, if any. Always called without the lock held.
+    fn notify(&self, record: Observed) {
+        if let Some(observer) = &self.observer {
+            observer.observe(record);
+        }
+    }
+
+    /// Reports a changed freshness assessment to the observer only. No ring keeps it, so the
+    /// in-memory log and the UI are unaffected; without an observer this does nothing.
+    pub fn assessment(&self, now: Instant, assessment: Assessment) {
+        self.notify(Observed::Assessment {
+            at: now.saturating_duration_since(self.origin),
+            assessment,
+        });
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -202,21 +272,33 @@ impl ControlLog {
     }
 
     pub fn decision(&self, now: Instant, event: DecisionEvent) {
-        let mut inner = self.lock();
-        let entry = Self::entry(&mut inner, now, event);
-        inner.decisions.push(entry);
+        let entry = {
+            let mut inner = self.lock();
+            let entry = Self::entry(&mut inner, now, event);
+            inner.decisions.push(entry);
+            entry
+        };
+        self.notify(Observed::Decision(entry));
     }
 
     pub fn timing(&self, now: Instant, event: TimingEvent) {
-        let mut inner = self.lock();
-        let entry = Self::entry(&mut inner, now, event);
-        inner.timing.push(entry);
+        let entry = {
+            let mut inner = self.lock();
+            let entry = Self::entry(&mut inner, now, event);
+            inner.timing.push(entry);
+            entry
+        };
+        self.notify(Observed::Timing(entry));
     }
 
     pub fn message(&self, now: Instant, record: MessageRecord) {
-        let mut inner = self.lock();
-        let entry = Self::entry(&mut inner, now, record);
-        inner.messages.push(entry);
+        let entry = {
+            let mut inner = self.lock();
+            let entry = Self::entry(&mut inner, now, record);
+            inner.messages.push(entry);
+            entry
+        };
+        self.notify(Observed::Message(entry));
     }
 
     /// The newest `count` decision records, oldest first.
@@ -409,5 +491,97 @@ mod tests {
         let log = ControlLog::new(t0);
         log.decision(t0 - ms(500), DecisionEvent::FeedLost);
         assert_eq!(log.snapshot().decisions[0].at, Duration::ZERO);
+    }
+
+    // ---- observer ----
+
+    #[derive(Default)]
+    struct Collect(Mutex<Vec<Observed>>);
+
+    impl LogObserver for Collect {
+        fn observe(&self, record: Observed) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    #[test]
+    fn the_observer_sees_every_record_in_order_even_those_the_rings_drop() {
+        let t0 = Instant::now();
+        let seen = Arc::new(Collect::default());
+        let mut log = ControlLog::with_capacities(t0, 2, 2, 2);
+        log.observer = Some(seen.clone());
+        for i in 0..10u64 {
+            log.decision(
+                t0 + ms(i),
+                DecisionEvent::Epoch {
+                    epoch: i,
+                    cause: Discontinuity::Gap,
+                },
+            );
+            log.timing(t0 + ms(i), TimingEvent::Late { lateness: ms(i) });
+            log.message(t0 + ms(i), msg(MessageKind::Command));
+        }
+        assert_eq!(log.snapshot().dropped.decisions, 8, "the rings still drop");
+        let seen = seen.0.lock().unwrap();
+        assert_eq!(seen.len(), 30, "the observer misses nothing");
+        let positions: Vec<u64> = seen
+            .iter()
+            .map(|r| match r {
+                Observed::Decision(e) => e.n,
+                Observed::Timing(e) => e.n,
+                Observed::Message(e) => e.n,
+                Observed::Assessment { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(positions, (0..30).collect::<Vec<_>>());
+        assert!(matches!(
+            seen[27],
+            Observed::Decision(Entry {
+                at,
+                event: DecisionEvent::Epoch { epoch: 9, .. },
+                ..
+            }) if at == ms(9)
+        ));
+    }
+
+    #[test]
+    fn assessments_reach_only_the_observer() {
+        let t0 = Instant::now();
+        let seen = Arc::new(Collect::default());
+        let log = ControlLog::with_observer(t0, Some(seen.clone()));
+        let paused = Assessment::Unusable(super::super::freshness::Unusable::Paused);
+        log.assessment(t0 + ms(80), paused);
+        let s = log.snapshot();
+        assert!(s.decisions.is_empty() && s.timing.is_empty() && s.messages.is_empty());
+        assert_eq!(
+            *seen.0.lock().unwrap(),
+            vec![Observed::Assessment {
+                at: ms(80),
+                assessment: paused
+            }]
+        );
+        // Without an observer an assessment is a no-op.
+        let plain = ControlLog::new(t0);
+        plain.assessment(t0, paused);
+        assert!(plain.snapshot().decisions.is_empty());
+    }
+
+    #[test]
+    fn the_observer_is_called_without_the_log_lock_held() {
+        // An observer that reads the log would deadlock if it ran under the lock.
+        struct Reentrant(std::sync::OnceLock<ControlLog>, Mutex<usize>);
+        impl LogObserver for Reentrant {
+            fn observe(&self, _record: Observed) {
+                if let Some(log) = self.0.get() {
+                    *self.1.lock().unwrap() = log.snapshot().decisions.len();
+                }
+            }
+        }
+        let t0 = Instant::now();
+        let observer = Arc::new(Reentrant(std::sync::OnceLock::new(), Mutex::new(0)));
+        let log = ControlLog::with_observer(t0, Some(observer.clone()));
+        let _ = observer.0.set(log.clone());
+        log.decision(t0, DecisionEvent::FeedLost);
+        assert_eq!(*observer.1.lock().unwrap(), 1);
     }
 }

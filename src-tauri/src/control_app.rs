@@ -11,6 +11,7 @@
 //! The UI is never the safety authority. The commands here only queue requests for the control
 //! task; the supervisor decides. Dry-run is the only mode, and no command can change that.
 
+use crate::control::log::LogObserver;
 use crate::control::runtime::{self, ControlHandle, ControlRuntime, FrameSource};
 use crate::control::sender::{CoreConfig, RequestSource, ShutdownReport};
 use crate::control::status::{
@@ -20,7 +21,7 @@ use crate::control::supervisor::Command;
 use crate::control::timer::{PreciseTimer, TickTimer, TokioTimer};
 use crate::platform;
 use serde::Serialize;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::{self, JoinHandle};
 use tokio::sync::oneshot;
@@ -148,18 +149,32 @@ impl ControlSlot {
 
     /// Starts the dry-run control runtime on the application's async runtime. Refuses a
     /// second start: there is only ever one runtime per slot.
+    /// Without an observer; the application uses [`ControlSlot::start_observed`].
+    #[cfg(test)]
     pub fn start(
         &self,
         feed: impl FrameSource,
         source: Box<dyn RequestSource>,
         emitter: Option<StatusEmitter>,
     ) -> Result<(), StartError> {
+        self.start_observed(feed, source, emitter, None)
+    }
+
+    /// Like [`ControlSlot::start`], with an optional observer of every control log record
+    /// (the diagnostic telemetry recorder). The observer changes nothing about control.
+    pub fn start_observed(
+        &self,
+        feed: impl FrameSource,
+        source: Box<dyn RequestSource>,
+        emitter: Option<StatusEmitter>,
+        observer: Option<Arc<dyn LogObserver>>,
+    ) -> Result<(), StartError> {
         let mut slot = self.lock();
         if !matches!(*slot, Slot::Empty) {
             return Err(StartError::AlreadyStarted);
         }
         let (control, (handle, relay_task, watchdog_task, elevated)) =
-            start_control_thread(feed, source)?;
+            start_control_thread(feed, source, observer)?;
         // The relay and the watchdog stay on the shared runtime; the watchdog is independent of
         // the thread it watches. The relay ends by itself at shutdown.
         drop(async_runtime::spawn(relay_task));
@@ -337,6 +352,7 @@ type Started = (ControlHandle, SharedTask, SharedTask, bool);
 fn start_control_thread(
     feed: impl FrameSource,
     source: Box<dyn RequestSource>,
+    observer: Option<Arc<dyn LogObserver>>,
 ) -> Result<(ControlThread, Started), StartError> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Started>();
     let (report_tx, report) = oneshot::channel();
@@ -363,7 +379,7 @@ fn start_control_thread(
                 sender_task,
                 relay_task,
                 watchdog_task,
-            } = runtime::build_with_timer(feed, source, CoreConfig::default(), timer);
+            } = runtime::build_with_timer(feed, source, CoreConfig::default(), timer, observer);
             let elevated = loop_elevated && timer_elevated;
             if ready_tx
                 .send((handle, relay_task, watchdog_task, elevated))

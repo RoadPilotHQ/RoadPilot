@@ -251,7 +251,8 @@ pub enum FreshnessCode {
     Settling,
 }
 
-fn freshness(assessment: &Assessment) -> (FreshnessCode, Option<String>) {
+/// The display code of an assessment and, for an invalid frame, its reason.
+pub fn freshness(assessment: &Assessment) -> (FreshnessCode, Option<String>) {
     match assessment {
         Assessment::Usable(_) => (FreshnessCode::Fresh, None),
         Assessment::Unusable(u) => match *u {

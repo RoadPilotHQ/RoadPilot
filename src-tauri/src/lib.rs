@@ -1,10 +1,12 @@
 pub mod control;
 mod control_app;
+mod diagnostics;
 mod platform;
 mod telemetry;
 
 use control::sender::NeutralRequests;
 use control_app::{ABORT_GRACE, ControlSlot, SHUTDOWN_GRACE, STATUS_EVENT, ShutdownOutcome};
+use diagnostics::recorder::{FINISH_TIMEOUT, Recorder};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, RunEvent, Runtime};
 use telemetry::engine::{self, FrameFeed, SharedUpdate, UpdateSink};
@@ -28,6 +30,10 @@ struct TelemetryState {
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     visualization_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
+
+/// The optional diagnostic telemetry recorder (see `diagnostics::recorder`). Present only when
+/// `ROADPILOT_TELEMETRY_RECORD` names a file.
+struct RecorderState(Mutex<Option<Recorder>>);
 
 /// Current telemetry state, so the frontend can render before the next event arrives.
 #[tauri::command]
@@ -63,6 +69,15 @@ pub fn run() {
             // One pipe server, owned by the engine. Control reads a second receiver of the same
             // frame channel through the feed.
             let feed = FrameFeed::new();
+            // Diagnostics only, and only on request: records every frame and every control log
+            // record. It reads the same frame channel as control and never talks to the game.
+            let mut recorder = Recorder::from_env();
+            if let Some(recorder) = recorder.as_mut()
+                && let Err(error) = recorder.observe_frames(feed.clone())
+            {
+                eprintln!("RoadPilot: telemetry recording cannot observe frames: {error}");
+            }
+            let observer = recorder.as_ref().map(Recorder::control_observer);
             let task = tauri::async_runtime::spawn(engine::run(
                 TauriSink(app.handle().clone(), visualization),
                 latest.clone(),
@@ -73,16 +88,18 @@ pub fn run() {
             // reports control as unavailable; nothing is ever encoded in that case.
             let control = ControlSlot::new();
             let emitter = app.handle().clone();
-            if let Err(error) = control.start(
+            if let Err(error) = control.start_observed(
                 feed,
                 Box::new(NeutralRequests),
                 Some(Box::new(move |status| {
                     let _ = emitter.emit(STATUS_EVENT, status);
                 })),
+                observer,
             ) {
                 eprintln!("RoadPilot: control runtime not started: {error:?}");
             }
             app.manage(control);
+            app.manage(RecorderState(Mutex::new(recorder)));
 
             app.manage(TelemetryState {
                 latest,
@@ -126,6 +143,14 @@ pub fn run() {
                     {
                         task.abort();
                     }
+                }
+                // Last: control has stopped and recorded its shutdown, so the recording can be
+                // written out completely and closed with its end record.
+                if let Some(state) = app.try_state::<RecorderState>()
+                    && let Ok(mut recorder) = state.0.lock()
+                    && let Some(recorder) = recorder.take()
+                {
+                    let _ = recorder.finish(FINISH_TIMEOUT);
                 }
             }
         });
