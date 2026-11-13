@@ -281,6 +281,7 @@ export const en = {
   'control.cause.simulationTimeRestarted': 'simulation clock restarted',
   'control.cause.backlog': 'delayed frames',
   'control.cause.invalidFrame': 'invalid frame',
+  'control.cause.handoffOverflow': 'telemetry hand-off overflow',
 } as const
 
 export type TranslationKey = keyof typeof en

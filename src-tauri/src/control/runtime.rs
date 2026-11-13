@@ -4,9 +4,11 @@
 //! * **Telemetry.** A relay task on the shared runtime reads raw schema 2 frames from a
 //!   **second receiver** on the telemetry engine's own `watch` channel (see [`FrameFeed`]).
 //!   There is exactly one pipe server, owned by the dashboard engine; control never creates
-//!   another. The relay forwards every frame, with the time it observed it, over a queue that
-//!   the sender task drains at each tick. When the engine replaces its channel after
-//!   restarting the pipe server, the relay re-attaches and reports the change.
+//!   another. The relay turns every frame into a fixed-size digest and hands it, with the time
+//!   it observed it, to the bounded, ordered [`mailbox`](super::mailbox), which the sender
+//!   task drains at each tick (at most 16 items, never waiting; any loss starts a new
+//!   freshness epoch). When the engine replaces its channel after restarting the pipe
+//!   server, the relay re-attaches and reports the change.
 //! * **Timing.** The sender task waits for the core's next 40 ms deadline on the monotonic clock
 //!   through a [`TickTimer`] and ticks. Missed deadlines are skipped by the scheduler, never
 //!   replayed. The application uses a precise timer thread; tests use tokio's timer.
@@ -29,7 +31,9 @@
 //! of its choice. Time comes from tokio's clock, which in tests is paused and advanced
 //! explicitly. Dry-run only: see `sink`.
 
+use super::freshness::FrameDigest;
 use super::log::{ControlLog, DecisionEvent, LogObserver};
+use super::mailbox::{self, Delivery, MailboxReceiver, MailboxSender, Received};
 use super::sender::{ControlCore, CoreConfig, RequestSource, ShutdownReport};
 use super::sink::DryRunSink;
 use super::status::ControlStatus;
@@ -68,16 +72,6 @@ impl FrameSource for FrameFeed {
 /// telemetry client stamps frames with; in tests tokio's paused clock.
 fn now() -> Instant {
     TokioInstant::now().into_std()
-}
-
-/// What the relay hands to the sender task, in order.
-enum Input {
-    Frame {
-        frame: Box<ReceivedTelemetryFrame>,
-        observed_at: Instant,
-    },
-    FeedLost(Instant),
-    FeedRestored(Instant),
 }
 
 /// What the control task answered to an operator command.
@@ -241,7 +235,7 @@ pub fn build_with_timer(
     let core = ControlCore::dry_run(config, source, log.clone(), heartbeat.clone(), trip, start);
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (input_tx, input_rx) = mailbox::mailbox();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let status = Arc::new(StatusCell {
         status: Mutex::new(core.status(start)),
@@ -268,32 +262,31 @@ pub fn build_with_timer(
     }
 }
 
-/// Forwards the receiver's current frame, if there is one.
-fn forward(receiver: &mut FrameReceiver, inputs: &mpsc::UnboundedSender<Input>) {
+/// Forwards the digest of the receiver's current frame, if there is one. The digest is built
+/// here, on the relay, so the control thread never handles (or frees) the frame itself.
+fn forward(receiver: &mut FrameReceiver, inputs: &mut MailboxSender) {
     let observed_at = now();
-    let frame = receiver.borrow_and_update().clone();
-    if let Some(frame) = frame {
-        let _ = inputs.send(Input::Frame {
-            frame: Box::new(frame),
-            observed_at,
-        });
+    let digest = receiver.borrow_and_update().as_ref().map(FrameDigest::of);
+    if let Some(digest) = digest {
+        inputs.send_frame(digest, observed_at);
     }
 }
 
 /// Runs on the shared runtime: forwards every frame of the engine's channel to the control
-/// loop and reports when the channel is lost and found again. The control loop never registers
-/// a waker on this queue, so the relay cannot wake (or block) the elevated control thread.
+/// loop and reports when the channel is lost and found again. The control loop never waits on
+/// the mailbox, so the relay cannot wake (or block) the elevated control thread.
 async fn run_relay(
     feed: impl FrameSource,
-    inputs: mpsc::UnboundedSender<Input>,
+    mut inputs: MailboxSender,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let inputs = &mut inputs;
     let mut receiver = feed.receiver();
     let mut open = receiver.has_changed().is_ok();
     if open {
-        forward(&mut receiver, &inputs);
+        forward(&mut receiver, inputs);
     } else {
-        let _ = inputs.send(Input::FeedLost(now()));
+        inputs.send_feed_lost(now());
     }
     let mut retry = tokio::time::interval(FEED_RETRY);
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -303,10 +296,10 @@ async fn run_relay(
             _ = shutdown.changed() => break,
             changed = receiver.changed(), if open => {
                 if changed.is_ok() {
-                    forward(&mut receiver, &inputs);
+                    forward(&mut receiver, inputs);
                 } else {
                     open = false;
-                    let _ = inputs.send(Input::FeedLost(now()));
+                    inputs.send_feed_lost(now());
                 }
             }
             _ = retry.tick(), if !open => {
@@ -314,25 +307,29 @@ async fn run_relay(
                 receiver = feed.receiver();
                 if receiver.has_changed().is_ok() {
                     open = true;
-                    let _ = inputs.send(Input::FeedRestored(now()));
-                    forward(&mut receiver, &inputs);
+                    inputs.send_feed_restored(now());
+                    forward(&mut receiver, inputs);
                 }
             }
         }
     }
 }
 
-/// Hands everything the relay queued to the core, in order. Never waits.
-fn drain_inputs(core: &mut ControlCore<DryRunSink>, inputs: &mut mpsc::UnboundedReceiver<Input>) {
-    while let Ok(input) = inputs.try_recv() {
-        match input {
-            Input::Frame { frame, observed_at } => {
-                core.on_frame(&frame, observed_at);
-            }
-            Input::FeedLost(at) => core.note_feed(false, at),
-            Input::FeedRestored(at) => core.note_feed(true, at),
+/// Hands what the relay queued to the core, in order: at most `mailbox::CAPACITY` items,
+/// never waiting. A loss in the hand-off starts a new freshness epoch at the point where it
+/// happened (see `mailbox`).
+fn drain_inputs(core: &mut ControlCore<DryRunSink>, inputs: &mut MailboxReceiver, at: Instant) {
+    inputs.drain(|received| match received {
+        Received::Lost { .. } => core.note_handoff_loss(at),
+        Received::Delivery(Delivery::Frame {
+            digest,
+            observed_at,
+        }) => {
+            core.on_digest(&digest, observed_at);
         }
-    }
+        Received::Delivery(Delivery::FeedLost(when)) => core.note_feed(false, when),
+        Received::Delivery(Delivery::FeedRestored(when)) => core.note_feed(true, when),
+    });
 }
 
 /// Processes every queued command, any disarm first, publishes the resulting status, and only
@@ -371,7 +368,7 @@ fn drain_commands(
 
 async fn run_sender(
     mut core: ControlCore<DryRunSink>,
-    mut inputs: mpsc::UnboundedReceiver<Input>,
+    mut inputs: MailboxReceiver,
     mut commands: mpsc::UnboundedReceiver<Request>,
     mut shutdown: watch::Receiver<bool>,
     status: Arc<StatusCell>,
@@ -386,7 +383,7 @@ async fn run_sender(
             _ = shutdown.changed() => break,
             () = timer.wait_until(deadline) => {
                 let at = now();
-                drain_inputs(&mut core, &mut inputs);
+                drain_inputs(&mut core, &mut inputs, at);
                 drain_commands(&mut core, &mut commands, &status, at);
                 core.tick(at);
                 core.tick_finished(now());

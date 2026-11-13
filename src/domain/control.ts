@@ -128,6 +128,7 @@ export type DiscontinuityCode =
   | 'simulationTimeRestarted'
   | 'backlog'
   | 'invalidFrame'
+  | 'handoffOverflow'
 
 export type OperatorCommand = 'arm' | 'activate' | 'disarm' | 'resetFault'
 

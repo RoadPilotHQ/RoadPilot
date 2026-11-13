@@ -29,7 +29,10 @@
 //!   aborted).
 
 use super::command::{Adjustments, CommandGenerator, ControlLimits, ControlRequest, Withheld};
-use super::freshness::{Assessment, FreshnessConfig, FreshnessMonitor, Observation, Unusable};
+use super::freshness::{
+    Assessment, Discontinuity, FrameDigest, FreshnessConfig, FreshnessMonitor, Observation,
+    Unusable,
+};
 use super::log::{
     Bounded, ControlLog, DecisionEvent, DisarmStatus, MessageKind, MessageRecord, TimingEvent,
 };
@@ -350,8 +353,14 @@ impl<S: MessageSink> ControlCore<S> {
 
     /// Feeds one received telemetry frame. Call it for every frame, in receive order.
     pub fn on_frame(&mut self, received: &ReceivedTelemetryFrame, now: Instant) -> Observation {
+        self.on_digest(&FrameDigest::of(received), now)
+    }
+
+    /// Feeds the digest of one received frame (see `mailbox`). Identical to
+    /// [`ControlCore::on_frame`] on the frame itself.
+    pub fn on_digest(&mut self, digest: &FrameDigest, now: Instant) -> Observation {
         self.last_now = now;
-        let observation = self.monitor.observe(received);
+        let observation = self.monitor.observe_digest(digest);
         match observation {
             Observation::Accepted {
                 epoch,
@@ -382,6 +391,21 @@ impl<S: MessageSink> ControlCore<S> {
             }
         }
         observation
+    }
+
+    /// The hand-off from the relay lost items (see `mailbox`): continuity is no longer
+    /// known, so a new epoch starts and the state must settle again. The supervisor reacts
+    /// through its existing rules (Armed disarms, Active faults).
+    pub fn note_handoff_loss(&mut self, now: Instant) {
+        self.last_now = now;
+        self.monitor.force_epoch(Discontinuity::HandoffOverflow);
+        self.log.decision(
+            now,
+            DecisionEvent::Epoch {
+                epoch: self.monitor.epoch(),
+                cause: Discontinuity::HandoffOverflow,
+            },
+        );
     }
 
     /// The telemetry feed went away or came back. Logged once per change.

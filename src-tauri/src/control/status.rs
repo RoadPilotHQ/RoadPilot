@@ -840,6 +840,7 @@ pub enum DiscontinuityCode {
     SimulationTimeRestarted,
     Backlog,
     InvalidFrame,
+    HandoffOverflow,
 }
 
 impl From<Discontinuity> for DiscontinuityCode {
@@ -853,6 +854,7 @@ impl From<Discontinuity> for DiscontinuityCode {
             Discontinuity::SimulationTimeRestarted => Self::SimulationTimeRestarted,
             Discontinuity::Backlog => Self::Backlog,
             Discontinuity::InvalidFrame => Self::InvalidFrame,
+            Discontinuity::HandoffOverflow => Self::HandoffOverflow,
         }
     }
 }

@@ -23,6 +23,12 @@ telemetry plugin --pipe--> telemetry engine (one pipe server)
 ```
 
 - Control reads a second receiver on the telemetry engine's own frame channel. There is exactly one telemetry pipe server. When the engine restarts its server and replaces the channel, control re-attaches and logs the change.
+- **Telemetry mailbox** (`control/mailbox.rs`). The relay turns every frame into a fixed-size digest (identity, plugin state, vehicle state or why it is invalid, receive time) and hands it to the control thread through one bounded, ordered queue:
+  - **Bounded:** 16 places of `Copy` items; the control thread takes at most 16 per tick, never waits (`try_recv`), and never frees a frame.
+  - **Critical items cannot be crowded out:** ordinary frames may occupy at most 12 places; 4 are reserved for critical items: the first frame, every change of session, game, pause state or validity, and feed lost / restored. One FIFO keeps everything in send order, so an older frame never follows a newer one.
+  - **Every loss is reported where it happened:** each item carries the count of items dropped before it; the control loop starts a new freshness epoch (`handoffOverflow`) at that point, so the state must settle again and the supervisor reacts through its existing rules (Armed disarms, Active faults). A loss with no item after it is reported once the queue is found empty.
+  - Disconnects and the end of the game have no item of their own (the pipe gives no signal); they are detected from time at every tick and cannot be lost in the queue.
+  - Replay of both recorded drives through the mailbox gives exactly the decisions of the direct path. With the control thread stalled for 500 ms across a real pause, 8 frames are dropped, one `handoffOverflow` epoch and one extra gap epoch follow, and the pause is still detected.
 - The sender ticks every 40 ms on the monotonic clock. Missed deadlines are skipped, never replayed; a gap over 100 ms between ticks is a safety event.
 - An independent watchdog task checks every 20 ms that the control loop updated the supervisor within the last 100 ms.
 

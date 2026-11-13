@@ -29,6 +29,7 @@
 //! * [`schedule`]: the monotonic 40 ms tick schedule and its timing monitoring.
 //! * [`watchdog`]: independent detection of a stalled supervisor loop.
 //! * [`log`]: the bounded log of decisions, timing and encoded messages.
+//! * [`mailbox`]: the bounded, ordered hand-off of telemetry from the relay to the control loop.
 //! * [`timing`]: tick timing histograms (lateness, interval, processing, command interval).
 //! * [`timer`]: what wakes the loop at each deadline: tokio's timer (tests) or a precise
 //!   timer thread (application).
@@ -43,6 +44,7 @@
 pub mod command;
 pub mod freshness;
 pub mod log;
+pub mod mailbox;
 pub mod protocol;
 pub mod runtime;
 pub mod schedule;
@@ -64,6 +66,7 @@ mod dry_run_proof {
         ("command", include_str!("command.rs")),
         ("freshness", include_str!("freshness.rs")),
         ("log", include_str!("log.rs")),
+        ("mailbox", include_str!("mailbox.rs")),
         ("mod", include_str!("mod.rs")),
         ("protocol", include_str!("protocol.rs")),
         ("runtime", include_str!("runtime.rs")),
@@ -130,7 +133,7 @@ mod dry_run_proof {
             .filter_map(|(_, line)| line.strip_prefix("pub mod "))
             .filter_map(|rest| rest.strip_suffix(';'))
             .collect();
-        assert!(declared.len() >= 14, "{declared:?}");
+        assert!(declared.len() >= 15, "{declared:?}");
         for module in &declared {
             assert!(
                 SOURCES.iter().any(|(name, _)| name == module),

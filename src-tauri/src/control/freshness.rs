@@ -108,6 +108,36 @@ pub enum Discontinuity {
     Backlog,
     /// A frame was unusable (see [`Observation::Invalid`]).
     InvalidFrame,
+    /// The hand-off from the relay to the control loop lost frames or events (see
+    /// `mailbox`): what happened in between is unknown, so continuity is not assumed.
+    HandoffOverflow,
+}
+
+/// Everything the monitor needs from one received frame, computed where the frame is
+/// received (the relay), so the control loop handles a small fixed-size value instead of the
+/// frame itself. `Copy`; holds no heap memory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameDigest {
+    /// Local monotonic receive time (`ReceivedTelemetryFrame::received_at`).
+    pub received_at: Instant,
+    /// The frame's identity, or why it has none.
+    pub identity: Result<FrameIdentity, InvalidFrame>,
+    pub paused: bool,
+    /// Running frames: the vehicle state, or why there is none. `None` while paused.
+    pub state: Option<Result<VehicleState, InvalidFrame>>,
+}
+
+impl FrameDigest {
+    pub fn of(received: &ReceivedTelemetryFrame) -> Self {
+        let frame = &received.frame;
+        let paused = frame.plugin_state == PluginState::Paused;
+        Self {
+            received_at: received.received_at,
+            identity: FrameIdentity::from_frame(frame),
+            paused,
+            state: (!paused).then(|| VehicleState::from_frame(frame)),
+        }
+    }
 }
 
 /// Why a frame was ignored without any effect on freshness or continuity.
@@ -281,10 +311,22 @@ impl FreshnessMonitor {
 
     /// Feeds one received frame. Call it for every frame, in receive order.
     pub fn observe(&mut self, received: &ReceivedTelemetryFrame) -> Observation {
-        let frame = &received.frame;
-        let at = received.received_at;
+        self.observe_digest(&FrameDigest::of(received))
+    }
 
-        let identity = match FrameIdentity::from_frame(frame) {
+    /// Starts a new epoch for a reason outside the frames themselves (a hand-off loss): the
+    /// state must settle again before it is usable. The newest frame stays the reference for
+    /// age and continuity checks.
+    pub fn force_epoch(&mut self, cause: Discontinuity) {
+        self.bump(cause);
+    }
+
+    /// Feeds the digest of one received frame. Call it for every frame, in receive order.
+    /// Identical to [`FreshnessMonitor::observe`] on the frame itself.
+    pub fn observe_digest(&mut self, digest: &FrameDigest) -> Observation {
+        let at = digest.received_at;
+
+        let identity = match digest.identity {
             Ok(identity) => identity,
             Err(reason) => return self.reject_invalid(reason),
         };
@@ -304,14 +346,11 @@ impl FreshnessMonitor {
             }
         }
 
-        let paused = frame.plugin_state == PluginState::Paused;
-        let state = if paused {
-            None
-        } else {
-            match VehicleState::from_frame(frame) {
-                Ok(state) => Some(state),
-                Err(reason) => return self.reject_invalid(reason),
-            }
+        let paused = digest.paused;
+        let state = match digest.state {
+            None => None,
+            Some(Ok(state)) => Some(state),
+            Some(Err(reason)) => return self.reject_invalid(reason),
         };
 
         let discontinuity = self.classify(&identity, at, paused);

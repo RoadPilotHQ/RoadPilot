@@ -25,7 +25,9 @@
 mod fixture;
 
 use fixture::{Fixture, Record};
+use roadpilot_lib::control::freshness::FrameDigest;
 use roadpilot_lib::control::log::{ControlLog, LogObserver, Observed};
+use roadpilot_lib::control::mailbox::{self, Delivery, Received};
 use roadpilot_lib::control::sender::{ControlCore, CoreConfig, NeutralRequests};
 use roadpilot_lib::control::status::LogEntryDto;
 use roadpilot_lib::control::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, Watchdog};
@@ -70,6 +72,8 @@ struct Outcome {
     clock_missing_or_invalid: usize,
     /// Largest `received_at - produced_at` over all frames with a valid timing.
     max_age_at_receive: Option<Duration>,
+    /// Items the mailbox dropped (0 on the direct path).
+    handoff_lost: u64,
 }
 
 fn game(fixture: &Fixture) -> GameId {
@@ -130,7 +134,22 @@ fn produced_at(fixture: &Fixture, f: &ReceivedTelemetryFrame) -> Option<Instant>
     f.received_at.checked_sub(timing.age_at_receive)
 }
 
+/// How frames reach the core.
+#[derive(Clone, Copy, Debug)]
+enum Path {
+    /// Straight into `ControlCore::on_frame` at each tick (the baseline).
+    Direct,
+    /// Through the production mailbox, as the runtime does: the relay sends each digest when
+    /// the frame is received; the control loop drains at each tick, except while `stalled`
+    /// (µs since the recording started, start and length).
+    Mailbox { stall: Option<(i64, i64)> },
+}
+
 fn replay(fixture: &Fixture) -> Outcome {
+    replay_via(fixture, Path::Direct)
+}
+
+fn replay_via(fixture: &Fixture, path: Path) -> Outcome {
     let start = Instant::now();
     let at = |us: i64| start + Duration::from_micros(u64::try_from(us).expect("monoUs >= 0"));
     let decisions = Arc::new(Decisions::default());
@@ -153,8 +172,10 @@ fn replay(fixture: &Fixture) -> Outcome {
     let mut next_tick = start + TICK;
     let mut records = fixture.records.iter().peekable();
     let end = at(fixture.records.last().expect("frames").received_us) + TICK * 5;
+    let (mut tx, mut rx) = mailbox::mailbox();
+    let mut lost = 0u64;
     while next_tick <= end {
-        // Everything received up to this tick, in receive order, as drain_inputs does.
+        // Everything received up to this tick, in receive order.
         while let Some(r) = records.next_if(|r| at(r.received_us) <= next_tick) {
             let received_at = at(r.received_us);
             let f = frame(fixture, r, received_at);
@@ -166,7 +187,35 @@ fn replay(fixture: &Fixture) -> Outcome {
                 }
                 None => clock_missing_or_invalid += 1,
             }
-            core.on_frame(&f, received_at);
+            match path {
+                Path::Direct => {
+                    core.on_frame(&f, received_at);
+                }
+                Path::Mailbox { .. } => {
+                    tx.send_frame(FrameDigest::of(&f), received_at);
+                }
+            }
+        }
+        if let Path::Mailbox { stall } = path {
+            let since_start = (next_tick - start).as_micros() as i64;
+            if stall.is_some_and(|(from, len)| (from..from + len).contains(&since_start)) {
+                // The control thread is stalled: no drain and no tick; the relay keeps sending.
+                next_tick += TICK;
+                continue;
+            }
+            rx.drain(|received| match received {
+                Received::Lost { count } => {
+                    lost += count;
+                    core.note_handoff_loss(next_tick);
+                }
+                Received::Delivery(Delivery::Frame {
+                    digest,
+                    observed_at,
+                }) => {
+                    core.on_digest(&digest, observed_at);
+                }
+                Received::Delivery(_) => {}
+            });
         }
         core.tick(next_tick);
         ticks += 1;
@@ -185,6 +234,7 @@ fn replay(fixture: &Fixture) -> Outcome {
         clock_valid,
         clock_missing_or_invalid,
         max_age_at_receive,
+        handoff_lost: lost,
     }
 }
 
@@ -276,4 +326,64 @@ fn full_recordings_replay_like_their_fixtures() {
             }
         }
     }
+}
+
+// ---- the production mailbox ----
+
+#[test]
+fn the_mailbox_path_replays_exactly_like_the_baseline() {
+    for text in [CALIBRATION, STAGE_B] {
+        let fixture = fixture::parse(text);
+        let direct = replay(&fixture);
+        let via_mailbox = replay_via(&fixture, Path::Mailbox { stall: None });
+        print(&fixture.source, &via_mailbox);
+        assert_eq!(via_mailbox, direct, "{}", fixture.source);
+        assert_eq!(via_mailbox.handoff_lost, 0);
+        assert!(!via_mailbox.decisions.contains_key("epoch:handoffOverflow"));
+    }
+}
+
+#[test]
+fn a_control_thread_stalled_for_500_ms_across_a_real_pause_loses_no_event() {
+    let fixture = fixture::parse(CALIBRATION);
+    // The pause at 14:40:29 after the test-track drive: the first running-to-paused change
+    // after the drive started (records ordered by receive time).
+    let records = &fixture.records;
+    let drive_start = records
+        .iter()
+        .position(|r| r.parking_brake == Some(false) && r.speed_cm_s.unwrap_or(0) > 100)
+        .unwrap();
+    let pause = (drive_start..records.len())
+        .find(|&i| records[i].paused && !records[i - 1].paused)
+        .unwrap();
+    let pause_us = records[pause].received_us;
+    // Stall the control thread from 250 ms before to 250 ms after the pause began.
+    let stall = (pause_us - 250_000, 500_000);
+    let frames_in_stall = records
+        .iter()
+        .filter(|r| (stall.0..stall.0 + stall.1).contains(&r.received_us))
+        .count();
+    assert!(
+        frames_in_stall > 12,
+        "the stall overflows the ordinary quota: {frames_in_stall}"
+    );
+
+    let baseline = replay(&fixture);
+    let stalled = replay_via(&fixture, Path::Mailbox { stall: Some(stall) });
+    print("calibration, stalled 500 ms", &stalled);
+    // The loss is reported, once, and answered with a new epoch.
+    assert!(stalled.handoff_lost > 0);
+    assert_eq!(stalled.decisions["epoch:handoffOverflow"], 1);
+    // No critical event is lost: the pause inside the stall, and every other pause and the
+    // first frame, are seen exactly as without the stall.
+    for key in ["epoch:paused", "epoch:firstFrame", "shutdown"] {
+        assert_eq!(stalled.decisions[key], baseline.decisions[key], "{key}");
+    }
+    // Losing frames can only add epochs, never remove one: the dropped frames leave a
+    // receive gap over the age limit, which is reported as one more gap epoch.
+    assert_eq!(
+        stalled.decisions["epoch:gap"],
+        baseline.decisions["epoch:gap"] + 1
+    );
+    assert_eq!(stalled.frames_invalid, 0);
 }
