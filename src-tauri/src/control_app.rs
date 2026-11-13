@@ -530,6 +530,7 @@ mod tests {
                         frame: slow_frame(7, seq, 1_000_000 + sim),
                         dropped_fields: Vec::new(),
                         received_at: at,
+                        received_qpc: None,
                     }));
                     std::thread::sleep(period);
                 }

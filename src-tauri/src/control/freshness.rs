@@ -451,6 +451,7 @@ mod tests {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: self.at(at_ms),
+                received_qpc: None,
             };
             self.monitor.observe(&received)
         }

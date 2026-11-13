@@ -749,6 +749,7 @@ mod tests {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: self.at(self.now_ms),
+                received_qpc: None,
             };
             self.core.on_frame(&received, self.at(self.now_ms));
         }
@@ -1129,6 +1130,7 @@ mod tests {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: rig.at(rig.now_ms),
+                received_qpc: None,
             };
             rig.core.on_frame(&received, rig.at(rig.now_ms));
         }
@@ -1505,6 +1507,7 @@ mod tests {
             frame,
             dropped_fields: Vec::new(),
             received_at: rig.at(120),
+            received_qpc: None,
         };
         for _ in 0..10 {
             rig.core.on_frame(&received, rig.at(120));

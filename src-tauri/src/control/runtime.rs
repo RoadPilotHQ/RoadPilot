@@ -464,6 +464,7 @@ mod tests {
                         frame: slow_frame(session, seq, sim),
                         dropped_fields: Vec::new(),
                         received_at: at,
+                        received_qpc: None,
                     };
                     if sender.send(Some(received)).is_err() {
                         break;

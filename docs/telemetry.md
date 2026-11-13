@@ -28,7 +28,7 @@ Why this source:
 `src-tauri/Cargo.toml` pins the client crate to a fixed commit:
 
 ```toml
-roadpilot-telemetry-client = { git = "https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git", rev = "ca64c8e7e169a26143c62b2c525de3e8ec3b39ab" }
+roadpilot-telemetry-client = { git = "https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git", rev = "6a51cdef6313e8cab62341bd45da9f29a2fa6018" }
 ```
 
 Update the `rev` deliberately, together with the copied test fixture in `src-tauri/tests/fixtures/`. The client's dependencies report MIT, Apache-2.0 or Unlicense terms. The SCS SDK (© SCS Software, MIT-style licence) is not vendored or redistributed by RoadPilot; the plugin is built against a locally extracted SDK. The project licence is still undecided.
@@ -46,6 +46,20 @@ The plugin sends raw wheel geometry from the SDK truck configuration (`truckConf
 Only one program can host the telemetry pipe. Close the RoadPilot-Telemetry console reader before starting RoadPilot, otherwise RoadPilot shows **Telemetry error**.
 
 An older schema 1 plugin keeps working: RoadPilot then shows speed, RPM and gear and marks everything else as not available.
+
+### Transport clock (QPC)
+
+Since RoadPilot-Telemetry `6a51cde` the plugin stamps every frame with Windows QueryPerformanceCounter values: `producedQpc` (game frame finished), `sentQpc` (just before the write) and `qpcFrequency`. The client adds `received_qpc` together with its receive time and derives the plugin processing time, the transport latency and the frame's absolute age (`roadpilot_telemetry_client::qpc`). The format, the validation rules and the compatibility matrix are in RoadPilot-Telemetry `docs/PROTOCOL-V2.md`; still schema 2, the fields are optional.
+
+| Plugin                   | RoadPilot                   | Behaviour                                                             |
+| ------------------------ | --------------------------- | --------------------------------------------------------------------- |
+| previous (without clock) | this release                | Works as before; timing is reported as missing (`Missing(Produced)`). |
+| `6a51cde` or later       | this release                | Timing is evaluated per frame.                                        |
+| `6a51cde` or later       | previous (client `ca64c8e`) | Works as before; the clock fields are ignored.                        |
+
+**Measured on the development machine (2026-11-13):** QPC runs at 10 MHz in both processes; a child process's QPC values lie on the parent's timeline (worst 48 µs from child stamp to parent reading). The real plugin in a separate host process delivered 164 frames, all with valid timing: transport p50 212 µs (max 446 µs), age at receive p50 229 µs (max 1.38 ms). Not yet measured in ATS or ETS2.
+
+**Status:** implemented, unit-tested and tested across processes with the plugin DLL. The timing is **recorded for diagnostics only** (see [Diagnostic recording](#diagnostic-recording)). Freshness, backlog detection and every control limit are unchanged and do not use it yet. A frame without a valid timing stays usable for display and dry-run diagnostics; before any live output may be enabled, RoadPilot will require a valid timing (its age is otherwise unknown).
 
 ## Relationship to the Input SDK
 
@@ -91,16 +105,16 @@ $env:ROADPILOT_TELEMETRY_RECORD = "C:\RoadPilotLogs\drive-2026-11-13.jsonl"
 .\src-tauri\target\release\roadpilot.exe
 ```
 
-**Records** (one JSON object per line, `formatVersion` 1; every line has `type`, `monoUs` and `unixUs`):
+**Records** (one JSON object per line, `formatVersion` 2; every line has `type`, `monoUs` and `unixUs`):
 
-| `type`    | Content                                                                                                                                                                                                                                                                                               |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `start`   | First line: format version, application version, queue capacity.                                                                                                                                                                                                                                      |
-| `frame`   | Every observed frame: `session`, `sequence`, `sequenceGap` (sequence numbers skipped within the session), `sessionChanged`, `game`, `gameVersion`, `pluginState`, `paused`, `simulationTimeUs`, `droppedFields` and the complete frame (`frame`) with all vehicle data. `monoUs` is the receive time. |
-| `control` | Every control log record as it is logged (`category` `decision`, `timing` or `message`, with `n`, `atUs` and the same `entry` as the dashboard log), and every change of the freshness assessment (`category` `assessment`, with `freshness`, `epoch`, `ageUs`).                                      |
-| `feed`    | The frame channel was `attached` or `lost` (pipe server stopped or restarted).                                                                                                                                                                                                                        |
-| `loss`    | Records lost since the previous loss record: queue overflow (`queueFull`) or failed writes (`writeFailed`), with totals.                                                                                                                                                                              |
-| `end`     | Last line: records queued, written, lost to a full queue, lost to write errors and rejected after the stop, and `complete`.                                                                                                                                                                           |
+| `type`    | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start`   | First line: format version, application version, queue capacity.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `frame`   | Every observed frame: `session`, `sequence`, `sequenceGap` (sequence numbers skipped within the session), `sessionChanged`, `game`, `gameVersion`, `pluginState`, `paused`, `simulationTimeUs`, `droppedFields`, the complete frame (`frame`) with all vehicle data and its QPC stamps, the reader's `receivedQpc`, and `timing`: `valid` with `pluginProcessingUs`, `transportUs` and `ageAtReceiveUs`, or `valid: false` with the `error` (for example `Missing(Produced)` from an older plugin). `monoUs` is the receive time. |
+| `control` | Every control log record as it is logged (`category` `decision`, `timing` or `message`, with `n`, `atUs` and the same `entry` as the dashboard log), and every change of the freshness assessment (`category` `assessment`, with `freshness`, `epoch`, `ageUs`).                                                                                                                                                                                                                                                                  |
+| `feed`    | The frame channel was `attached` or `lost` (pipe server stopped or restarted).                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `loss`    | Records lost since the previous loss record: queue overflow (`queueFull`) or failed writes (`writeFailed`), with totals.                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `end`     | Last line: records queued, written, lost to a full queue, lost to write errors and rejected after the stop, and `complete`.                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 `monoUs` is microseconds on the monotonic clock since the recorder started; `unixUs` is the wall clock derived from it. A recording is complete only if its last line is `end` with `"complete": true`. A missing `end` line means the application did not exit normally.
 

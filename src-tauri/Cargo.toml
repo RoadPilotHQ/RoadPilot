@@ -16,7 +16,7 @@ tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 futures-util = "0.3.31"
-roadpilot-telemetry-client = { git = "https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git", rev = "ca64c8e7e169a26143c62b2c525de3e8ec3b39ab" }
+roadpilot-telemetry-client = { git = "https://github.com/RoadPilotHQ/RoadPilot-Telemetry.git", rev = "6a51cdef6313e8cab62341bd45da9f29a2fa6018" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tauri = { version = "2.12.5", features = [] }

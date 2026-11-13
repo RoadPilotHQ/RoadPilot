@@ -16,6 +16,7 @@ fn main() {
 #[cfg(windows)]
 fn main() {
     use roadpilot_telemetry_client::named_pipe::PIPE_NAME;
+    use roadpilot_telemetry_client::qpc;
     use serde_json::Value;
     use std::io::Write;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -46,6 +47,8 @@ fn main() {
     frame["session"] = session.into();
     frame["pluginState"] = "running".into();
     frame["truck"]["speedMps"] = speed.into();
+    // Real transport clock stamps, like the plugin: this process plays the game process.
+    frame["qpcFrequency"] = qpc::frequency().into();
 
     let start = Instant::now();
     let end = start + Duration::from_secs(seconds);
@@ -56,6 +59,8 @@ fn main() {
         sequence += 1;
         frame["sequence"] = sequence.into();
         frame["simulationTimeUs"] = (1_000_000 + start.elapsed().as_micros() as u64).into();
+        frame["producedQpc"] = qpc::now().into();
+        frame["sentQpc"] = qpc::now().into();
         let payload = serde_json::to_vec(&frame).expect("serialize");
         let length = (payload.len() as u32).to_le_bytes();
         if pipe

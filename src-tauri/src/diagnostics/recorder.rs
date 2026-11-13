@@ -15,6 +15,8 @@
 //!   sequence, simulation time, plugin state, dropped fields and the complete frame. A
 //!   sequence number skipped within a session is stated explicitly (`sequenceGap`); so is a
 //!   session change (`sessionChanged`).
+//!   Each frame also carries the reader's `receivedQpc` and its `timing` from the QPC
+//!   stamps (plugin processing, transport, age at receive in µs), or why it is invalid.
 //! * `control`: every record of the control log (decisions, timing, messages) as it is
 //!   logged, before the in-memory rings could drop it, and every change of the freshness
 //!   assessment.
@@ -62,7 +64,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 pub const ENV_VAR: &str = "ROADPILOT_TELEMETRY_RECORD";
-pub const FORMAT_VERSION: u32 = 1;
+/// 1: initial format. 2: frames add `receivedQpc` and `timing`.
+pub const FORMAT_VERSION: u32 = 2;
 /// Records the queue holds before it overflows: about 4 minutes of 60 Hz frames.
 pub const QUEUE_CAPACITY: usize = 16_384;
 /// How long [`Recorder::finish`] waits for the queue to be written out.
@@ -400,6 +403,8 @@ impl<W: Write> Writer<W> {
                     "paused": f.plugin_state == PluginState::Paused,
                     "simulationTimeUs": f.simulation_time_us,
                     "droppedFields": received.dropped_fields,
+                    "receivedQpc": received.received_qpc,
+                    "timing": frame_timing(&received),
                     "frame": f,
                 });
                 self.stamp(value, "frame", received.received_at)
@@ -487,6 +492,20 @@ impl<W: Write> Writer<W> {
                 && rejected_after_stop == 0
                 && self.written == queued,
         }
+    }
+}
+
+/// The frame's QPC timing, or why there is none (for example `Missing(Produced)` from an
+/// older plugin). Diagnostics only: control does not use it yet.
+fn frame_timing(received: &ReceivedTelemetryFrame) -> Value {
+    match received.timing() {
+        Ok(t) => json!({
+            "valid": true,
+            "pluginProcessingUs": micros(t.plugin_processing),
+            "transportUs": micros(t.transport),
+            "ageAtReceiveUs": micros(t.age_at_receive),
+        }),
+        Err(error) => json!({ "valid": false, "error": format!("{error:?}") }),
     }
 }
 
@@ -819,6 +838,7 @@ mod tests {
             frame,
             dropped_fields: Vec::new(),
             received_at: Instant::now(),
+            received_qpc: None,
         }
     }
 
@@ -969,6 +989,62 @@ mod tests {
         assert_eq!(feed, ["attached", "lost", "attached"]);
         assert_eq!(summary.queued.frames, 8);
         assert_eq!(summary.written.frames, 8);
+    }
+
+    // ---- QPC timing ----
+
+    #[cfg(windows)]
+    #[test]
+    fn frames_record_their_qpc_timing_or_why_it_is_invalid() {
+        use roadpilot_telemetry_client::qpc;
+        let frequency = qpc::frequency().unwrap();
+        let now = qpc::now().unwrap();
+        let stamped = |produced: u64, sent: u64| {
+            let mut frame = slow_frame(7, 1, 1_000);
+            frame.produced_qpc = Some(produced);
+            frame.sent_qpc = Some(sent);
+            frame.qpc_frequency = Some(frequency);
+            ReceivedTelemetryFrame {
+                received_qpc: Some(now),
+                ..received(frame)
+            }
+        };
+        let out = Output::default();
+        let recorder = Recorder::with_output(out.clone(), 64, WRITER_POLL).unwrap();
+        for frame in [
+            // Produced 10 ms and sent 1 ms before it was received.
+            stamped(now - frequency / 100, now - frequency / 1_000),
+            // Sent before it was produced: not one timeline.
+            stamped(now - 10, now - 20),
+            // An older plugin without stamps.
+            received(slow_frame(7, 3, 2_000)),
+        ] {
+            recorder.sink.push(Item::Frame {
+                received: Box::new(frame),
+                sequence_gap: None,
+                session_changed: false,
+            });
+        }
+        recorder.finish(FINISH_TIMEOUT).unwrap();
+        let lines = out.lines();
+        let frames = of_type(&lines, "frame");
+        let valid = &frames[0]["timing"];
+        assert_eq!(frames[0]["receivedQpc"], now);
+        assert_eq!(valid["valid"], true);
+        let age = valid["ageAtReceiveUs"].as_u64().unwrap();
+        assert!((9_999..=10_000).contains(&age), "{valid}");
+        let transport = valid["transportUs"].as_u64().unwrap();
+        assert!((999..=1_000).contains(&transport), "{valid}");
+        assert_eq!(frames[1]["timing"]["valid"], false);
+        assert!(
+            frames[1]["timing"]["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("NotMonotonic")
+        );
+        assert_eq!(frames[2]["timing"]["valid"], false);
+        assert_eq!(frames[2]["timing"]["error"], "Missing(Produced)");
+        assert_eq!(lines[0]["formatVersion"], 2);
     }
 
     // ---- control records ----
