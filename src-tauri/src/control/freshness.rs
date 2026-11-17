@@ -33,17 +33,33 @@
 //!   cannot pass as a new session.
 //! * **Ordering** uses `(session, sequence)` only. Repeated and older frames, and frames whose
 //!   receive time goes backwards, are rejected and do **not** refresh freshness.
+//! * **Latency backlog** (replaces the former simulation-time backlog check, R7): a frame with
+//!   a verified QPC timing, running or paused, whose transport latency (`received - sent`) or
+//!   age at receive (`received - produced`) exceeds 50 ms waited in the plugin or the pipe.
+//!   The limits are the critical limits of the latency diagnosis
+//!   (`latency::TRANSPORT_CRITICAL`, `latency::AGE_AT_RECEIVE_CRITICAL`), their single
+//!   definition. The first frame of a run of such frames starts one epoch
+//!   (`LatencyBacklog`); every frame of the run resets settling, so the state stays unusable
+//!   however long the run lasts, without an epoch per frame. The run ends only with a frame
+//!   with a verified timing within both limits. A frame without a verified timing is not
+//!   checked: it neither starts nor ends a run (a running one is invalid anyway, see Age).
 //! * **Simulation time** is a cross-check, never an ordering or age source: a clock that
-//!   stops while frames keep arriving means a frozen game, and a clock that runs ahead of the
-//!   local clock within a short window means frames are being read from a backlog.
+//!   stops while frames keep arriving means a frozen game. A clock that runs more than 100 ms
+//!   ahead of the local clock within one second is only counted
+//!   ([`FreshnessMonitor::sim_ahead_hits`], shadow diagnosis): ATS advances it in fixed steps
+//!   and delivers frames in clusters, so it runs ahead without any delay (Phase 4.5: 46 hits
+//!   in 75,609 recorded frames, none of them older than 40 ms on arrival).
 //! * **Epochs.** Every event after which control must not continue unchanged increments the
 //!   epoch counter: first frame, new session, game change, entering pause, a gap longer than
-//!   the age limit (which is how a reconnect looks), a simulation clock restart, a detected
-//!   backlog and an invalid frame. A controller arms for one specific epoch. Because the
-//!   counter can only grow, a reconnect or a pause can never silently restore control, even
-//!   if the caller was not looking at the moment of the interruption.
-//! * **Settling.** After any epoch change, and after a pause or an invalid frame, a few
-//!   consecutive good frames over a short time are required before the state is usable.
+//!   the age limit (which is how a reconnect looks), a simulation clock restart, the start of
+//!   a latency backlog, an invalid frame and a hand-off loss. A frame changes the epoch at
+//!   most once; first frame, session, game, gap and clock restart take priority over a latency
+//!   backlog, which takes priority over entering pause. A controller arms for one specific
+//!   epoch. Because the counter can only grow, a reconnect or a pause can never silently
+//!   restore control, even if the caller was not looking at the moment of the interruption.
+//! * **Settling.** After any epoch change, and after a pause, an invalid frame or a late
+//!   frame, a few consecutive good frames over a short time are required before the state is
+//!   usable.
 //!
 //! The thresholds are conservative and have **not** been tuned against a live game. They may
 //! only make the system stricter; they must not be loosened without live measurements.

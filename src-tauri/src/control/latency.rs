@@ -18,11 +18,14 @@
 //! when the measure becomes critical (every critical sample is counted, but a run of them, for
 //! example the age at decision after the game stopped, is reported once).
 //!
-//! **Shadow mode.** Nothing here takes part in a decision: the results go only to the status,
-//! the log observer (diagnostic recording) and tests. The freshness check, the supervisor, the
-//! command generator and the simulation-time backlog check (R7) do not read them. The limits
-//! above are diagnostic and change no safety limit (the 150 ms age limit is enforced by the
-//! freshness check, not here).
+//! **Shadow mode.** Nothing here takes part in a decision: the results (classes, episodes,
+//! events) go only to the status, the log observer (diagnostic recording) and tests; the
+//! freshness check, the supervisor and the command generator do not read them. The limits
+//! above are diagnostic, with one exception: the critical limits of transport and age at
+//! receive are defined once here ([`TRANSPORT_CRITICAL`], [`AGE_AT_RECEIVE_CRITICAL`]) and
+//! the freshness check uses the same constants for its latency backlog check, which replaced
+//! the simulation-time backlog check (R7); it evaluates each frame itself and does not depend
+//! on this monitor. The 150 ms age limit is enforced by the freshness check, not here.
 
 use super::freshness::{ClockStatus, FrameDigest};
 use std::time::{Duration, Instant};
