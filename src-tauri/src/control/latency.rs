@@ -27,6 +27,13 @@
 use super::freshness::{ClockStatus, FrameDigest};
 use std::time::{Duration, Instant};
 
+/// Critical limit of the transport latency (plugin send to receive). The single definition of
+/// this value: the latency diagnosis classifies by it.
+pub const TRANSPORT_CRITICAL: Duration = Duration::from_millis(50);
+/// Critical limit of the age at receive (game produced the frame to receive). The single
+/// definition of this value: the latency diagnosis classifies by it.
+pub const AGE_AT_RECEIVE_CRITICAL: Duration = Duration::from_millis(50);
+
 pub const DEGRADED_WINDOW: usize = 10;
 pub const DEGRADED_COUNT: usize = 3;
 pub const RECOVERY_SAMPLES: u32 = 30;
@@ -52,8 +59,8 @@ impl Measure {
         let ms = Duration::from_millis;
         match self {
             Measure::Processing => (ms(20), ms(50)),
-            Measure::Transport => (ms(10), ms(50)),
-            Measure::AgeAtReceive => (ms(30), ms(50)),
+            Measure::Transport => (ms(10), TRANSPORT_CRITICAL),
+            Measure::AgeAtReceive => (ms(30), AGE_AT_RECEIVE_CRITICAL),
             Measure::AgeAtDecision => (ms(100), ms(150)),
         }
     }
@@ -353,6 +360,20 @@ mod tests {
         interrupted.push(Some(ms(15)));
         interrupted.extend(std::iter::repeat_n(Some(ms(1)), 20));
         assert!(run(Measure::Transport, &interrupted).0.degraded);
+    }
+
+    #[test]
+    fn the_critical_limits_come_from_the_central_constants() {
+        assert_eq!(TRANSPORT_CRITICAL, ms(50));
+        assert_eq!(AGE_AT_RECEIVE_CRITICAL, ms(50));
+        assert_eq!(Measure::Transport.limits(), (ms(10), TRANSPORT_CRITICAL));
+        assert_eq!(
+            Measure::AgeAtReceive.limits(),
+            (ms(30), AGE_AT_RECEIVE_CRITICAL)
+        );
+        // Unchanged limits of the other measures.
+        assert_eq!(Measure::Processing.limits(), (ms(20), ms(50)));
+        assert_eq!(Measure::AgeAtDecision.limits(), (ms(100), ms(150)));
     }
 
     #[test]
