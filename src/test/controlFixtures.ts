@@ -96,6 +96,17 @@ export function controlStatus(overrides: Partial<ControlStatus> = {}): ControlSt
       lateTicks: 0,
       gapViolations: 0,
       watchdogTrips: 0,
+      diagnostics: {
+        timerWakeLateness: histogram(0.1),
+        timerToControl: histogram(0.1),
+        statusBuild: histogram(0.05),
+        statusPublish: histogram(0.01),
+        logLockWait: histogram(0.001),
+        logLockHold: histogram(0.005),
+        statusLockAttempt: histogram(0.001),
+        statusLockHold: histogram(0.01),
+        statusPublishSkipped: 0,
+      },
     },
     latency: {
       shadowMode: true,

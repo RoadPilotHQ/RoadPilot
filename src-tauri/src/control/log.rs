@@ -33,6 +33,7 @@ use super::latency::LatencyEvent;
 use super::protocol::MESSAGE_LEN;
 use super::sink::Delivery;
 use super::supervisor::{Command, Rejection, Transition};
+use super::timing::TickDiagnostics;
 use super::vehicle::InvalidFrame;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -133,6 +134,15 @@ pub enum Observed {
         at: Duration,
         event: LatencyEvent,
     },
+    /// Diagnostics of one control tick (see `timing`); no ring keeps them.
+    Tick(TickDiagnostics),
+}
+
+/// Time spent waiting for a mutex and holding it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LockTiming {
+    pub wait: Duration,
+    pub hold: Duration,
 }
 
 /// Receives every record of a [`ControlLog`]. See the module documentation: it runs on the
@@ -320,6 +330,30 @@ impl ControlLog {
         let inner = self.lock();
         let skip = inner.decisions.entries.len().saturating_sub(count);
         inner.decisions.entries.iter().skip(skip).copied().collect()
+    }
+
+    /// [`ControlLog::recent_decisions`] with the time spent waiting for the mutex and holding
+    /// it (diagnostics). Same lock, same work; only three clock readings are added.
+    pub fn recent_decisions_timed(&self, count: usize) -> (Vec<Entry<DecisionEvent>>, LockTiming) {
+        let asked = Instant::now();
+        let inner = self.lock();
+        let acquired = Instant::now();
+        let skip = inner.decisions.entries.len().saturating_sub(count);
+        let entries = inner.decisions.entries.iter().skip(skip).copied().collect();
+        drop(inner);
+        let released = Instant::now();
+        (
+            entries,
+            LockTiming {
+                wait: acquired.saturating_duration_since(asked),
+                hold: released.saturating_duration_since(acquired),
+            },
+        )
+    }
+
+    /// Hands one tick's diagnostics to the observer only (no ring keeps them).
+    pub fn tick_diagnostics(&self, diagnostics: TickDiagnostics) {
+        self.notify(Observed::Tick(diagnostics));
     }
 
     /// Kind of the newest encoded message, if any. A ring always keeps its newest record, so
@@ -544,7 +578,9 @@ mod tests {
                 Observed::Decision(e) => e.n,
                 Observed::Timing(e) => e.n,
                 Observed::Message(e) => e.n,
-                Observed::Assessment { .. } | Observed::Latency { .. } => unreachable!(),
+                Observed::Assessment { .. } | Observed::Latency { .. } | Observed::Tick(_) => {
+                    unreachable!()
+                }
             })
             .collect();
         assert_eq!(positions, (0..30).collect::<Vec<_>>());
@@ -597,5 +633,42 @@ mod tests {
         let _ = observer.0.set(log.clone());
         log.decision(t0, DecisionEvent::FeedLost);
         assert_eq!(*observer.1.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn the_timed_read_returns_the_same_entries_and_measures_the_mutex() {
+        let t0 = Instant::now();
+        let log = ControlLog::new(t0);
+        for i in 0..5u64 {
+            log.decision(
+                t0 + ms(i),
+                DecisionEvent::Epoch {
+                    epoch: i,
+                    cause: Discontinuity::Gap,
+                },
+            );
+        }
+        let (timed, lock) = log.recent_decisions_timed(3);
+        assert_eq!(
+            timed.iter().map(|e| e.n).collect::<Vec<_>>(),
+            log.recent_decisions(3)
+                .iter()
+                .map(|e| e.n)
+                .collect::<Vec<_>>()
+        );
+        assert!(lock.wait < ms(50) && lock.hold < ms(50));
+        // Another thread holds the mutex for 40 ms: the wait shows it, the hold does not.
+        let holder = log.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _guard = holder.inner.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(ms(40));
+        });
+        held_rx.recv().unwrap();
+        let (_, lock) = log.recent_decisions_timed(3);
+        thread.join().unwrap();
+        assert!(lock.wait >= ms(30), "{lock:?}");
+        assert!(lock.hold < ms(30), "{lock:?}");
     }
 }

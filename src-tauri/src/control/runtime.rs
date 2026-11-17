@@ -39,9 +39,11 @@ use super::sink::DryRunSink;
 use super::status::ControlStatus;
 use super::supervisor::{Command, Response, State};
 use super::timer::{TickTimer, TokioTimer};
+use super::timing::TickDiagnostics;
 use super::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, WATCHDOG_PERIOD, Watchdog};
 use crate::telemetry::engine::FrameFeed;
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
+use roadpilot_telemetry_client::qpc;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,6 +90,13 @@ struct Request {
 }
 
 /// The published status. Readers lock it briefly; the sender task never waits for it at a tick.
+/// How publishing one status went (diagnostics).
+struct PublishTiming {
+    published: bool,
+    attempt: Duration,
+    hold: Duration,
+}
+
 struct StatusCell {
     status: Mutex<ControlStatus>,
     stopped: AtomicBool,
@@ -100,11 +109,27 @@ impl StatusCell {
     }
 
     /// Publishes only if no reader holds the status right now; otherwise the next tick will.
-    fn publish_if_free(&self, status: ControlStatus) {
-        match self.status.try_lock() {
-            Ok(mut slot) => *slot = status,
-            Err(TryLockError::Poisoned(poisoned)) => *poisoned.into_inner() = status,
-            Err(TryLockError::WouldBlock) => {}
+    /// Returns how long the `try_lock` and the hold (assignment, including the release of the
+    /// previous status) took, for diagnostics; the locking itself is unchanged.
+    fn publish_if_free(&self, status: ControlStatus) -> PublishTiming {
+        let asked = Instant::now();
+        let (mut slot, acquired) = match self.status.try_lock() {
+            Ok(slot) => (slot, Instant::now()),
+            Err(TryLockError::Poisoned(poisoned)) => (poisoned.into_inner(), Instant::now()),
+            Err(TryLockError::WouldBlock) => {
+                return PublishTiming {
+                    published: false,
+                    attempt: asked.elapsed(),
+                    hold: Duration::ZERO,
+                };
+            }
+        };
+        *slot = status;
+        drop(slot);
+        PublishTiming {
+            published: true,
+            attempt: acquired.saturating_duration_since(asked),
+            hold: acquired.elapsed(),
         }
     }
 
@@ -318,7 +343,11 @@ async fn run_relay(
 /// Hands what the relay queued to the core, in order: at most `mailbox::CAPACITY` items,
 /// never waiting. A loss in the hand-off starts a new freshness epoch at the point where it
 /// happened (see `mailbox`).
-fn drain_inputs(core: &mut ControlCore<DryRunSink>, inputs: &mut MailboxReceiver, at: Instant) {
+fn drain_inputs(
+    core: &mut ControlCore<DryRunSink>,
+    inputs: &mut MailboxReceiver,
+    at: Instant,
+) -> usize {
     inputs.drain(|received| match received {
         Received::Lost { .. } => core.note_handoff_loss(at),
         Received::Delivery(Delivery::Frame {
@@ -329,7 +358,7 @@ fn drain_inputs(core: &mut ControlCore<DryRunSink>, inputs: &mut MailboxReceiver
         }
         Received::Delivery(Delivery::FeedLost(when)) => core.note_feed(false, when),
         Received::Delivery(Delivery::FeedRestored(when)) => core.note_feed(true, when),
-    });
+    })
 }
 
 /// Processes every queued command, any disarm first, publishes the resulting status, and only
@@ -383,11 +412,34 @@ async fn run_sender(
             _ = shutdown.changed() => break,
             () = timer.wait_until(deadline) => {
                 let at = now();
-                drain_inputs(&mut core, &mut inputs, at);
+                // Diagnostics only: timestamps around the unchanged steps (see `timing`).
+                let control_start_qpc = qpc::now();
+                let wake = timer.last_wake().filter(|w| w.deadline == deadline);
+                let inputs_taken = drain_inputs(&mut core, &mut inputs, at);
                 drain_commands(&mut core, &mut commands, &status, at);
                 core.tick(at);
-                core.tick_finished(now());
-                status.publish_if_free(core.status(at));
+                let work_done = now();
+                core.tick_finished(work_done);
+                let (current, log_lock) = core.status_timed(at);
+                let status_built = now();
+                let publish = status.publish_if_free(current);
+                let status_published = now();
+                core.record_tick_diagnostics(TickDiagnostics {
+                    deadline,
+                    timer_woke: wake.map(|w| w.woke),
+                    timer_signalled: wake.map(|w| w.signalled),
+                    control_start: at,
+                    control_start_qpc,
+                    work_done,
+                    status_built,
+                    status_published,
+                    published: publish.published,
+                    log_lock_wait: log_lock.wait,
+                    log_lock_hold: log_lock.hold,
+                    status_lock_attempt: publish.attempt,
+                    status_lock_hold: publish.hold,
+                    inputs: inputs_taken,
+                });
             }
         }
     }

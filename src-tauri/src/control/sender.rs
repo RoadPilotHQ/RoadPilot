@@ -35,7 +35,8 @@ use super::freshness::{
 };
 use super::latency::LatencyMonitor;
 use super::log::{
-    Bounded, ControlLog, DecisionEvent, DisarmStatus, MessageKind, MessageRecord, TimingEvent,
+    Bounded, ControlLog, DecisionEvent, DisarmStatus, Entry, LockTiming, MessageKind,
+    MessageRecord, TimingEvent,
 };
 use super::protocol::{WireMessage, encode};
 use super::schedule::{Scheduler, Timing, Verdict};
@@ -44,7 +45,7 @@ use super::status::{ControlStatus, RECENT_DECISIONS, StatusInput};
 use super::supervisor::{
     Command, Reason, Response, SafetyEvent, Supervisor, SupervisorConfig, Transition,
 };
-use super::timing::{TimerKind, TimingStats};
+use super::timing::{TickDiagnostics, TimerKind, TimingStats};
 use super::vehicle::VehicleState;
 use super::watchdog::{Heartbeat, TripFlag};
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
@@ -281,6 +282,28 @@ impl<S: MessageSink> ControlCore<S> {
 
     /// A read-only status snapshot for display. Never used for decisions.
     pub fn status(&self, now: Instant) -> ControlStatus {
+        self.status_with(now, self.log.recent_decisions(RECENT_DECISIONS))
+    }
+
+    /// [`ControlCore::status`] with the time spent at the log mutex (diagnostics). The status is
+    /// the same.
+    pub fn status_timed(&self, now: Instant) -> (ControlStatus, LockTiming) {
+        let (recent, lock) = self.log.recent_decisions_timed(RECENT_DECISIONS);
+        (self.status_with(now, recent), lock)
+    }
+
+    /// Adds one tick's diagnostics to the timing statistics and hands them to the log observer
+    /// (diagnostic recording). Measurement only: nothing decides on them.
+    pub fn record_tick_diagnostics(&mut self, diagnostics: TickDiagnostics) {
+        self.timing.record_diagnostics(&diagnostics);
+        self.log.tick_diagnostics(diagnostics);
+    }
+
+    fn status_with(
+        &self,
+        now: Instant,
+        recent_decisions: Vec<Entry<DecisionEvent>>,
+    ) -> ControlStatus {
         super::status::build(&StatusInput {
             now,
             start: self.start,
@@ -300,7 +323,7 @@ impl<S: MessageSink> ControlCore<S> {
             last_watchdog_trip: self.last_watchdog_trip,
             loop_silent: self.heartbeat.silent_for(now),
             stats: self.stats,
-            recent_decisions: self.log.recent_decisions(RECENT_DECISIONS),
+            recent_decisions,
             latency: &self.latency,
             timing: &self.timing,
         })

@@ -14,7 +14,7 @@
 //! reported as the upper edge of their bucket, so they are never optimistic by more than 0.1 ms.
 //! Memory is fixed; nothing here allocates per tick.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BUCKET: Duration = Duration::from_micros(100);
 const BUCKETS: usize = 2_000; // 0 .. 200 ms
@@ -151,6 +151,84 @@ pub struct TimingStats {
     pub late_ticks: u64,
     /// Tick gaps above the safety limit; each one is a safety event.
     pub gap_violations: u64,
+    /// Diagnostics of where tick time goes (see [`TickDiagnostics`]). Measured only; nothing
+    /// decides on them.
+    pub diagnostics: DiagnosticStats,
+}
+
+/// Distributions of the per-tick diagnostics.
+#[derive(Clone, Debug, Default)]
+pub struct DiagnosticStats {
+    /// Timer thread woke up after the deadline (precise timer only).
+    pub timer_wake_lateness: Histogram,
+    /// Timer signal to the start of the control thread's tick (precise timer only).
+    pub timer_to_control: Histogram,
+    /// End of the tick's work to the status being built.
+    pub status_build: Histogram,
+    /// Publishing the status (the `try_lock`, the assignment, the release).
+    pub status_publish: Histogram,
+    /// Waiting for and holding the log mutex while the status reads the recent decisions.
+    pub log_lock_wait: Histogram,
+    pub log_lock_hold: Histogram,
+    /// The status mutex: the `try_lock` attempt (the control thread never waits here) and the
+    /// hold time (assignment including the release of the previous status).
+    pub status_lock_attempt: Histogram,
+    pub status_lock_hold: Histogram,
+    /// Ticks whose status was not published because a reader held the mutex.
+    pub status_publish_skipped: u64,
+}
+
+/// Timestamps and durations of one control tick, for diagnostics. All instants are on the
+/// monotonic clock (`Instant`, QPC on Windows), so they compare with the telemetry receive
+/// times. Measured around the existing steps; recording them changes no step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TickDiagnostics {
+    pub deadline: Instant,
+    /// When the timer thread found the deadline reached; `None` with tokio's timer.
+    pub timer_woke: Option<Instant>,
+    /// When the timer thread signalled the control loop; `None` with tokio's timer.
+    pub timer_signalled: Option<Instant>,
+    /// When the control thread started the tick (`lateness = control_start - deadline`).
+    pub control_start: Instant,
+    /// QPC reading at the control start; `None` where QPC is unavailable.
+    pub control_start_qpc: Option<u64>,
+    /// After draining inputs and commands and running the tick.
+    pub work_done: Instant,
+    pub status_built: Instant,
+    pub status_published: Instant,
+    /// False when a reader held the status mutex and the status was not published.
+    pub published: bool,
+    pub log_lock_wait: Duration,
+    pub log_lock_hold: Duration,
+    pub status_lock_attempt: Duration,
+    pub status_lock_hold: Duration,
+    /// Mailbox items taken at this tick.
+    pub inputs: usize,
+}
+
+impl TickDiagnostics {
+    pub fn lateness(&self) -> Duration {
+        self.control_start.saturating_duration_since(self.deadline)
+    }
+
+    pub fn timer_wake_lateness(&self) -> Option<Duration> {
+        self.timer_woke
+            .map(|w| w.saturating_duration_since(self.deadline))
+    }
+
+    pub fn timer_to_control(&self) -> Option<Duration> {
+        self.timer_signalled
+            .map(|s| self.control_start.saturating_duration_since(s))
+    }
+
+    pub fn status_build(&self) -> Duration {
+        self.status_built.saturating_duration_since(self.work_done)
+    }
+
+    pub fn status_publish(&self) -> Duration {
+        self.status_published
+            .saturating_duration_since(self.status_built)
+    }
 }
 
 impl TimingStats {
@@ -158,6 +236,26 @@ impl TimingStats {
         Self {
             timer,
             ..Self::default()
+        }
+    }
+
+    /// Adds one tick's diagnostics to the distributions.
+    pub fn record_diagnostics(&mut self, d: &TickDiagnostics) {
+        let s = &mut self.diagnostics;
+        if let Some(v) = d.timer_wake_lateness() {
+            s.timer_wake_lateness.record(v);
+        }
+        if let Some(v) = d.timer_to_control() {
+            s.timer_to_control.record(v);
+        }
+        s.status_build.record(d.status_build());
+        s.status_publish.record(d.status_publish());
+        s.log_lock_wait.record(d.log_lock_wait);
+        s.log_lock_hold.record(d.log_lock_hold);
+        s.status_lock_attempt.record(d.status_lock_attempt);
+        s.status_lock_hold.record(d.status_lock_hold);
+        if !d.published {
+            s.status_publish_skipped += 1;
         }
     }
 }
@@ -245,5 +343,50 @@ mod tests {
         h.record(Duration::MAX);
         assert_eq!(h.count(), 2);
         assert_eq!(h.max(), Duration::MAX);
+    }
+
+    #[test]
+    fn tick_diagnostics_split_the_tick_into_its_parts() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let us = Duration::from_micros;
+        let d = TickDiagnostics {
+            deadline: t0,
+            timer_woke: Some(t0 + us(300)),
+            timer_signalled: Some(t0 + us(310)),
+            control_start: t0 + ms(15),
+            control_start_qpc: Some(1),
+            work_done: t0 + ms(15) + us(100),
+            status_built: t0 + ms(15) + us(180),
+            status_published: t0 + ms(15) + us(200),
+            published: false,
+            log_lock_wait: us(2),
+            log_lock_hold: us(5),
+            status_lock_attempt: us(1),
+            status_lock_hold: Duration::ZERO,
+            inputs: 3,
+        };
+        assert_eq!(d.lateness(), ms(15));
+        assert_eq!(d.timer_wake_lateness(), Some(us(300)));
+        assert_eq!(d.timer_to_control(), Some(ms(15) - us(310)));
+        assert_eq!(d.status_build(), us(80));
+        assert_eq!(d.status_publish(), us(20));
+        let mut stats = TimingStats::default();
+        stats.record_diagnostics(&d);
+        stats.record_diagnostics(&TickDiagnostics {
+            timer_woke: None,
+            timer_signalled: None,
+            published: true,
+            ..d
+        });
+        let s = &stats.diagnostics;
+        assert_eq!(
+            s.timer_wake_lateness.summary().count,
+            1,
+            "only measured wakes count"
+        );
+        assert_eq!(s.timer_to_control.summary().count, 1);
+        assert_eq!(s.status_build.summary().count, 2);
+        assert_eq!(s.status_publish_skipped, 1);
     }
 }

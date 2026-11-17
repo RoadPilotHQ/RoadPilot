@@ -248,6 +248,20 @@ export interface ControlTiming {
   lateTicks: number
   gapViolations: number
   watchdogTrips: number
+  /** Where tick time goes (diagnostics only; nothing decides on them). */
+  diagnostics: TimingDiagnostics
+}
+
+export interface TimingDiagnostics {
+  timerWakeLateness: TimingHistogram
+  timerToControl: TimingHistogram
+  statusBuild: TimingHistogram
+  statusPublish: TimingHistogram
+  logLockWait: TimingHistogram
+  logLockHold: TimingHistogram
+  statusLockAttempt: TimingHistogram
+  statusLockHold: TimingHistogram
+  statusPublishSkipped: number
 }
 
 export type CommandOutcome = 'accepted' | 'rejected' | 'pending' | 'unavailable'

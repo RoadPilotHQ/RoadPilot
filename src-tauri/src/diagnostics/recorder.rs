@@ -20,6 +20,9 @@
 //! * `control`: every record of the control log (decisions, timing, messages) as it is
 //!   logged, before the in-memory rings could drop it, and every change of the freshness
 //!   assessment.
+//! * `tick`: every control tick: deadline, timer wake-up and signal, control start (also as
+//!   QPC), end of the work, status built and published, the time at the log mutex and the
+//!   status mutex, and the durations between them; `late` marks ticks more than 10 ms late.
 //! * `feed`: the frame channel was attached, lost or replaced (pipe server restart).
 //! * `loss`: queue overflows or failed writes since the previous loss record, with totals.
 //! * `end`: last line; how many records were queued, written, lost to a full queue, lost to
@@ -50,7 +53,9 @@ use crate::control::freshness::{Assessment, Unusable};
 use crate::control::latency::{LatencyEvent, Measure};
 use crate::control::log::{LogObserver, Observed};
 use crate::control::runtime::FrameSource;
+use crate::control::schedule::LATE_AFTER;
 use crate::control::status::{LogEntryDto, freshness};
+use crate::control::timing::TickDiagnostics;
 use crate::platform;
 use roadpilot_telemetry_client::{PluginState, ReceivedTelemetryFrame};
 use serde_json::{Value, json};
@@ -65,8 +70,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 pub const ENV_VAR: &str = "ROADPILOT_TELEMETRY_RECORD";
-/// 1: initial format. 2: frames add `receivedQpc` and `timing`.
-pub const FORMAT_VERSION: u32 = 2;
+/// 1: initial format. 2: frames add `receivedQpc` and `timing`. 3: `tick` lines (diagnostics of
+/// every control tick).
+pub const FORMAT_VERSION: u32 = 3;
 /// Records the queue holds before it overflows: about 4 minutes of 60 Hz frames.
 pub const QUEUE_CAPACITY: usize = 16_384;
 /// How long [`Recorder::finish`] waits for the queue to be written out.
@@ -411,6 +417,10 @@ impl<W: Write> Writer<W> {
                 self.stamp(value, "frame", received.received_at)
             }
             Item::Control {
+                record: Observed::Tick(d),
+                ..
+            } => self.stamp(self.tick_json(&d), "tick", d.control_start),
+            Item::Control {
                 observed_at,
                 record,
             } => self.stamp(control_json(record), "control", observed_at),
@@ -420,6 +430,35 @@ impl<W: Write> Writer<W> {
                 at,
             ),
         }
+    }
+
+    /// One control tick: every timestamp on the recorder's time base (`...Us`, µs like
+    /// `monoUs`), and the durations between them. `monoUs` of the line is the control start.
+    fn tick_json(&self, d: &TickDiagnostics) -> Value {
+        let mono = |at: Instant| self.clock.mono_us(at);
+        let us = |d: Duration| micros(d);
+        json!({
+            "deadlineUs": mono(d.deadline),
+            "timerWokeUs": d.timer_woke.map(mono),
+            "timerSignalledUs": d.timer_signalled.map(mono),
+            "controlStartUs": mono(d.control_start),
+            "controlStartQpc": d.control_start_qpc,
+            "workDoneUs": mono(d.work_done),
+            "statusBuiltUs": mono(d.status_built),
+            "statusPublishedUs": mono(d.status_published),
+            "latenessUs": us(d.lateness()),
+            "timerWakeLatenessUs": d.timer_wake_lateness().map(us),
+            "timerToControlUs": d.timer_to_control().map(us),
+            "statusBuildUs": us(d.status_build()),
+            "statusPublishUs": us(d.status_publish()),
+            "published": d.published,
+            "logLockWaitUs": us(d.log_lock_wait),
+            "logLockHoldUs": us(d.log_lock_hold),
+            "statusLockAttemptUs": us(d.status_lock_attempt),
+            "statusLockHoldUs": us(d.status_lock_hold),
+            "inputs": d.inputs,
+            "late": d.lateness() > LATE_AFTER,
+        })
     }
 
     fn start_line(&self) -> String {
@@ -530,6 +569,8 @@ fn measure_code(measure: Measure) -> &'static str {
 fn control_json(record: Observed) -> Value {
     let dto = |dto: LogEntryDto| serde_json::to_value(dto).unwrap_or(Value::Null);
     match record {
+        // Written as `tick` lines by the writer, which knows the clock.
+        Observed::Tick(_) => json!({ "category": "tick" }),
         Observed::Decision(e) => entry_json("decision", e.n, e.at, dto(LogEntryDto::decision(&e))),
         Observed::Timing(e) => entry_json("timing", e.n, e.at, dto(LogEntryDto::timing(&e))),
         Observed::Message(e) => entry_json("message", e.n, e.at, dto(LogEntryDto::message(&e))),
@@ -1076,7 +1117,56 @@ mod tests {
         );
         assert_eq!(frames[2]["timing"]["valid"], false);
         assert_eq!(frames[2]["timing"]["error"], "Missing(Produced)");
-        assert_eq!(lines[0]["formatVersion"], 2);
+        assert_eq!(lines[0]["formatVersion"], 3);
+    }
+
+    #[test]
+    fn every_control_tick_is_written_as_a_tick_line() {
+        use crate::control::timing::TickDiagnostics;
+        let out = Output::default();
+        let recorder = Recorder::with_output(out.clone(), 64, WRITER_POLL).unwrap();
+        let t0 = Instant::now();
+        let log = ControlLog::with_observer(t0, Some(recorder.control_observer()));
+        let us = Duration::from_micros;
+        let tick = |late_us: u64| TickDiagnostics {
+            deadline: t0,
+            timer_woke: Some(t0 + us(200)),
+            timer_signalled: Some(t0 + us(210)),
+            control_start: t0 + us(late_us),
+            control_start_qpc: Some(42),
+            work_done: t0 + us(late_us + 100),
+            status_built: t0 + us(late_us + 160),
+            status_published: t0 + us(late_us + 170),
+            published: true,
+            log_lock_wait: us(1),
+            log_lock_hold: us(4),
+            status_lock_attempt: us(1),
+            status_lock_hold: us(9),
+            inputs: 2,
+        };
+        log.tick_diagnostics(tick(400));
+        log.tick_diagnostics(tick(14_600));
+        recorder.finish(FINISH_TIMEOUT).unwrap();
+        let lines = out.lines();
+        assert_eq!(lines[0]["formatVersion"], 3);
+        let ticks = of_type(&lines, "tick");
+        assert_eq!(ticks.len(), 2);
+        let late = ticks[1];
+        assert_eq!(late["late"], true);
+        assert_eq!(ticks[0]["late"], false);
+        assert_eq!(late["latenessUs"], 14_600);
+        assert_eq!(late["timerWakeLatenessUs"], 200);
+        assert_eq!(late["timerToControlUs"], 14_390);
+        assert_eq!(late["statusBuildUs"], 60);
+        assert_eq!(late["statusPublishUs"], 10);
+        assert_eq!(late["logLockWaitUs"], 1);
+        assert_eq!(late["statusLockHoldUs"], 9);
+        assert_eq!(late["controlStartQpc"], 42);
+        assert_eq!(late["inputs"], 2);
+        assert_eq!(
+            late["controlStartUs"].as_i64().unwrap() - late["deadlineUs"].as_i64().unwrap(),
+            14_600
+        );
     }
 
     // ---- control records ----

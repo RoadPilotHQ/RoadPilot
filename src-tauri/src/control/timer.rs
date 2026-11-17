@@ -26,6 +26,16 @@ use tokio::time::{Instant as TokioInstant, sleep_until};
 
 pub type WaitFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
+/// When the timer thread woke up for a deadline and signalled the control loop (diagnostics).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimerWake {
+    pub deadline: Instant,
+    /// The clock reading at which the timer thread found the deadline reached.
+    pub woke: Instant,
+    /// Taken immediately before the control loop was signalled.
+    pub signalled: Instant,
+}
+
 /// Wakes the control loop at a deadline.
 pub trait TickTimer: Send + 'static {
     fn kind(&self) -> TimerKind;
@@ -33,6 +43,12 @@ pub trait TickTimer: Send + 'static {
     /// Resolves at or after `deadline`, never before. Cancel-safe: the control loop drops the
     /// future whenever another event arrives first and then calls again with the same deadline.
     fn wait_until(&mut self, deadline: Instant) -> WaitFuture<'_>;
+
+    /// How the most recent wait ended, if the timer measures it (diagnostics only; the
+    /// precise timer does, tokio's does not).
+    fn last_wake(&self) -> Option<TimerWake> {
+        None
+    }
 }
 
 /// Tokio's timer on whichever runtime polls it.
@@ -52,8 +68,9 @@ impl TickTimer for TokioTimer {
 /// A dedicated timer thread with high-resolution sleeps.
 pub struct PreciseTimer {
     requests: mpsc::Sender<Instant>,
-    fired: watch::Receiver<Option<Instant>>,
+    fired: watch::Receiver<Option<TimerWake>>,
     requested: Option<Instant>,
+    last_wake: Option<TimerWake>,
 }
 
 impl PreciseTimer {
@@ -76,14 +93,19 @@ impl PreciseTimer {
                         deadline = newer;
                     }
                     // The loop re-checks: a sleep must never end the wait early.
-                    loop {
+                    let woke = loop {
                         let now = Instant::now();
                         if now >= deadline {
-                            break;
+                            break now;
                         }
                         std::thread::sleep(deadline - now);
-                    }
-                    if fired_tx.send(Some(deadline)).is_err() {
+                    };
+                    let wake = TimerWake {
+                        deadline,
+                        woke,
+                        signalled: Instant::now(),
+                    };
+                    if fired_tx.send(Some(wake)).is_err() {
                         break;
                     }
                 }
@@ -94,6 +116,7 @@ impl PreciseTimer {
                 requests,
                 fired,
                 requested: None,
+                last_wake: None,
             },
             hook_result,
         ))
@@ -105,25 +128,31 @@ impl TickTimer for PreciseTimer {
         TimerKind::Precise
     }
 
+    fn last_wake(&self) -> Option<TimerWake> {
+        self.last_wake
+    }
+
     fn wait_until(&mut self, deadline: Instant) -> WaitFuture<'_> {
         Box::pin(async move {
             if self.requested != Some(deadline) {
                 if self.requests.send(deadline).is_err() {
                     // The timer thread is gone: fall back to tokio's timer rather than stall.
+                    self.last_wake = None;
                     sleep_until(TokioInstant::from_std(deadline)).await;
                     return;
                 }
                 self.requested = Some(deadline);
             }
             loop {
-                if self
-                    .fired
-                    .borrow_and_update()
-                    .is_some_and(|fired| fired >= deadline)
+                let fired = *self.fired.borrow_and_update();
+                if let Some(wake) = fired
+                    && wake.deadline >= deadline
                 {
+                    self.last_wake = Some(wake);
                     return;
                 }
                 if self.fired.changed().await.is_err() {
+                    self.last_wake = None;
                     sleep_until(TokioInstant::from_std(deadline)).await;
                     return;
                 }
@@ -265,5 +294,25 @@ mod tests {
             timer.wait_until(deadline).await;
             assert_eq!(TokioInstant::now().into_std(), deadline);
         });
+    }
+
+    #[test]
+    fn the_precise_timer_reports_when_it_woke_and_signalled() {
+        let (mut timer, _) = PreciseTimer::start(|| false).unwrap();
+        assert_eq!(timer.last_wake(), None);
+        runtime().block_on(async {
+            for n in 1..=10u64 {
+                let deadline = Instant::now() + ms(5 + n % 3);
+                timer.wait_until(deadline).await;
+                let resumed = Instant::now();
+                let wake = timer.last_wake().expect("a measured wake");
+                assert_eq!(wake.deadline, deadline);
+                assert!(wake.woke >= deadline, "never before the deadline");
+                assert!(wake.signalled >= wake.woke);
+                assert!(resumed >= wake.signalled);
+            }
+        });
+        // Tokio's timer measures nothing.
+        assert_eq!(TokioTimer.last_wake(), None);
     }
 }

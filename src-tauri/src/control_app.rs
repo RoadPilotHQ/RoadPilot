@@ -869,6 +869,23 @@ mod tests {
         wait_until("a newer status", ms(1_000), || {
             rig.slot.status().timing.ticks > ticks
         });
+        // The skipped publications are counted in the diagnostics.
+        assert!(rig.slot.status().timing.diagnostics.status_publish_skipped >= 5);
+    }
+
+    #[test]
+    fn the_application_measures_the_timer_wake_and_the_hand_off_to_the_control_thread() {
+        let rig = Rig::start();
+        std::thread::sleep(ms(300));
+        let d = rig.slot.status().timing.diagnostics;
+        let ticks = rig.slot.status().timing.ticks;
+        assert!(ticks >= 5);
+        // The precise timer measures its wake-up and the hand-off for (almost) every tick.
+        assert!(d.timer_wake_lateness.count + 2 >= ticks, "{d:?}");
+        assert!(d.timer_to_control.count + 2 >= ticks, "{d:?}");
+        assert!(d.status_build.count + 2 >= ticks);
+        assert!(d.log_lock_wait.count + 2 >= ticks);
+        assert!(d.timer_wake_lateness.max_ms < 50.0, "{d:?}");
     }
 
     #[test]

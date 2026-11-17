@@ -840,6 +840,25 @@ pub struct TimingDto {
     pub late_ticks: u64,
     pub gap_violations: u64,
     pub watchdog_trips: u64,
+    /// Where tick time goes (diagnostics only; nothing decides on them).
+    pub diagnostics: TimingDiagnosticsDto,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingDiagnosticsDto {
+    /// Timer thread woke up after the deadline (precise timer only).
+    pub timer_wake_lateness: HistogramDto,
+    /// Timer signal to the start of the control thread's tick (precise timer only).
+    pub timer_to_control: HistogramDto,
+    pub status_build: HistogramDto,
+    pub status_publish: HistogramDto,
+    pub log_lock_wait: HistogramDto,
+    pub log_lock_hold: HistogramDto,
+    /// The control thread only tries the status mutex (never waits): the attempt and the hold.
+    pub status_lock_attempt: HistogramDto,
+    pub status_lock_hold: HistogramDto,
+    pub status_publish_skipped: u64,
 }
 
 impl TimingDto {
@@ -856,6 +875,17 @@ impl TimingDto {
             late_ticks: stats.late_ticks,
             gap_violations: stats.gap_violations,
             watchdog_trips,
+            diagnostics: TimingDiagnosticsDto {
+                timer_wake_lateness: (&stats.diagnostics.timer_wake_lateness).into(),
+                timer_to_control: (&stats.diagnostics.timer_to_control).into(),
+                status_build: (&stats.diagnostics.status_build).into(),
+                status_publish: (&stats.diagnostics.status_publish).into(),
+                log_lock_wait: (&stats.diagnostics.log_lock_wait).into(),
+                log_lock_hold: (&stats.diagnostics.log_lock_hold).into(),
+                status_lock_attempt: (&stats.diagnostics.status_lock_attempt).into(),
+                status_lock_hold: (&stats.diagnostics.status_lock_hold).into(),
+                status_publish_skipped: stats.diagnostics.status_publish_skipped,
+            },
         }
     }
 }
