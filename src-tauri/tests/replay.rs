@@ -90,6 +90,18 @@ struct Outcome {
     handoff_lost: u64,
     /// Latency diagnosis (R6, shadow mode) per measure.
     latency: BTreeMap<&'static str, MeasureSnapshot>,
+    /// Hits of the simulation-time shadow check (R7, no epoch since Phase 4.5.8).
+    sim_ahead_hits: u64,
+}
+
+/// The recorded decisions as the current logic must reproduce them: the recorded runs used
+/// the simulation-time backlog check (R7) as an epoch cause; it is now a shadow diagnosis, so
+/// its epochs (`epoch:backlog`) are gone and every other decision is unchanged. Returns the
+/// expectation and the number of removed R7 epochs.
+fn expected_without_r7(recorded: &BTreeMap<String, u64>) -> (BTreeMap<String, u64>, u64) {
+    let mut expected = recorded.clone();
+    let r7 = expected.remove("epoch:backlog").unwrap_or(0);
+    (expected, r7)
 }
 
 fn game(fixture: &Fixture) -> GameId {
@@ -267,6 +279,7 @@ fn replay_via(fixture: &Fixture, path: Path) -> Outcome {
         max_age_at_receive,
         handoff_lost: lost,
         latency,
+        sim_ahead_hits: stats.sim_ahead_hits,
     }
 }
 
@@ -277,29 +290,35 @@ fn print(name: &str, outcome: &Outcome) {
 // ---- baseline: the current logic reproduces the recorded control runs ----
 
 #[test]
-fn calibration_drive_baseline_reproduces_the_recorded_decisions() {
+fn calibration_drive_replays_without_r7_epochs() {
+    // Test 1 (and 16: the drive ran at 16-24 FPS). The recorded run had 33 epochs of the
+    // simulation-time backlog check (R7). With the latency check they are gone, no latency
+    // epoch replaces them (every frame arrived within 24 ms), the shadow diagnosis counts
+    // exactly the same 33 hits, and every other decision is that of the recorded run.
     let fixture = fixture::parse(CALIBRATION);
     assert_eq!(fixture.records.len(), 46_389);
     let outcome = replay(&fixture);
     print("calibration", &outcome);
-    assert_eq!(
-        outcome.decisions, fixture.expect,
-        "decisions of the recorded run"
+    let (expected, r7) = expected_without_r7(&fixture.expect);
+    assert_eq!(r7, 33, "R7 epochs of the recorded run");
+    assert_eq!(outcome.decisions, expected, "every other recorded decision");
+    assert!(!outcome.decisions.contains_key("epoch:backlog"));
+    assert!(!outcome.decisions.contains_key("epoch:latencyBacklog"));
+    assert_eq!(outcome.sim_ahead_hits, 33, "shadow hits = former R7 epochs");
+    for key in ["epoch:firstFrame", "epoch:gap", "epoch:paused", "shutdown"] {
+        assert_eq!(outcome.decisions[key], fixture.expect[key], "{key}");
+    }
+    // Freshness: the stale, paused and no-frame states are those of the recorded run. With
+    // 33 fewer epochs the state settles less often, so there are fewer settling and fresh
+    // changes (31 each before).
+    let a = |k: &str| outcome.assessments.get(k).copied().unwrap_or(0);
+    assert_eq!((a("stale"), a("paused"), a("noFrame")), (5, 8, 1));
+    assert!(
+        a("settling") <= 31 && a("fresh") <= 31,
+        "{:?}",
+        outcome.assessments
     );
-    assert_eq!(outcome.decisions["epoch:backlog"], 33);
-    // The freshness assessments are the same as before R2: the absolute age (at most 24 ms
-    // on arrival) causes no stale state of its own.
-    let assessments: BTreeMap<String, u64> = [
-        ("fresh", 31),
-        ("noFrame", 1),
-        ("paused", 8),
-        ("settling", 31),
-        ("stale", 5),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v))
-    .collect();
-    assert_eq!(outcome.assessments, assessments);
+    assert!(!outcome.assessments.contains_key("invalid"));
     // Every frame carries a valid QPC timing; the reconstruction matches the recorder.
     assert_eq!(outcome.clock_valid, 46_389);
     assert_eq!(outcome.clock_missing_or_invalid, 0);
@@ -330,6 +349,9 @@ fn stage_b_without_qpc_stamps_is_never_usable() {
     assert!(outcome.assessments["invalid"] > 0);
     assert!(outcome.frames_invalid > 30_000);
     assert_eq!(outcome.decisions["epoch:sessionChanged"], 1);
+    // Test 2: without a valid clock no frame is checked for latency.
+    assert!(!outcome.decisions.contains_key("epoch:latencyBacklog"));
+    assert!(!outcome.decisions.contains_key("epoch:backlog"));
     // The plugin of Stage B had no QPC stamps.
     assert_eq!(outcome.clock_valid, 0);
     assert_eq!(outcome.clock_missing_or_invalid, 36_290);
@@ -367,11 +389,22 @@ fn full_recordings_replay_like_their_fixtures() {
         let full = fixture::from_recording(std::io::BufReader::new(file), &source);
         let outcome = replay(&full);
         print(&source, &outcome);
-        // Recordings with QPC stamps replay like the recorded run; without them, R2 makes the
-        // state unusable (see stage_b_without_qpc_stamps_is_never_usable).
+        // Recordings with QPC stamps replay like the recorded run without its R7 epochs, which
+        // the shadow diagnosis counts instead; without stamps, R2 makes the state unusable
+        // (see stage_b_without_qpc_stamps_is_never_usable).
         if outcome.clock_valid > 0 {
-            assert_eq!(outcome.decisions, full.expect, "{source}");
+            let (expected, r7) = expected_without_r7(&full.expect);
+            println!(
+                "{source}: recorded R7 epochs {r7}, shadow hits {}",
+                outcome.sim_ahead_hits
+            );
+            assert_eq!(outcome.decisions, expected, "{source}");
+            assert_eq!(outcome.sim_ahead_hits, r7, "{source}");
         }
+        assert!(
+            !outcome.decisions.contains_key("epoch:latencyBacklog"),
+            "{source}"
+        );
         for text in [CALIBRATION, STAGE_B] {
             let compact = fixture::parse(text);
             if compact.source == source {
@@ -493,10 +526,10 @@ fn latency_diagnosis_of_the_calibration_drive() {
         43_185,
         "every running frame was measured"
     );
-    // Shadow mode: the decisions and freshness states are exactly those without the
-    // diagnosis (see calibration_drive_baseline_reproduces_the_recorded_decisions), and the
-    // simulation-time backlog check (R7) still raises its 33 epochs.
-    assert_eq!(outcome.decisions["epoch:backlog"], 33);
+    // The diagnosis itself decides nothing (see calibration_drive_replays_without_r7_epochs);
+    // its critical limits now also drive the latency check, which never fires here.
+    assert!(!outcome.decisions.contains_key("epoch:latencyBacklog"));
+    assert_eq!(outcome.sim_ahead_hits, 33);
 }
 
 #[test]

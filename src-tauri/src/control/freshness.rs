@@ -48,6 +48,7 @@
 //! The thresholds are conservative and have **not** been tuned against a live game. They may
 //! only make the system stricter; they must not be loosened without live measurements.
 
+use super::latency::{AGE_AT_RECEIVE_CRITICAL, TRANSPORT_CRITICAL};
 use super::vehicle::{FrameIdentity, InvalidFrame, VehicleState};
 use roadpilot_telemetry_client::qpc::{self, Stamp, Stamps, TimingError};
 use roadpilot_telemetry_client::{GameId, PluginState, ReceivedTelemetryFrame};
@@ -67,7 +68,7 @@ pub const RETIRED_SESSIONS: usize = 8;
 const SETTLE_FRAMES: u32 = 3;
 const SETTLE_TIME: Duration = Duration::from_millis(50);
 /// The simulation clock may run ahead of the local clock by this much within one window
-/// before frames are considered to come from a backlog.
+/// before the shadow diagnosis (R7) counts a hit. Diagnostic only, no epoch.
 const BACKLOG_TOLERANCE: Duration = Duration::from_millis(100);
 const BACKLOG_WINDOW: Duration = Duration::from_secs(1);
 
@@ -115,8 +116,11 @@ pub enum Discontinuity {
     Gap,
     /// The simulation clock went backwards.
     SimulationTimeRestarted,
-    /// The simulation clock ran ahead of the local clock: frames were read from a backlog.
-    Backlog,
+    /// A frame with a verified QPC timing arrived with a transport latency or an age at
+    /// receive above the critical limit (`latency::TRANSPORT_CRITICAL`,
+    /// `latency::AGE_AT_RECEIVE_CRITICAL`): it waited in the plugin or the pipe. Raised once
+    /// per run of such frames (see [`FreshnessMonitor::observe_digest`]).
+    LatencyBacklog,
     /// A frame was unusable (see [`Observation::Invalid`]).
     InvalidFrame,
     /// The hand-off from the relay to the control loop lost frames or events (see
@@ -299,7 +303,8 @@ struct Track {
     paused: bool,
     /// Local time at which the simulation clock last advanced.
     sim_advanced_at: Instant,
-    /// Reference point of the backlog check; renewed every [`BACKLOG_WINDOW`].
+    /// Reference point of the simulation-time shadow check (R7); renewed every
+    /// [`BACKLOG_WINDOW`], at every epoch change and at every hit.
     window_start: Instant,
     window_start_sim_us: u64,
 }
@@ -324,6 +329,23 @@ pub struct FreshnessMonitor {
     /// Replaced sessions (ring, most recent at `next_retired - 1`).
     retired: [Option<(GameId, u64)>; RETIRED_SESSIONS],
     next_retired: usize,
+    /// Inside a run of frames above a latency limit: set by the first one, cleared only by a
+    /// frame with a verified clock within both limits.
+    latency_run: bool,
+    /// Hits of the simulation-time shadow check (R7); diagnostic only.
+    sim_ahead_hits: u64,
+}
+
+/// Whether a frame's verified QPC timing exceeds a critical latency limit; `None` when the
+/// frame has no verified timing (its latency is unknown).
+fn latency_exceeded(digest: &FrameDigest) -> Option<bool> {
+    match (digest.clock, digest.produced_at) {
+        (ClockStatus::Verified { transport, .. }, Some(produced_at)) => {
+            let age_at_receive = digest.received_at.saturating_duration_since(produced_at);
+            Some(transport > TRANSPORT_CRITICAL || age_at_receive > AGE_AT_RECEIVE_CRITICAL)
+        }
+        _ => None,
+    }
 }
 
 impl FreshnessMonitor {
@@ -338,7 +360,15 @@ impl FreshnessMonitor {
             latest: None,
             retired: [None; RETIRED_SESSIONS],
             next_retired: 0,
+            latency_run: false,
+            sim_ahead_hits: 0,
         }
+    }
+
+    /// Hits of the simulation-time shadow check (R7) so far. Diagnostic only: they start no
+    /// epoch and change no assessment.
+    pub fn sim_ahead_hits(&self) -> u64 {
+        self.sim_ahead_hits
     }
 
     /// Current epoch; 0 until the first frame. Only ever grows.
@@ -382,25 +412,42 @@ impl FreshnessMonitor {
         Observation::Invalid(reason)
     }
 
-    fn classify(&self, id: &FrameIdentity, at: Instant, paused: bool) -> Option<Discontinuity> {
+    /// The epoch change a frame causes, if any, and whether the simulation-time shadow check
+    /// (R7) hit. Priority: first frame, session, game, gap, simulation clock restart, then a
+    /// new run of frames above a latency limit (`latency_starts`), then entering pause. The
+    /// shadow check is evaluated where the former backlog check was, so only when none of the
+    /// first five applies; it never causes an epoch change.
+    fn classify(
+        &self,
+        id: &FrameIdentity,
+        at: Instant,
+        paused: bool,
+        latency_starts: bool,
+    ) -> (Option<Discontinuity>, bool) {
         let Some(t) = &self.track else {
-            return Some(Discontinuity::FirstFrame);
+            return (Some(Discontinuity::FirstFrame), false);
         };
         if t.identity.session != id.session {
-            Some(Discontinuity::SessionChanged)
-        } else if t.identity.game != id.game {
-            Some(Discontinuity::GameChanged)
-        } else if at.saturating_duration_since(t.received_at) > self.config.max_age {
-            Some(Discontinuity::Gap)
-        } else if id.simulation_time_us < t.identity.simulation_time_us {
-            Some(Discontinuity::SimulationTimeRestarted)
-        } else if backlog(t, id, at) {
-            Some(Discontinuity::Backlog)
+            return (Some(Discontinuity::SessionChanged), false);
+        }
+        if t.identity.game != id.game {
+            return (Some(Discontinuity::GameChanged), false);
+        }
+        if at.saturating_duration_since(t.received_at) > self.config.max_age {
+            return (Some(Discontinuity::Gap), false);
+        }
+        if id.simulation_time_us < t.identity.simulation_time_us {
+            return (Some(Discontinuity::SimulationTimeRestarted), false);
+        }
+        let sim_ahead = backlog(t, id, at);
+        let cause = if latency_starts {
+            Some(Discontinuity::LatencyBacklog)
         } else if paused && !t.paused {
             Some(Discontinuity::Paused)
         } else {
             None
-        }
+        };
+        (cause, sim_ahead)
     }
 
     /// Feeds one received frame. Call it for every frame, in receive order.
@@ -417,6 +464,13 @@ impl FreshnessMonitor {
 
     /// Feeds the digest of one received frame. Call it for every frame, in receive order.
     /// Identical to [`FreshnessMonitor::observe`] on the frame itself.
+    ///
+    /// **Latency backlog.** An accepted frame (running or paused) with a verified QPC timing
+    /// whose transport latency or age at receive exceeds its critical limit belongs to a run of
+    /// late frames. The first frame of a run starts one epoch (`LatencyBacklog`, unless a
+    /// higher-priority cause applies to that frame); every frame of the run resets settling,
+    /// so the state stays unusable. The run ends only with a frame with a verified timing
+    /// within both limits; a frame without a verified timing neither starts nor ends a run.
     pub fn observe_digest(&mut self, digest: &FrameDigest) -> Observation {
         let at = digest.received_at;
 
@@ -457,9 +511,18 @@ impl FreshnessMonitor {
             return self.reject_invalid(reason);
         }
 
-        let discontinuity = self.classify(&identity, at, paused);
+        let exceeded = latency_exceeded(digest);
+        let late = exceeded == Some(true);
+        let (discontinuity, sim_ahead) =
+            self.classify(&identity, at, paused, late && !self.latency_run);
         if let Some(cause) = discontinuity {
             self.bump(cause);
+        }
+        if let Some(exceeded) = exceeded {
+            self.latency_run = exceeded;
+        }
+        if sim_ahead {
+            self.sim_ahead_hits = self.sim_ahead_hits.saturating_add(1);
         }
         if matches!(
             discontinuity,
@@ -472,7 +535,10 @@ impl FreshnessMonitor {
 
         let previous = self.track;
         let sim = identity.simulation_time_us;
+        // A shadow hit renews the window like the epoch change it used to cause, so the hits
+        // are counted exactly as the former backlog epochs were.
         let renew_window = discontinuity.is_some()
+            || sim_ahead
             || previous
                 .is_none_or(|t| at.saturating_duration_since(t.window_start) >= BACKLOG_WINDOW);
         let (window_start, window_start_sim_us) = match previous {
@@ -486,7 +552,9 @@ impl FreshnessMonitor {
             _ => at,
         };
 
-        if paused {
+        if paused || late {
+            // A late frame never counts towards settling: the state stays unusable for the
+            // whole run.
             self.streak = Streak::default();
         } else {
             self.streak.frames = self.streak.frames.saturating_add(1);
@@ -555,9 +623,11 @@ impl Default for FreshnessMonitor {
     }
 }
 
-/// True if, since the window started, the simulation clock advanced more than the local clock
-/// plus the tolerance. Sustained normal drift between the clocks stays far below the
-/// tolerance within one window; a burst of buffered frames does not.
+/// The simulation-time shadow check (R7, diagnostic only): true if, since the window started,
+/// the simulation clock advanced more than the local clock plus the tolerance. ATS advances
+/// the simulation clock in fixed steps and delivers frames in clusters, so this also hits
+/// without any delay (Phase 4.5: 46 hits in 75,609 recorded frames, none of them delayed);
+/// that is why it no longer starts an epoch.
 fn backlog(t: &Track, id: &FrameIdentity, at: Instant) -> bool {
     let local = at.saturating_duration_since(t.window_start);
     let simulated =
@@ -1164,30 +1234,39 @@ mod tests {
         assert_eq!(rig.monitor.epoch(), 1);
     }
 
+    // ---- R7: the simulation-time check, now a shadow diagnosis ----
+
     #[test]
-    fn a_burst_of_buffered_frames_is_detected_as_a_backlog() {
+    fn a_simulation_clock_running_ahead_is_counted_but_starts_no_epoch() {
         let mut rig = Rig::settled(); // window starts at 0 ms
-        // Twenty frames read back to back at 70 ms, but produced 16 ms apart.
-        let mut detected_at = None;
+        // Twenty frames read back to back at 70 ms, simulation clock 16 ms apart, without any
+        // delay (QPC age 0): the former backlog check fired here.
+        let mut hit_at = None;
         for k in 1..=20u64 {
             let observation = rig.feed(running_frame(7, 5 + k, (64 + 16 * k) * 1_000), 70);
-            if let Observation::Accepted {
-                discontinuity: Some(Discontinuity::Backlog),
-                ..
-            } = observation
-            {
-                detected_at = Some(k);
-                break;
+            assert_eq!(
+                observation,
+                Observation::Accepted {
+                    epoch: 1,
+                    discontinuity: None
+                },
+                "frame {k}"
+            );
+            if hit_at.is_none() && rig.monitor.sim_ahead_hits() == 1 {
+                hit_at = Some(k);
             }
         }
-        // The clock must have run more than 170 ms ahead: 64 + 16k > 170, so k = 7.
-        assert_eq!(detected_at, Some(7));
-        assert_eq!(rig.monitor.epoch(), 2);
-        assert_eq!(rig.unusable(70), Unusable::Settling);
+        // The clock must have run more than 170 ms ahead: 64 + 16k > 170, so k = 7. The hit
+        // renews the window like the former epoch did: the next hit needs another 100 ms
+        // ahead of the local clock (k = 14).
+        assert_eq!(hit_at, Some(7));
+        assert_eq!(rig.monitor.sim_ahead_hits(), 2);
+        assert_eq!(rig.monitor.epoch(), 1);
+        assert!(rig.assess(70).usable().is_some(), "no effect on the state");
     }
 
     #[test]
-    fn a_short_normal_burst_is_not_a_backlog() {
+    fn a_short_normal_burst_is_not_a_shadow_hit() {
         // Three frames delivered together after a brief hiccup stay within the tolerance.
         let mut rig = Rig::settled();
         for k in 1..=3u64 {
@@ -1200,6 +1279,22 @@ mod tests {
                 }
             );
         }
+        assert_eq!(rig.monitor.sim_ahead_hits(), 0);
+    }
+
+    #[test]
+    fn the_shadow_check_runs_only_where_the_former_backlog_check_ran() {
+        // A gap takes priority: the frame after it is not checked (as before).
+        // The frame's simulation clock is 536 ms ahead of the local clock.
+        let mut rig = Rig::settled();
+        rig.feed(running_frame(7, 6, 1_000_000), 64 + 400);
+        assert_eq!(rig.monitor.last_discontinuity(), Some(Discontinuity::Gap));
+        assert_eq!(rig.monitor.sim_ahead_hits(), 0);
+        // Without the gap the same lead is a hit.
+        let mut rig = Rig::settled();
+        rig.feed(running_frame(7, 6, 1_000_000), 80);
+        assert_eq!(rig.monitor.sim_ahead_hits(), 1);
+        assert_eq!(rig.monitor.epoch(), 1);
     }
 
     #[test]
@@ -1364,5 +1459,390 @@ mod tests {
         f.produced_qpc = None;
         assert!(matches!(rig.feed(f, 80), Observation::Accepted { .. }));
         assert_eq!(rig.unusable(90), Unusable::Paused);
+    }
+
+    // ---- latency backlog: transport or age at receive above 50 ms (replaces R7) ----
+
+    /// QPC value the game "produces" the latency test frames at.
+    const PRODUCED_QPC: u64 = 1_000_000_000;
+
+    fn qpc_ticks(d: Duration) -> u64 {
+        u64::try_from(d.as_nanos() * u128::from(frequency()) / 1_000_000_000).unwrap()
+    }
+
+    impl Rig {
+        /// Feeds `frame` received `received_us` after the origin, `processing` after it was
+        /// produced and `transport` after it was sent (QPC stamps accordingly).
+        fn feed_timed(
+            &mut self,
+            mut frame: TelemetryFrame,
+            received_us: u64,
+            processing: Duration,
+            transport: Duration,
+        ) -> Observation {
+            let sent = PRODUCED_QPC + qpc_ticks(processing);
+            frame.produced_qpc = Some(PRODUCED_QPC);
+            frame.sent_qpc = Some(sent);
+            frame.qpc_frequency = Some(frequency());
+            let received = ReceivedTelemetryFrame {
+                frame,
+                dropped_fields: Vec::new(),
+                received_at: self.t0 + Duration::from_micros(received_us),
+                received_qpc: Some(sent + qpc_ticks(transport)),
+            };
+            self.monitor.observe(&received)
+        }
+
+        /// A running frame received at `at_ms` with the given transport latency.
+        fn transport(
+            &mut self,
+            session: u64,
+            seq: u64,
+            at_ms: u64,
+            transport: Duration,
+        ) -> Observation {
+            let frame = running_frame(session, seq, at_ms * 1_000);
+            self.feed_timed(frame, at_ms * 1_000, Duration::ZERO, transport)
+        }
+
+        /// A running frame received at `at_ms` that waited `processing` in the plugin before
+        /// it was sent (transport 0): only its age at receive is high.
+        fn processing(
+            &mut self,
+            session: u64,
+            seq: u64,
+            at_ms: u64,
+            processing: Duration,
+        ) -> Observation {
+            let frame = running_frame(session, seq, at_ms * 1_000);
+            self.feed_timed(frame, at_ms * 1_000, processing, Duration::ZERO)
+        }
+    }
+
+    const NO_EPOCH: Observation = Observation::Accepted {
+        epoch: 1,
+        discontinuity: None,
+    };
+
+    fn latency_epoch(epoch: u64) -> Observation {
+        Observation::Accepted {
+            epoch,
+            discontinuity: Some(Discontinuity::LatencyBacklog),
+        }
+    }
+
+    #[test]
+    fn test_helpers_produce_exact_latencies() {
+        // The 49/50/51 ms cases depend on an exact conversion.
+        for n in [20, 49, 50, 51, 60, 120, 300] {
+            assert_eq!(ticks_to_age(qpc_ticks(ms(n))), ms(n), "{n} ms");
+        }
+    }
+
+    #[test]
+    fn single_outliers_of_20_49_and_50_ms_start_no_epoch_51_ms_starts_exactly_one() {
+        // Tests 7-10, for both measures: transport, and the age at receive (plugin delay).
+        for measure in ["transport", "ageAtReceive"] {
+            for (latency, expected_epochs) in [(20, 1), (49, 1), (50, 1), (51, 2)] {
+                let mut rig = Rig::settled();
+                let observation = if measure == "transport" {
+                    rig.transport(7, 6, 80, ms(latency))
+                } else {
+                    rig.processing(7, 6, 80, ms(latency))
+                };
+                if expected_epochs == 1 {
+                    assert_eq!(observation, NO_EPOCH, "{measure} {latency} ms");
+                } else {
+                    assert_eq!(observation, latency_epoch(2), "{measure} {latency} ms");
+                }
+                // Normal frames afterwards: no further epoch.
+                for k in 1..=10u64 {
+                    rig.run(7, 6 + k, 80 + 16 * k);
+                }
+                assert_eq!(
+                    rig.monitor.epoch(),
+                    expected_epochs,
+                    "{measure} {latency} ms"
+                );
+                assert!(rig.assess(240).usable().is_some(), "{measure} {latency} ms");
+            }
+        }
+    }
+
+    #[test]
+    fn a_120_ms_pipe_stall_is_a_latency_backlog() {
+        // Test 4. The frame produced at 80 ms waits 120 ms in the pipe; the receive gap (136
+        // ms) stays below the 150 ms gap limit, so the latency check reports it.
+        let mut rig = Rig::settled();
+        let stalled = running_frame(7, 6, 80_000);
+        assert_eq!(
+            rig.feed_timed(stalled, 200_000, Duration::ZERO, ms(120)),
+            latency_epoch(2)
+        );
+        // A second frame queued behind it, still late: same run, no further epoch.
+        let queued = running_frame(7, 7, 96_000);
+        assert_eq!(
+            rig.feed_timed(queued, 201_000, Duration::ZERO, ms(105)),
+            Observation::Accepted {
+                epoch: 2,
+                discontinuity: None
+            }
+        );
+        assert_eq!(rig.unusable(201), Unusable::Settling);
+        let usable_at = rig.settle_again(7, 7, 201);
+        assert_eq!(rig.sample(usable_at).epoch, 2);
+        assert_eq!(rig.monitor.epoch(), 2, "exactly one epoch");
+    }
+
+    #[test]
+    fn a_300_ms_pipe_stall_is_reported_as_a_gap_and_not_again_as_latency() {
+        // Test 3. The receive gap exceeds 150 ms: the gap has priority. The late frames still
+        // form a run, so no second epoch follows.
+        let mut rig = Rig::settled();
+        let stalled = running_frame(7, 6, 80_000);
+        assert_eq!(
+            rig.feed_timed(stalled, 380_000, Duration::ZERO, ms(300)),
+            Observation::Accepted {
+                epoch: 2,
+                discontinuity: Some(Discontinuity::Gap)
+            }
+        );
+        let queued = running_frame(7, 7, 96_000);
+        assert_eq!(
+            rig.feed_timed(queued, 381_000, Duration::ZERO, ms(285)),
+            Observation::Accepted {
+                epoch: 2,
+                discontinuity: None
+            }
+        );
+        let usable_at = rig.settle_again(7, 7, 381);
+        assert_eq!(rig.sample(usable_at).epoch, 2);
+        assert_eq!(rig.monitor.epoch(), 2, "exactly one epoch");
+        assert_eq!(rig.monitor.last_discontinuity(), Some(Discontinuity::Gap));
+    }
+
+    #[test]
+    fn a_constant_60_ms_transport_latency_raises_one_epoch_and_is_never_usable() {
+        // Test 5: 100 frames at 60 Hz, each 60 ms in the pipe.
+        let mut rig = Rig::settled();
+        for k in 1..=100u64 {
+            let at = 64 + 16 * k;
+            let observation = rig.transport(7, 5 + k, at, ms(60));
+            if k == 1 {
+                assert_eq!(observation, latency_epoch(2));
+            } else {
+                assert_eq!(
+                    observation,
+                    Observation::Accepted {
+                        epoch: 2,
+                        discontinuity: None
+                    },
+                    "frame {k}"
+                );
+            }
+            assert_eq!(rig.monitor.streak.frames, 0, "settling reset by frame {k}");
+            assert_eq!(rig.unusable(at), Unusable::Settling, "frame {k}");
+            assert_eq!(rig.unusable(at + 15), Unusable::Settling, "frame {k}");
+        }
+        assert_eq!(rig.monitor.epoch(), 2, "exactly one epoch");
+        // The run ends with the first frame within both limits; settling starts over.
+        rig.run(7, 106, 64 + 16 * 101);
+        let usable_at = rig.settle_again(7, 106, 64 + 16 * 101);
+        assert_eq!(rig.sample(usable_at).epoch, 2);
+    }
+
+    #[test]
+    fn a_blocked_plugin_write_is_detected_by_transport_or_by_age() {
+        // Test 6. The plugin stamps `sentQpc` immediately before its write.
+        // (a) The write blocks 80 ms: the transport shows it; then the frame the plugin kept
+        //     (it replaces unsent frames) arrives on time.
+        let mut rig = Rig::settled();
+        let blocked = running_frame(7, 6, 80_000);
+        assert_eq!(
+            rig.feed_timed(blocked, 160_000, Duration::ZERO, ms(80)),
+            latency_epoch(2)
+        );
+        let kept = running_frame(7, 10, 150_000);
+        assert_eq!(
+            rig.feed_timed(kept, 161_000, ms(10), ms(1)),
+            Observation::Accepted {
+                epoch: 2,
+                discontinuity: None
+            }
+        );
+        // (b) The worker is blocked before it stamps `sentQpc`: only the age at receive
+        //     shows the delay.
+        let mut rig = Rig::settled();
+        assert_eq!(rig.processing(7, 6, 141, ms(61)), latency_epoch(2));
+        assert_eq!(rig.monitor.epoch(), 2);
+    }
+
+    #[test]
+    fn frames_without_a_valid_clock_are_invalid_and_never_a_latency_epoch() {
+        // Tests 11 and 12: R2 decides (invalid frame), the latency check does not run.
+        let mut rig = Rig::settled();
+        let mut missing = running_frame(7, 6, 80_000);
+        missing.produced_qpc = None;
+        assert_eq!(
+            rig.feed(missing, 80),
+            Observation::Invalid(InvalidFrame::ClockMissing(Stamp::Produced))
+        );
+        assert_eq!(
+            rig.monitor.last_discontinuity(),
+            Some(Discontinuity::InvalidFrame)
+        );
+        let mut invalid = running_frame(7, 7, 96_000);
+        invalid.produced_qpc = Some(500);
+        invalid.sent_qpc = Some(400);
+        assert!(matches!(
+            rig.feed(invalid, 96),
+            Observation::Invalid(InvalidFrame::ClockInvalid(_))
+        ));
+        assert!(matches!(
+            rig.unusable(96),
+            Unusable::Invalid(InvalidFrame::ClockInvalid(_))
+        ));
+        assert_eq!(
+            rig.monitor.epoch(),
+            2,
+            "one invalid-frame epoch, no latency epoch"
+        );
+        assert_eq!(
+            rig.monitor.last_discontinuity(),
+            Some(Discontinuity::InvalidFrame)
+        );
+    }
+
+    #[test]
+    fn a_frame_without_a_valid_clock_neither_starts_nor_ends_a_run() {
+        let mut rig = Rig::settled();
+        assert_eq!(rig.transport(7, 6, 80, ms(60)), latency_epoch(2));
+        // A paused frame without stamps (accepted, latency unknown) enters pause ...
+        let mut unknown = paused_frame(7, 7, 96_000);
+        unknown.produced_qpc = None;
+        assert_eq!(
+            rig.feed(unknown, 96),
+            Observation::Accepted {
+                epoch: 3,
+                discontinuity: Some(Discontinuity::Paused)
+            }
+        );
+        // ... and leaves the run open: the next late frame starts no new epoch.
+        assert_eq!(
+            rig.transport(7, 8, 112, ms(60)),
+            Observation::Accepted {
+                epoch: 3,
+                discontinuity: None
+            }
+        );
+        // A frame within both limits ends the run; the next late frame starts a new one.
+        rig.run(7, 9, 128);
+        assert_eq!(rig.transport(7, 10, 144, ms(60)), latency_epoch(4));
+    }
+
+    #[test]
+    fn pause_epochs_are_kept_and_a_late_paused_frame_starts_a_latency_epoch() {
+        // Test 13.
+        let mut rig = Rig::settled();
+        let pause = paused_frame(7, 6, 80_000);
+        assert_eq!(
+            rig.feed_timed(pause, 80_000, Duration::ZERO, ms(2)),
+            Observation::Accepted {
+                epoch: 2,
+                discontinuity: Some(Discontinuity::Paused)
+            }
+        );
+        // A paused frame 60 ms in the pipe: a latency epoch; still paused.
+        let late = paused_frame(7, 7, 96_000);
+        assert_eq!(
+            rig.feed_timed(late, 96_000, Duration::ZERO, ms(60)),
+            latency_epoch(3)
+        );
+        assert_eq!(rig.unusable(96), Unusable::Paused);
+        // Resuming on time: no further epoch, settling as after every pause.
+        rig.run(7, 8, 112);
+        assert_eq!(rig.monitor.epoch(), 3);
+        assert_eq!(rig.unusable(112), Unusable::Settling);
+        let usable_at = rig.settle_again(7, 8, 112);
+        assert_eq!(rig.sample(usable_at).epoch, 3);
+        // Entering a pause on time is still exactly one pause epoch.
+        let pause_at = (usable_at + 16) * 1_000;
+        rig.feed_timed(
+            paused_frame(7, 30, pause_at),
+            pause_at,
+            Duration::ZERO,
+            ms(1),
+        );
+        assert_eq!(
+            rig.monitor.last_discontinuity(),
+            Some(Discontinuity::Paused)
+        );
+        assert_eq!(rig.monitor.epoch(), 4);
+    }
+
+    #[test]
+    fn a_session_change_is_reported_first_and_the_old_session_stays_refused() {
+        // Test 14, during a run of late frames.
+        let mut rig = Rig::settled();
+        assert_eq!(rig.transport(7, 6, 80, ms(60)), latency_epoch(2));
+        assert_eq!(
+            rig.transport(8, 1, 96, ms(60)),
+            Observation::Accepted {
+                epoch: 3,
+                discontinuity: Some(Discontinuity::SessionChanged)
+            }
+        );
+        assert_eq!(
+            rig.run(7, 7, 112),
+            Observation::Rejected(Rejection::RetiredSession)
+        );
+        assert_eq!(rig.monitor.epoch(), 3);
+        let usable_at = rig.settle_again(8, 1, 112);
+        assert_eq!(rig.sample(usable_at).state.identity.session, 8);
+    }
+
+    #[test]
+    fn the_end_of_the_game_keeps_every_epoch() {
+        // Test 15: the frames stop. The state goes stale; no epoch is added or removed.
+        let mut rig = Rig::settled();
+        assert_eq!(rig.transport(7, 6, 80, ms(60)), latency_epoch(2));
+        let usable_at = {
+            rig.run(7, 7, 96);
+            rig.settle_again(7, 7, 96)
+        };
+        assert_eq!(rig.monitor.epoch(), 2);
+        assert!(matches!(
+            rig.unusable(usable_at + 1_000),
+            Unusable::Stale { .. }
+        ));
+        assert_eq!(rig.monitor.epoch(), 2);
+        assert_eq!(
+            rig.monitor.last_discontinuity(),
+            Some(Discontinuity::LatencyBacklog)
+        );
+    }
+
+    #[test]
+    fn steady_60_and_144_hz_streams_with_up_to_20_ms_latency_never_trigger() {
+        // Test 17: 10 s each; transport and plugin processing vary between 0 and 20 ms in
+        // total (age at receive at most 20 ms).
+        for hz in [60u64, 144] {
+            let mut rig = Rig::new();
+            let period_us = 1_000_000 / hz;
+            for n in 0..hz * 10 {
+                let at_us = n * period_us;
+                let transport = Duration::from_micros((n * 7_919) % 12_001); // 0..=12 ms
+                let processing = Duration::from_micros((n * 104_729) % 8_001); // 0..=8 ms
+                let frame = running_frame(7, n + 1, at_us);
+                let observation = rig.feed_timed(frame, at_us, processing, transport);
+                if n > 0 {
+                    assert_eq!(observation, NO_EPOCH, "{hz} Hz frame {n}");
+                }
+            }
+            assert_eq!(rig.monitor.epoch(), 1, "{hz} Hz");
+            assert_eq!(rig.monitor.sim_ahead_hits(), 0, "{hz} Hz");
+            let end = rig.t0 + Duration::from_micros((hz * 10 - 1) * period_us);
+            assert!(rig.monitor.assess(end).usable().is_some(), "{hz} Hz");
+        }
     }
 }

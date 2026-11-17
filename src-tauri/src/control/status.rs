@@ -603,6 +603,8 @@ pub struct CountersDto {
     pub frames_invalid: u64,
     pub commands_encoded: u64,
     pub disarms_encoded: u64,
+    /// Hits of the simulation-time shadow check (R7). Diagnostic only, no decision.
+    pub sim_ahead_hits: u64,
 }
 
 impl From<CoreStats> for CountersDto {
@@ -614,6 +616,7 @@ impl From<CoreStats> for CountersDto {
             frames_invalid: s.frames_invalid,
             commands_encoded: s.commands_encoded,
             disarms_encoded: s.disarms_encoded,
+            sim_ahead_hits: s.sim_ahead_hits,
         }
     }
 }
@@ -901,7 +904,7 @@ pub enum DiscontinuityCode {
     Paused,
     Gap,
     SimulationTimeRestarted,
-    Backlog,
+    LatencyBacklog,
     InvalidFrame,
     HandoffOverflow,
 }
@@ -915,7 +918,7 @@ impl From<Discontinuity> for DiscontinuityCode {
             Discontinuity::Paused => Self::Paused,
             Discontinuity::Gap => Self::Gap,
             Discontinuity::SimulationTimeRestarted => Self::SimulationTimeRestarted,
-            Discontinuity::Backlog => Self::Backlog,
+            Discontinuity::LatencyBacklog => Self::LatencyBacklog,
             Discontinuity::InvalidFrame => Self::InvalidFrame,
             Discontinuity::HandoffOverflow => Self::HandoffOverflow,
         }

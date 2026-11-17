@@ -279,7 +279,7 @@ export const en = {
   'control.cause.paused': 'game paused',
   'control.cause.gap': 'telemetry gap',
   'control.cause.simulationTimeRestarted': 'simulation clock restarted',
-  'control.cause.backlog': 'delayed frames',
+  'control.cause.latencyBacklog': 'delayed frames (latency over 50 ms)',
   'control.cause.invalidFrame': 'invalid frame',
   'control.cause.handoffOverflow': 'telemetry hand-off overflow',
 } as const

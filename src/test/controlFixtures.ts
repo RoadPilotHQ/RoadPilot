@@ -82,6 +82,7 @@ export function controlStatus(overrides: Partial<ControlStatus> = {}): ControlSt
       framesInvalid: 0,
       commandsEncoded: 0,
       disarmsEncoded: 0,
+      simAheadHits: 0,
     },
     recentDecisions: [],
     timing: {

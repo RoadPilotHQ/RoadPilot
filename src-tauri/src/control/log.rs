@@ -136,6 +136,12 @@ pub enum Observed {
     },
     /// Diagnostics of one control tick (see `timing`); no ring keeps them.
     Tick(TickDiagnostics),
+    /// The simulation-time shadow check (R7) hit; `hits` is the total so far. Diagnostic
+    /// only, no ring keeps it.
+    SimAhead {
+        at: Duration,
+        hits: u64,
+    },
 }
 
 /// Time spent waiting for a mutex and holding it.
@@ -269,6 +275,14 @@ impl ControlLog {
         self.notify(Observed::Latency {
             at: now.saturating_duration_since(self.origin),
             event,
+        });
+    }
+
+    /// Reports a hit of the simulation-time shadow check (R7) to the observer only.
+    pub fn sim_ahead(&self, now: Instant, hits: u64) {
+        self.notify(Observed::SimAhead {
+            at: now.saturating_duration_since(self.origin),
+            hits,
         });
     }
 
@@ -578,9 +592,10 @@ mod tests {
                 Observed::Decision(e) => e.n,
                 Observed::Timing(e) => e.n,
                 Observed::Message(e) => e.n,
-                Observed::Assessment { .. } | Observed::Latency { .. } | Observed::Tick(_) => {
-                    unreachable!()
-                }
+                Observed::Assessment { .. }
+                | Observed::Latency { .. }
+                | Observed::Tick(_)
+                | Observed::SimAhead { .. } => unreachable!(),
             })
             .collect();
         assert_eq!(positions, (0..30).collect::<Vec<_>>());

@@ -18,8 +18,9 @@
 //!   Each frame also carries the reader's `receivedQpc` and its `timing` from the QPC
 //!   stamps (plugin processing, transport, age at receive in µs), or why it is invalid.
 //! * `control`: every record of the control log (decisions, timing, messages) as it is
-//!   logged, before the in-memory rings could drop it, and every change of the freshness
-//!   assessment.
+//!   logged, before the in-memory rings could drop it, every change of the freshness
+//!   assessment, the latency diagnosis events (`latency`) and every hit of the
+//!   simulation-time shadow check (`simAhead`, with the total so far).
 //! * `tick`: every control tick: deadline, timer wake-up and signal, control start (also as
 //!   QPC), end of the work, status built and published, the time at the log mutex and the
 //!   status mutex, and the durations between them; `late` marks ticks more than 10 ms late.
@@ -71,8 +72,9 @@ use tokio::sync::watch;
 
 pub const ENV_VAR: &str = "ROADPILOT_TELEMETRY_RECORD";
 /// 1: initial format. 2: frames add `receivedQpc` and `timing`. 3: `tick` lines (diagnostics of
-/// every control tick).
-pub const FORMAT_VERSION: u32 = 3;
+/// every control tick). 4: `control` lines of category `simAhead` (hits of the simulation-time
+/// shadow check, R7); the epoch cause `backlog` is replaced by `latencyBacklog`.
+pub const FORMAT_VERSION: u32 = 4;
 /// Records the queue holds before it overflows: about 4 minutes of 60 Hz frames.
 pub const QUEUE_CAPACITY: usize = 16_384;
 /// How long [`Recorder::finish`] waits for the queue to be written out.
@@ -574,6 +576,11 @@ fn control_json(record: Observed) -> Value {
         Observed::Decision(e) => entry_json("decision", e.n, e.at, dto(LogEntryDto::decision(&e))),
         Observed::Timing(e) => entry_json("timing", e.n, e.at, dto(LogEntryDto::timing(&e))),
         Observed::Message(e) => entry_json("message", e.n, e.at, dto(LogEntryDto::message(&e))),
+        Observed::SimAhead { at, hits } => json!({
+            "category": "simAhead",
+            "atUs": micros(at),
+            "hits": hits,
+        }),
         Observed::Latency { at, event } => {
             let (event, measure, value) = match event {
                 LatencyEvent::Critical { measure, value } => {
@@ -1117,7 +1124,7 @@ mod tests {
         );
         assert_eq!(frames[2]["timing"]["valid"], false);
         assert_eq!(frames[2]["timing"]["error"], "Missing(Produced)");
-        assert_eq!(lines[0]["formatVersion"], 3);
+        assert_eq!(lines[0]["formatVersion"], 4);
     }
 
     #[test]
@@ -1148,7 +1155,7 @@ mod tests {
         log.tick_diagnostics(tick(14_600));
         recorder.finish(FINISH_TIMEOUT).unwrap();
         let lines = out.lines();
-        assert_eq!(lines[0]["formatVersion"], 3);
+        assert_eq!(lines[0]["formatVersion"], 4);
         let ticks = of_type(&lines, "tick");
         assert_eq!(ticks.len(), 2);
         let late = ticks[1];
@@ -1170,6 +1177,42 @@ mod tests {
     }
 
     // ---- control records ----
+
+    #[test]
+    fn format_4_records_shadow_hits_and_the_latency_backlog_cause() {
+        let out = Output::default();
+        let recorder = Recorder::with_output(out.clone(), 64, WRITER_POLL).unwrap();
+        let t0 = Instant::now();
+        let log = ControlLog::with_observer(t0, Some(recorder.control_observer()));
+        log.sim_ahead(t0 + Duration::from_millis(250), 1);
+        log.decision(
+            t0 + Duration::from_millis(300),
+            DecisionEvent::Epoch {
+                epoch: 4,
+                cause: Discontinuity::LatencyBacklog,
+            },
+        );
+        log.sim_ahead(t0 + Duration::from_millis(1_400), 2);
+        recorder.finish(FINISH_TIMEOUT).unwrap();
+
+        let lines = out.lines();
+        assert_eq!(lines[0]["formatVersion"], 4);
+        assert_eq!(FORMAT_VERSION, 4);
+        let control = of_type(&lines, "control");
+        let hits: Vec<(i64, u64)> = control
+            .iter()
+            .filter(|c| c["category"] == "simAhead")
+            .map(|c| (c["atUs"].as_i64().unwrap(), c["hits"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(hits, [(250_000, 1), (1_400_000, 2)]);
+        let epoch = control
+            .iter()
+            .find(|c| c["category"] == "decision")
+            .unwrap();
+        assert_eq!(epoch["entry"]["event"], "epoch");
+        assert_eq!(epoch["entry"]["cause"], "latencyBacklog");
+        assert_eq!(epoch["entry"]["epoch"], 4);
+    }
 
     #[test]
     fn freshness_and_supervisor_records_are_written_completely() {

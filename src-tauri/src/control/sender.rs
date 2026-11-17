@@ -88,6 +88,8 @@ pub struct CoreStats {
     pub ticks: u64,
     pub commands_encoded: u64,
     pub disarms_encoded: u64,
+    /// Hits of the simulation-time shadow check (R7, see `freshness`). Diagnostic only.
+    pub sim_ahead_hits: u64,
 }
 
 /// What one tick did.
@@ -398,6 +400,12 @@ impl<S: MessageSink> ControlCore<S> {
     pub fn on_digest(&mut self, digest: &FrameDigest, now: Instant) -> Observation {
         self.last_now = now;
         let observation = self.monitor.observe_digest(digest);
+        // The simulation-time shadow check (R7): recorded, never a decision.
+        let hits = self.monitor.sim_ahead_hits();
+        if hits != self.stats.sim_ahead_hits {
+            self.stats.sim_ahead_hits = hits;
+            self.log.sim_ahead(now, hits);
+        }
         match observation {
             Observation::Accepted {
                 epoch,
@@ -757,6 +765,10 @@ mod tests {
         paused: bool,
         frames_on: bool,
         ticks_on: bool,
+        /// Transport latency of the next frames (QPC stamps); zero by default.
+        transport: Duration,
+        /// Added to the simulation clock of the next frames (µs).
+        sim_offset_us: u64,
         source: Scripted,
         trip: TripFlag,
         watchdog: Watchdog,
@@ -801,6 +813,8 @@ mod tests {
                 paused: false,
                 frames_on: true,
                 ticks_on: true,
+                transport: Duration::ZERO,
+                sim_offset_us: 0,
                 source,
                 trip,
                 watchdog,
@@ -814,20 +828,31 @@ mod tests {
 
         fn frame(&mut self) {
             self.seq += 1;
+            let sim_us = self.now_ms * 1_000 + self.sim_offset_us;
             let mut frame = if self.paused {
-                paused_frame(self.session, self.seq, self.now_ms * 1_000)
+                paused_frame(self.session, self.seq, sim_us)
             } else {
-                slow_frame(self.session, self.seq, self.now_ms * 1_000)
+                slow_frame(self.session, self.seq, sim_us)
             };
             frame.game = self.game;
             if !self.paused {
                 frame.truck.as_mut().unwrap().speed_mps = Some(self.speed);
             }
+            let mut received_qpc = crate::control::vehicle::test_support::RECEIVED_QPC;
+            if !self.transport.is_zero() {
+                // Produced and sent at `base`, received `transport` later.
+                let frequency = frame.qpc_frequency.expect("QPC on the test machine");
+                let base = 1_000_000_000u64;
+                let ticks = self.transport.as_nanos() * u128::from(frequency) / 1_000_000_000;
+                frame.produced_qpc = Some(base);
+                frame.sent_qpc = Some(base);
+                received_qpc = Some(base + u64::try_from(ticks).unwrap());
+            }
             let received = ReceivedTelemetryFrame {
                 frame,
                 dropped_fields: Vec::new(),
                 received_at: self.at(self.now_ms),
-                received_qpc: crate::control::vehicle::test_support::RECEIVED_QPC,
+                received_qpc,
             };
             self.core.on_frame(&received, self.at(self.now_ms));
         }
@@ -1180,6 +1205,123 @@ mod tests {
         rig.run_to(3_000);
         assert_eq!(rig.core.state(), State::Fault);
         assert_eq!(rig.disarms(), 1);
+    }
+
+    impl Rig {
+        fn transitions(&self) -> Vec<(State, State)> {
+            self.decisions()
+                .into_iter()
+                .filter_map(|d| match d {
+                    DecisionEvent::Transition(t) => Some((t.from, t.to)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn latency_epochs(&self) -> usize {
+            self.decisions()
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        d,
+                        DecisionEvent::Epoch {
+                            cause: Discontinuity::LatencyBacklog,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        }
+    }
+
+    #[test]
+    fn a_latency_backlog_disarms_an_armed_core() {
+        let mut rig = Rig::new();
+        rig.run_to(200);
+        assert!(rig.command(Command::Arm).result.is_ok());
+        // One frame 60 ms in the pipe, then on time again.
+        rig.transport = ms(60);
+        rig.run_to(208);
+        rig.transport = Duration::ZERO;
+        rig.run_to(2_000);
+        assert_eq!(rig.latency_epochs(), 1);
+        assert_eq!(rig.core.state(), State::Disabled);
+        assert_eq!(
+            rig.transitions(),
+            [
+                (State::Disabled, State::Armed),
+                (State::Armed, State::Disabled)
+            ]
+        );
+        assert!(
+            rig.snapshot().messages.is_empty(),
+            "armed never reached the wire"
+        );
+    }
+
+    #[test]
+    fn a_latency_backlog_faults_an_active_core_once() {
+        let mut rig = Rig::active_running();
+        // 200 ms of frames 60 ms in the pipe: one run, one epoch.
+        rig.transport = ms(60);
+        rig.run_to(rig.now_ms + 200);
+        rig.transport = Duration::ZERO;
+        rig.run_to(3_000);
+        assert_eq!(rig.latency_epochs(), 1);
+        assert_eq!(rig.core.state(), State::Fault);
+        assert_eq!(rig.disarms(), 1);
+        assert_eq!(
+            rig.transitions(),
+            [
+                (State::Disabled, State::Armed),
+                (State::Armed, State::Active),
+                (State::Active, State::Fault)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_simulation_clock_ahead_is_recorded_but_changes_no_state() {
+        use super::super::log::Observed as O;
+        let seen = Arc::new(Observed::default());
+        let mut rig = Rig::with_observer(neutral(), Some(seen.clone()));
+        rig.run_to(200);
+        assert!(rig.command(Command::Arm).result.is_ok());
+        assert!(rig.command(Command::Activate).result.is_ok());
+        rig.run_to(400);
+        // The simulation clock jumps 200 ms ahead of the local clock (no delay).
+        rig.sim_offset_us = 200_000;
+        rig.run_to(2_000);
+        assert_eq!(
+            rig.core.state(),
+            State::Active,
+            "the shadow check decides nothing"
+        );
+        assert_eq!(rig.disarms(), 0);
+        assert_eq!(rig.core.stats().sim_ahead_hits, 1);
+        assert_eq!(
+            rig.core.status(rig.at(2_000)).counters.sim_ahead_hits,
+            1,
+            "the status shows the same count"
+        );
+        let recorded: Vec<u64> = seen
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| match r {
+                O::SimAhead { hits, .. } => Some(*hits),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(recorded, [1], "one record per hit, with the total");
+        assert!(rig.decisions().iter().all(|d| !matches!(
+            d,
+            DecisionEvent::Epoch {
+                cause: Discontinuity::LatencyBacklog,
+                ..
+            }
+        )));
     }
 
     #[test]

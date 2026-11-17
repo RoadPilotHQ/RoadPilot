@@ -126,7 +126,7 @@ export type DiscontinuityCode =
   | 'paused'
   | 'gap'
   | 'simulationTimeRestarted'
-  | 'backlog'
+  | 'latencyBacklog'
   | 'invalidFrame'
   | 'handoffOverflow'
 
@@ -190,6 +190,8 @@ export interface ControlStatus {
     framesInvalid: number
     commandsEncoded: number
     disarmsEncoded: number
+    /** Hits of the simulation-time shadow check (R7). Diagnostic only, no decision. */
+    simAheadHits: number
   }
   /** Newest first. */
   recentDecisions: LogEntry[]
