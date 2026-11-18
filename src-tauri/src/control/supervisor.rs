@@ -142,6 +142,10 @@ pub enum SafetyEvent {
     SupervisorTimeout {
         silent_for: Duration,
     },
+    /// The watchdog itself ran no check for too long, so a stalled loop would go unnoticed.
+    WatchdogSilent {
+        silent_for: Duration,
+    },
     /// The sender's tick interval exceeded what the input plugin's timeouts tolerate.
     SenderTiming {
         gap: Duration,
@@ -191,7 +195,9 @@ pub enum Rejection {
     /// processing (see `runtime`), never by [`Supervisor::command`].
     SupersededByDisarm,
     /// A safety event occurred while the command was processed; the transition it caused is
-    /// reported in [`Response::transition`].
+    /// reported in [`Response::transition`]. Also used, without a transition, for an arm or
+    /// activation refused because a safety event from outside the loop (watchdog trip or
+    /// silent watchdog) was handled in the same tick before the command.
     Safety(SafetyEvent),
 }
 
@@ -1107,6 +1113,9 @@ mod tests {
             },
             SafetyEvent::SenderTiming { gap: ms(400) },
             SafetyEvent::InvalidControlRequest,
+            SafetyEvent::WatchdogSilent {
+                silent_for: ms(300),
+            },
         ]
     }
 

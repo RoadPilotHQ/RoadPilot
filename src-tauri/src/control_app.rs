@@ -1116,6 +1116,83 @@ mod tests {
     }
 
     #[test]
+    fn a_stalled_loop_shows_a_pending_trip_and_faults_when_it_returns() {
+        // Real threads: the loop blocks in its controller for 300 ms (bounded), the watchdog
+        // runs on the shared runtime meanwhile.
+        let block = Arc::new(AtomicBool::new(false));
+        let rig = Rig::active_with(Box::new(Blocking {
+            block: block.clone(),
+            delay: ms(300),
+        }));
+        block.store(true, Ordering::SeqCst);
+        wait_until("a pending trip on a stalled loop", ms(1_000), || {
+            let w = rig.slot.status().watchdog;
+            w.trip_pending && w.loop_stalled
+        });
+        let during = rig.slot.status();
+        // The loop's own values are only the last known ones, and marked as such.
+        assert_eq!(during.state, StateCode::Active);
+        assert!(during.watchdog.loop_silent_ms > during.watchdog.timeout_ms);
+        block.store(false, Ordering::SeqCst);
+        wait_until("the fault after the stall", ms(2_000), || {
+            rig.slot.status().state == StateCode::Fault
+        });
+        let after = rig.slot.status();
+        assert!(!after.watchdog.loop_stalled);
+        assert!(after.watchdog.trips >= 1);
+        assert!(
+            matches!(
+                after.last_transition.as_ref().map(|t| &t.reason),
+                Some(ReasonDto::Safety {
+                    event: status::SafetyEventDto::SupervisorTimeout { .. }
+                        | status::SafetyEventDto::SenderTiming { .. }
+                })
+            ),
+            "{:?}",
+            after.last_transition
+        );
+    }
+
+    #[test]
+    fn a_failed_watchdog_task_faults_control_and_never_lets_it_arm() {
+        let rig = Rig::active();
+        if let Slot::Running(r) = &*rig.slot.lock() {
+            r.watchdog.abort();
+        }
+        wait_until("the fault after the watchdog failed", ms(2_000), || {
+            rig.slot.status().state == StateCode::Fault
+        });
+        let s = rig.slot.status();
+        assert!(s.watchdog.watchdog_silent_ms > s.watchdog.watchdog_limit_ms);
+        assert!(matches!(
+            s.last_transition.as_ref().map(|t| &t.reason),
+            Some(ReasonDto::Safety {
+                event: status::SafetyEventDto::WatchdogSilent { .. }
+            })
+        ));
+        let refused = |reply: CommandReplyDto| {
+            reply.outcome == OutcomeCode::Rejected
+                && matches!(
+                    reply.rejection,
+                    Some(RejectionDto::Safety {
+                        event: status::SafetyEventDto::WatchdogSilent { .. }
+                    })
+                )
+        };
+        assert!(refused(run(&rig.slot, Command::Arm)));
+        assert_eq!(
+            run(&rig.slot, Command::ResetFault).outcome,
+            OutcomeCode::Accepted
+        );
+        for _ in 0..3 {
+            assert!(refused(run(&rig.slot, Command::Arm)));
+            assert!(refused(run(&rig.slot, Command::Activate)));
+            std::thread::sleep(ms(100));
+        }
+        assert_eq!(rig.slot.status().state, StateCode::Disabled);
+    }
+
+    #[test]
     fn a_task_that_already_died_is_reported_and_its_disarm_checked() {
         let rig = Rig::active();
         // Simulate a crash of the control task.

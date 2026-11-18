@@ -8,7 +8,10 @@
 //!
 //! # What a tick does, in this order
 //!
-//! 1. Consumes the watchdog's trip flag: a silent supervisor loop is a safety event.
+//! 1. Handles the safety signals from outside the loop ([`ControlCore::check_watchdog`]): the
+//!    watchdog's trip flag (a silent supervisor loop) and the watchdog's own liveness (a
+//!    silent watchdog). The runtime calls the same check before it processes queued commands,
+//!    and refuses arm and activation in a tick that handled such an event.
 //! 2. Measures timing against the scheduler: a gap over the limit is a safety event.
 //! 3. Assesses the vehicle state at `now` and updates the supervisor.
 //! 4. Records the heartbeat the independent watchdog observes.
@@ -47,7 +50,7 @@ use super::supervisor::{
 };
 use super::timing::{TickDiagnostics, TimerKind, TimingStats};
 use super::vehicle::VehicleState;
-use super::watchdog::{Heartbeat, TripFlag};
+use super::watchdog::{WATCHDOG_SILENCE_LIMIT, WatchdogLink};
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
 use std::time::{Duration, Instant};
 
@@ -131,8 +134,10 @@ pub struct ControlCore<S: MessageSink> {
     sink: S,
     source: Box<dyn RequestSource>,
     log: ControlLog,
-    heartbeat: Heartbeat,
-    trip: TripFlag,
+    watchdog: WatchdogLink,
+    /// A safety event from outside the loop handled in the current tick (watchdog trip, silent
+    /// watchdog): arm and activation are refused until a tick without one.
+    arming_blocked: Option<SafetyEvent>,
     /// A command has been encoded since the last disarm, so a disarm is still owed.
     wire_armed: bool,
     last_withheld: Option<Withheld>,
@@ -166,11 +171,10 @@ impl ControlCore<DryRunSink> {
         config: CoreConfig,
         source: Box<dyn RequestSource>,
         log: ControlLog,
-        heartbeat: Heartbeat,
-        trip: TripFlag,
+        watchdog: WatchdogLink,
         start: Instant,
     ) -> Self {
-        Self::with_sink(config, DryRunSink, source, log, heartbeat, trip, start)
+        Self::with_sink(config, DryRunSink, source, log, watchdog, start)
     }
 }
 
@@ -180,8 +184,7 @@ impl<S: MessageSink> ControlCore<S> {
         sink: S,
         source: Box<dyn RequestSource>,
         log: ControlLog,
-        heartbeat: Heartbeat,
-        trip: TripFlag,
+        watchdog: WatchdogLink,
         start: Instant,
     ) -> Self {
         Self {
@@ -192,8 +195,8 @@ impl<S: MessageSink> ControlCore<S> {
             sink,
             source,
             log,
-            heartbeat,
-            trip,
+            watchdog,
+            arming_blocked: None,
             wire_armed: false,
             last_withheld: None,
             last_frame_invalid: false,
@@ -320,10 +323,11 @@ impl<S: MessageSink> ControlCore<S> {
             last_safety_event: self.last_safety_event,
             last_tick: self.last_tick,
             last_message: self.last_message,
-            watchdog_pending: self.trip.is_tripped(),
+            watchdog_pending: self.watchdog.trip.is_tripped(),
             watchdog_trips: self.watchdog_trips,
             last_watchdog_trip: self.last_watchdog_trip,
-            loop_silent: self.heartbeat.silent_for(now),
+            loop_silent: self.watchdog.heartbeat.silent_for(now),
+            watchdog_silent: self.watchdog.alive.silent_for(now),
             stats: self.stats,
             recent_decisions,
             latency: &self.latency,
@@ -482,6 +486,13 @@ impl<S: MessageSink> ControlCore<S> {
     /// results is encoded immediately, not at the next tick.
     pub fn on_command(&mut self, command: Command, now: Instant) -> Response {
         self.last_now = now;
+        if matches!(command, Command::Arm | Command::Activate)
+            && let Some(event) = self.arming_blocked
+        {
+            // A safety event from outside the loop was handled in this tick before the
+            // command: an arm or activation queued meanwhile must not undo its effect.
+            return self.refuse(command, Rejection::Safety(event), now);
+        }
         let assessment = self.monitor.assess(now);
         let response = self.supervisor.command(command, &assessment);
         if let Some(transition) = response.transition {
@@ -502,8 +513,12 @@ impl<S: MessageSink> ControlCore<S> {
     /// the refusal is logged like any other.
     pub fn supersede_by_disarm(&mut self, command: Command, now: Instant) -> Response {
         debug_assert!(matches!(command, Command::Arm | Command::Activate));
+        self.refuse(command, Rejection::SupersededByDisarm, now)
+    }
+
+    /// Refuses `command` without consulting the supervisor and logs the refusal.
+    fn refuse(&mut self, command: Command, rejection: Rejection, now: Instant) -> Response {
         self.last_now = now;
-        let rejection = Rejection::SupersededByDisarm;
         self.log
             .decision(now, DecisionEvent::CommandRejected { command, rejection });
         Response {
@@ -512,18 +527,46 @@ impl<S: MessageSink> ControlCore<S> {
         }
     }
 
+    /// Handles the safety signals from outside the loop: a trip of the independent watchdog
+    /// and a silent watchdog. The runtime calls this at the start of every tick, before it
+    /// processes queued commands; [`ControlCore::tick`] calls it again (step 1). Returns the
+    /// transition it caused, if any. While it reports an event, arm and activation are
+    /// refused (see [`ControlCore::on_command`]).
+    pub fn check_watchdog(&mut self, now: Instant) -> Option<Transition> {
+        self.last_now = now;
+        let mut transition = None;
+        let mut blocked = None;
+        // The independent watchdog saw this loop silent.
+        if let Some(silent_for) = self.watchdog.trip.take() {
+            self.watchdog_trips += 1;
+            self.last_watchdog_trip = Some((silent_for, now));
+            let event = SafetyEvent::SupervisorTimeout { silent_for };
+            transition = self.report(now, event);
+            blocked = Some(event);
+        }
+        // The watchdog itself stopped checking: a stall would go unnoticed.
+        let watchdog_silent = self.watchdog.alive.silent_for(now);
+        if watchdog_silent > WATCHDOG_SILENCE_LIMIT {
+            let event = SafetyEvent::WatchdogSilent {
+                silent_for: watchdog_silent,
+            };
+            transition = transition.or(self.report(now, event));
+            blocked = blocked.or(Some(event));
+        }
+        self.arming_blocked = blocked;
+        transition
+    }
+
     /// Runs one control tick at `now`. See the module documentation for the order.
     pub fn tick(&mut self, now: Instant) -> TickReport {
         self.last_now = now;
         self.stats.ticks += 1;
         let mut transition: Option<Transition> = None;
 
-        // 1. The independent watchdog saw this loop silent.
-        if let Some(silent_for) = self.trip.take() {
-            self.watchdog_trips += 1;
-            self.last_watchdog_trip = Some((silent_for, now));
-            let t = self.report(now, SafetyEvent::SupervisorTimeout { silent_for });
-            transition = transition.or(t);
+        // 1. Safety signals from outside the loop (watchdog trip, silent watchdog). Usually
+        //    already handled by the runtime before the commands; then nothing is left here.
+        if let Some(t) = self.check_watchdog(now) {
+            transition = Some(t);
         }
 
         // 2. Timing.
@@ -575,7 +618,7 @@ impl<S: MessageSink> ControlCore<S> {
         }
 
         // 4. The heartbeat the independent watchdog observes.
-        self.heartbeat.beat(now);
+        self.watchdog.heartbeat.beat(now);
 
         // 5. Output.
         let mut command_encoded = false;
@@ -721,7 +764,7 @@ mod tests {
     use super::super::supervisor::{Reason, Rejection, State};
     use super::super::vehicle::InvalidFrame;
     use super::super::vehicle::test_support::{paused_frame, slow_frame};
-    use super::super::watchdog::{SUPERVISOR_TIMEOUT, Watchdog};
+    use super::super::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, TripFlag, Watchdog};
     use super::*;
     use roadpilot_telemetry_client::GameId;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -787,6 +830,10 @@ mod tests {
         source: Scripted,
         trip: TripFlag,
         watchdog: Watchdog,
+        /// The watchdog's liveness. `run_to` beats it every 20 ms like the watchdog task,
+        /// unless `watchdog_on` is false (a failed watchdog task).
+        alive: Heartbeat,
+        watchdog_on: bool,
         reports: Vec<TickReport>,
     }
 
@@ -806,15 +853,15 @@ mod tests {
             let t0 = Instant::now();
             let log = ControlLog::with_observer(t0, observer);
             let heartbeat = Heartbeat::new(t0);
-            let watchdog = Watchdog::new(heartbeat.clone(), SUPERVISOR_TIMEOUT);
+            let watchdog = Watchdog::new(heartbeat, SUPERVISOR_TIMEOUT);
             let trip = watchdog.flag();
+            let alive = watchdog.liveness();
             let source = Scripted::new(request);
             let core = ControlCore::dry_run(
                 CoreConfig::default(),
                 Box::new(source.clone()),
                 log,
-                heartbeat.clone(),
-                trip.clone(),
+                watchdog.link(),
                 t0,
             );
             Self {
@@ -833,6 +880,8 @@ mod tests {
                 source,
                 trip,
                 watchdog,
+                alive,
+                watchdog_on: true,
                 reports: Vec::new(),
             }
         }
@@ -876,6 +925,9 @@ mod tests {
         fn run_to(&mut self, until_ms: u64) {
             while self.now_ms < until_ms {
                 self.now_ms += 4;
+                if self.watchdog_on && self.now_ms.is_multiple_of(20) {
+                    self.alive.beat(self.at(self.now_ms));
+                }
                 if self.frames_on && self.now_ms.is_multiple_of(16) {
                     self.frame();
                 }
@@ -1702,6 +1754,89 @@ mod tests {
         let report = rig.core.tick(rig.at(600));
         assert_eq!(report.transition, None);
         assert_eq!(rig.core.state(), State::Disabled);
+    }
+
+    #[test]
+    fn a_trip_handled_before_the_commands_refuses_arm_and_activation_for_that_tick() {
+        let mut rig = Rig::new();
+        rig.run_to(200);
+        assert!(rig.command(Command::Arm).result.is_ok());
+        // The loop stalls; the watchdog trips; telemetry stays fresh.
+        rig.ticks_on = false;
+        for at in (220..=360).step_by(20) {
+            rig.run_to(at);
+            rig.watchdog.check(rig.at(at));
+        }
+        assert!(rig.trip.is_tripped());
+        // As the runtime does: the watchdog signals first, then the queued commands.
+        let t = rig.core.check_watchdog(rig.at(360)).unwrap();
+        assert_eq!((t.from, t.to), (State::Armed, State::Disabled));
+        for command in [Command::Activate, Command::Arm] {
+            let r = rig.command(command);
+            assert!(
+                matches!(
+                    r.result,
+                    Err(Rejection::Safety(SafetyEvent::SupervisorTimeout { .. }))
+                ),
+                "{command:?}: {r:?}"
+            );
+            assert_eq!(r.transition, None);
+        }
+        assert_eq!(rig.core.state(), State::Disabled);
+        // Disarm and reset are never refused.
+        assert!(rig.command(Command::Disarm).result.is_ok());
+        // The next tick has no safety event from outside: arming works again.
+        rig.ticks_on = true;
+        rig.run_to(400);
+        assert!(rig.command(Command::Arm).result.is_ok());
+        assert_eq!(rig.core.state(), State::Armed);
+    }
+
+    #[test]
+    fn a_silent_watchdog_faults_an_active_loop_and_refuses_arming_while_it_lasts() {
+        let mut rig = Rig::active_running();
+        rig.watchdog_on = false;
+        let before = rig.commands().len();
+        // Within the limit nothing happens.
+        rig.run_to(320 + 240);
+        assert_eq!(rig.core.state(), State::Active);
+        rig.run_to(320 + 320);
+        assert_eq!(rig.core.state(), State::Fault);
+        let fault = rig
+            .reports
+            .iter()
+            .find_map(|r| r.transition)
+            .expect("a fault transition");
+        assert!(matches!(
+            fault.reason,
+            Reason::Safety(SafetyEvent::WatchdogSilent { .. })
+        ));
+        assert_eq!(rig.disarms(), 1);
+        let commands = rig.commands().len();
+        assert!(commands >= before);
+        // Reset leaves the fault; arming stays refused while the watchdog is silent.
+        assert!(rig.command(Command::ResetFault).result.is_ok());
+        rig.run_to(800);
+        let r = rig.command(Command::Arm);
+        assert!(
+            matches!(
+                r.result,
+                Err(Rejection::Safety(SafetyEvent::WatchdogSilent { .. }))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(rig.core.state(), State::Disabled);
+        rig.run_to(2_000);
+        assert_eq!(rig.commands().len(), commands, "no output after the fault");
+        // A watchdog that runs again lifts the refusal only for a new manual arm.
+        rig.watchdog_on = true;
+        rig.run_to(2_100);
+        assert_eq!(
+            rig.core.state(),
+            State::Disabled,
+            "nothing re-arms by itself"
+        );
+        assert!(rig.command(Command::Arm).result.is_ok());
     }
 
     // ---- feed notes and bookkeeping ----

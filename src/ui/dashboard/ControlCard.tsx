@@ -25,6 +25,12 @@ export function ControlCard() {
   const { status, lastReply, pending } = snapshot
   const running = status?.runtime === 'running'
   const state = status?.state ?? 'disabled'
+  // A stalled loop's published state is only the last known one: shown as such, and no
+  // command but disarm is offered on its basis.
+  const stalled = running && status.watchdog.loopStalled
+  const stateText = stalled
+    ? t('control.state.lastKnown', { state: t(`control.state.${state}`) })
+    : t(`control.state.${state}`)
   const send = (command: OperatorCommand) => {
     void request(command)
   }
@@ -34,10 +40,10 @@ export function ControlCard() {
       <div className="control-header">
         <h2 className="card-title">{t('control.title')}</h2>
         <span
-          className={`control-state control-state-${state}`}
+          className={`control-state control-state-${stalled ? 'stale' : state}`}
           aria-label={t('control.state.label')}
         >
-          {t(`control.state.${state}`)}
+          {stateText}
         </span>
         <span className="tag control-mode">{t('control.mode.dryRun')}</span>
       </div>
@@ -54,7 +60,7 @@ export function ControlCard() {
         <button
           type="button"
           className="control-button"
-          disabled={!running || state !== 'disabled'}
+          disabled={!running || stalled || state !== 'disabled'}
           onClick={() => send('arm')}
         >
           {t('control.action.arm')}
@@ -62,7 +68,7 @@ export function ControlCard() {
         <button
           type="button"
           className="control-button"
-          disabled={!running || state !== 'armed'}
+          disabled={!running || stalled || state !== 'armed'}
           onClick={() => send('activate')}
         >
           {t('control.action.activate')}
@@ -132,11 +138,14 @@ function ControlDetails({ status }: { status: ControlStatus }) {
       })
     : t('control.tick.none')
 
-  const watchdogText = watchdog.tripPending
-    ? t('control.watchdog.tripped')
-    : watchdog.loopSilentMs > watchdog.timeoutMs
-      ? t('control.watchdog.silent', { silent: watchdog.loopSilentMs })
-      : t('control.watchdog.ok', { silent: watchdog.loopSilentMs })
+  const watchdogText =
+    watchdog.watchdogSilentMs > watchdog.watchdogLimitMs
+      ? t('control.watchdog.notRunning', { silent: watchdog.watchdogSilentMs })
+      : watchdog.tripPending
+        ? t('control.watchdog.tripped')
+        : watchdog.loopSilentMs > watchdog.timeoutMs
+          ? t('control.watchdog.silent', { silent: watchdog.loopSilentMs })
+          : t('control.watchdog.ok', { silent: watchdog.loopSilentMs })
 
   const stages = outputStages(status)
   const outputText =

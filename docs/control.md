@@ -48,7 +48,8 @@ telemetry plugin --pipe--> telemetry engine (one pipe server)
 - **Simulation-time shadow diagnosis** (the former R7). A simulation clock more than 100 ms ahead of the local clock within one second is still computed at the same point and counted, but starts no epoch: ATS advances it in fixed steps and delivers frames in clusters, so it fired without any delay (33 times in the calibration drive, 13 times in ten shutdown cycles, while no frame in these recordings was older than 40 ms on arrival). The hits appear in the status (`counters.simAheadHits`) and in the recording (`control` lines of category `simAhead`, with the total).
 
 - The sender ticks every 40 ms on the monotonic clock. Missed deadlines are skipped, never replayed; a gap over 100 ms between ticks is a safety event.
-- An independent watchdog task checks every 20 ms that the control loop updated the supervisor within the last 100 ms.
+- An independent watchdog task checks every 20 ms that the control loop updated the supervisor within the last 100 ms. The loop handles a trip at the start of its next tick, before any command queued meanwhile: an arm or activation in that tick is refused.
+- Every watchdog check also records the watchdog's own liveness. A watchdog without a check for over 250 ms is a safety event (`watchdogSilent`) and arming and activation are refused while it lasts. This makes a failed watchdog visible and keeps control off; it does not enforce a disarm while the loop itself is stuck (that needs the planned independent output gate).
 
 Source: `src-tauri/src/control/` (core, no Tauri dependency) and `src-tauri/src/control_app.rs` (application lifecycle and commands).
 
@@ -64,6 +65,7 @@ Source: `src-tauri/src/control/` (core, no Tauri dependency) and `src-tauri/src/
 | Throttle limit                   | 0.10; brake 1.0; brake overrides throttle                                                                                                    |
 | Sender period                    | 40 ms; a gap over 100 ms is a safety event                                                                                                   |
 | Watchdog timeout                 | 100 ms without a supervisor update                                                                                                           |
+| Watchdog liveness                | 250 ms without a watchdog check                                                                                                              |
 
 Supervisor states: **Disabled** (initial), **Armed**, **Active** (the only state that produces commands), **Fault**.
 
@@ -75,7 +77,7 @@ Supervisor states: **Disabled** (initial), **Armed**, **Active** (the only state
 
 ## Operator commands and status
 
-The dashboard's **Control** section shows the supervisor state, the operating mode (Dry Run), vehicle connection, telemetry freshness, vehicle epoch, the last safety event, the last tick and its timing, the watchdog, the last tick's output, and recent decisions. For an output it distinguishes three stages: **Generated** (built from a request), **Encoded** (bytes produced) and **Not transmitted (Dry Run)**. Nothing in the UI or the backend can report a message as delivered.
+The dashboard's **Control** section shows the supervisor state, the operating mode (Dry Run), vehicle connection, telemetry freshness, vehicle epoch, the last safety event, the last tick and its timing, the watchdog, the last tick's output, and recent decisions. For an output it distinguishes three stages: **Generated** (built from a request), **Encoded** (bytes produced) and **Not transmitted (Dry Run)**. Nothing in the UI or the backend can report a message as delivered. The loop silence, whether the loop counts as stalled, a pending watchdog trip and the watchdog's own silence are measured when the status is read, independently of the loop; while the loop is stalled, the supervisor state is shown only as the last known one and Arm and Activate are not offered.
 
 | Tauri command                                                              | Purpose                                                                                         |
 | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |

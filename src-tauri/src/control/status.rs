@@ -196,6 +196,7 @@ pub enum SafetyEventDto {
     GameChanged { armed: GameCode, current: GameCode },
     SpeedCapExceeded { speed_mps: f32, cap_mps: f32 },
     SupervisorTimeout { silent_ms: u64 },
+    WatchdogSilent { silent_ms: u64 },
     SenderTiming { gap_ms: u64 },
     InvalidControlRequest,
 }
@@ -227,6 +228,9 @@ impl From<SafetyEvent> for SafetyEventDto {
                 Self::SpeedCapExceeded { speed_mps, cap_mps }
             }
             SafetyEvent::SupervisorTimeout { silent_for } => Self::SupervisorTimeout {
+                silent_ms: millis(silent_for),
+            },
+            SafetyEvent::WatchdogSilent { silent_for } => Self::WatchdogSilent {
                 silent_ms: millis(silent_for),
             },
             SafetyEvent::SenderTiming { gap } => Self::SenderTiming {
@@ -476,7 +480,8 @@ pub struct TickDto {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchdogDto {
-    /// A trip the control loop has not consumed yet.
+    /// A trip the control loop has not consumed yet. The application reads it from the trip
+    /// flag itself when it serves a status request, so a stalled loop cannot hide it.
     pub trip_pending: bool,
     /// Trips the control loop has consumed (each one disarmed or faulted control).
     pub trips: u64,
@@ -486,6 +491,13 @@ pub struct WatchdogDto {
     /// this independently of the loop when it serves a status request.
     pub loop_silent_ms: u64,
     pub timeout_ms: u64,
+    /// The running loop has been silent for longer than `timeout_ms`: every value the loop
+    /// publishes (`state`, `permitsOutput`, `trips`, ...) is the last known one, not the
+    /// current one. Refreshed independently of the loop, like `loop_silent_ms`.
+    pub loop_stalled: bool,
+    /// Time since the watchdog last ran a check. Refreshed independently of the loop.
+    pub watchdog_silent_ms: u64,
+    pub watchdog_limit_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -675,6 +687,9 @@ impl ControlStatus {
                 last_silent_ms: None,
                 loop_silent_ms: 0,
                 timeout_ms: millis(super::watchdog::SUPERVISOR_TIMEOUT),
+                loop_stalled: false,
+                watchdog_silent_ms: 0,
+                watchdog_limit_ms: millis(super::watchdog::WATCHDOG_SILENCE_LIMIT),
             },
             counters: CountersDto::from(CoreStats::default()),
             recent_decisions: Vec::new(),
@@ -703,6 +718,7 @@ pub struct StatusInput<'a> {
     pub watchdog_trips: u64,
     pub last_watchdog_trip: Option<(Duration, Instant)>,
     pub loop_silent: Duration,
+    pub watchdog_silent: Duration,
     pub stats: CoreStats,
     pub recent_decisions: Vec<Entry<DecisionEvent>>,
     pub timing: &'a TimingStats,
@@ -760,6 +776,9 @@ pub fn build(input: &StatusInput<'_>) -> ControlStatus {
             last_silent_ms: input.last_watchdog_trip.map(|(silent, _)| millis(silent)),
             loop_silent_ms: millis(input.loop_silent),
             timeout_ms: millis(super::watchdog::SUPERVISOR_TIMEOUT),
+            loop_stalled: input.loop_silent > super::watchdog::SUPERVISOR_TIMEOUT,
+            watchdog_silent_ms: millis(input.watchdog_silent),
+            watchdog_limit_ms: millis(super::watchdog::WATCHDOG_SILENCE_LIMIT),
         },
         counters: input.stats.into(),
         recent_decisions: input

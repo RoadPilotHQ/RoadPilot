@@ -25,6 +25,7 @@ export type SafetyEventCode =
   | 'gameChanged'
   | 'speedCapExceeded'
   | 'supervisorTimeout'
+  | 'watchdogSilent'
   | 'senderTiming'
   | 'invalidControlRequest'
 
@@ -183,6 +184,11 @@ export interface ControlStatus {
     lastSilentMs: number | null
     loopSilentMs: number
     timeoutMs: number
+    /** The loop is silent beyond `timeoutMs`: its published values are only the last known. */
+    loopStalled: boolean
+    /** Time since the watchdog last ran a check. */
+    watchdogSilentMs: number
+    watchdogLimitMs: number
   }
   counters: {
     ticks: number

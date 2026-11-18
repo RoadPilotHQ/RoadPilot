@@ -8,6 +8,16 @@
 //! disarmed). The watchdog has no access to the supervisor itself, so it cannot arm or
 //! activate anything; the worst it can do is cause a disarm.
 //!
+//! The loop consumes the flag before it processes any queued command (see `runtime`), so a
+//! stall it missed can never be followed by an arm or activation from the same tick.
+//!
+//! The watchdog has a liveness [`Heartbeat`] of its own, beaten by every check it actually
+//! runs and by nothing else. The loop reads it: a watchdog silent for longer than
+//! [`WATCHDOG_SILENCE_LIMIT`] is a `WatchdogSilent` safety event, handled fail-closed (Active
+//! ends in Fault, Armed is disarmed, arming and activation are refused while it lasts). This
+//! only makes a failed watchdog visible and keeps control off; it does not enforce a disarm
+//! while the loop itself is stuck.
+//!
 //! All values are plain atomics over monotonic time. Time is passed in, so every rule is
 //! unit-testable.
 
@@ -20,6 +30,11 @@ use std::time::{Duration, Instant};
 pub const SUPERVISOR_TIMEOUT: Duration = Duration::from_millis(100);
 /// How often the watchdog task checks.
 pub const WATCHDOG_PERIOD: Duration = Duration::from_millis(20);
+/// No watchdog check for longer than this means the watchdog has failed. Twelve missed checks:
+/// the watchdog runs at normal priority on the shared runtime, where wake-ups late by tens of
+/// milliseconds are expected under load (see `docs/timing.md`), and a false alarm faults
+/// control.
+pub const WATCHDOG_SILENCE_LIMIT: Duration = Duration::from_millis(250);
 
 fn millis_since(origin: Instant, at: Instant) -> u64 {
     u64::try_from(at.saturating_duration_since(origin).as_millis()).unwrap_or(u64::MAX)
@@ -79,21 +94,37 @@ impl TripFlag {
     }
 }
 
+/// What the supervisor loop shares with its watchdog: the loop's heartbeat (written by the
+/// loop), the trip flag (raised by the watchdog) and the watchdog's own liveness (written only
+/// by the watchdog's checks). All atomics; cheap to clone.
+#[derive(Clone, Debug)]
+pub struct WatchdogLink {
+    pub heartbeat: Heartbeat,
+    pub trip: TripFlag,
+    pub alive: Heartbeat,
+}
+
 #[derive(Debug)]
 pub struct Watchdog {
     heartbeat: Heartbeat,
     timeout: Duration,
     flag: TripFlag,
+    /// Beaten by every check, and by nothing else.
+    alive: Heartbeat,
     /// The current silence has already been reported.
     reported: bool,
 }
 
 impl Watchdog {
     pub fn new(heartbeat: Heartbeat, timeout: Duration) -> Self {
+        // The watchdog counts as having checked at the loop's origin, so a watchdog that never
+        // runs is detected like one that stops.
+        let alive = Heartbeat::new(heartbeat.origin);
         Self {
             heartbeat,
             timeout,
             flag: TripFlag::default(),
+            alive,
             reported: false,
         }
     }
@@ -102,9 +133,25 @@ impl Watchdog {
         self.flag.clone()
     }
 
+    /// The watchdog's liveness heartbeat, for readers.
+    pub fn liveness(&self) -> Heartbeat {
+        self.alive.clone()
+    }
+
+    /// Everything the loop needs from this watchdog.
+    pub fn link(&self) -> WatchdogLink {
+        WatchdogLink {
+            heartbeat: self.heartbeat.clone(),
+            trip: self.flag(),
+            alive: self.liveness(),
+        }
+    }
+
     /// Call periodically. Trips the flag while the loop is silent; returns the silence once
-    /// per episode so the caller can log it exactly once.
+    /// per episode so the caller can log it exactly once. Every call records the watchdog's
+    /// own liveness.
     pub fn check(&mut self, now: Instant) -> Option<Duration> {
+        self.alive.beat(now);
         let silent_for = self.heartbeat.silent_for(now);
         if silent_for > self.timeout {
             self.flag.trip(silent_for);
@@ -241,5 +288,42 @@ mod tests {
     fn the_timeout_is_shorter_than_the_plugin_steering_timeout() {
         assert!(SUPERVISOR_TIMEOUT < ms(150));
         assert!(WATCHDOG_PERIOD < SUPERVISOR_TIMEOUT);
+    }
+
+    #[test]
+    fn every_check_and_only_a_check_records_the_watchdog_liveness() {
+        let (t0, hb, mut wd, _flag) = rig();
+        let alive = wd.liveness();
+        assert_eq!(alive.silent_for(t0 + ms(300)), ms(300), "no check yet");
+        // The loop beating its own heartbeat does not count as a watchdog check.
+        hb.beat(t0 + ms(300));
+        assert_eq!(alive.silent_for(t0 + ms(300)), ms(300));
+        wd.check(t0 + ms(310));
+        assert_eq!(alive.silent_for(t0 + ms(320)), ms(10));
+        // A check that trips counts too: the watchdog did run.
+        wd.check(t0 + ms(900));
+        assert_eq!(alive.silent_for(t0 + ms(900)), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_link_shares_the_same_atomics() {
+        let (t0, hb, mut wd, flag) = rig();
+        let link = wd.link();
+        hb.beat(t0 + ms(10));
+        assert_eq!(link.heartbeat.silent_for(t0 + ms(10)), Duration::ZERO);
+        wd.check(t0 + ms(300));
+        assert!(link.trip.is_tripped());
+        assert!(flag.is_tripped());
+        assert_eq!(link.alive.silent_for(t0 + ms(300)), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_watchdog_silence_limit_tolerates_a_late_task_but_not_a_dead_one() {
+        assert!(WATCHDOG_SILENCE_LIMIT >= 10 * WATCHDOG_PERIOD);
+        assert!(WATCHDOG_SILENCE_LIMIT > SUPERVISOR_TIMEOUT);
+        assert!(
+            WATCHDOG_SILENCE_LIMIT <= ms(250),
+            "the plugin's input timeout"
+        );
     }
 }

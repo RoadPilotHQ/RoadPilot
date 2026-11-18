@@ -74,6 +74,9 @@ export function controlStatus(overrides: Partial<ControlStatus> = {}): ControlSt
       lastSilentMs: null,
       loopSilentMs: 12,
       timeoutMs: 100,
+      loopStalled: false,
+      watchdogSilentMs: 8,
+      watchdogLimitMs: 250,
     },
     counters: {
       ticks: 250,

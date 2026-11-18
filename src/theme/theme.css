@@ -599,6 +599,12 @@ button:focus-visible {
   background: var(--red);
 }
 
+/* The loop is not responding: the shown state is only the last known one. */
+.control-state-stale {
+  border-color: var(--red);
+  border-style: dashed;
+}
+
 .control-mode {
   border-style: dashed;
   border-color: var(--amber);

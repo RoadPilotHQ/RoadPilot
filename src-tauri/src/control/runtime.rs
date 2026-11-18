@@ -23,7 +23,9 @@
 //!   Otherwise a reader preempted while holding a lock would delay the elevated control
 //!   thread (priority inversion; measured, see `docs/timing.md`).
 //! * **Watchdog.** A separate task checks the supervisor loop's heartbeat every 20 ms and
-//!   trips a flag the loop consumes (see `watchdog`).
+//!   trips a flag the loop consumes at the start of its next tick, before any queued command
+//!   (see `watchdog`). Each check also records the watchdog's own liveness, which the loop
+//!   checks in turn.
 //! * **Shutdown.** [`ControlHandle::shutdown`] makes the sender task disarm and return a
 //!   [`ShutdownReport`]. If the task is aborted instead, dropping the core still encodes the
 //!   owed disarm.
@@ -41,7 +43,7 @@ use super::status::ControlStatus;
 use super::supervisor::{Command, Response, State};
 use super::timer::{TickTimer, TokioTimer};
 use super::timing::TickDiagnostics;
-use super::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, WATCHDOG_PERIOD, Watchdog};
+use super::watchdog::{Heartbeat, SUPERVISOR_TIMEOUT, WATCHDOG_PERIOD, Watchdog, WatchdogLink};
 use crate::telemetry::engine::FrameFeed;
 use roadpilot_telemetry_client::ReceivedTelemetryFrame;
 use roadpilot_telemetry_client::qpc;
@@ -69,6 +71,10 @@ impl FrameSource for FrameFeed {
     fn receiver(&self) -> FrameReceiver {
         self.current()
     }
+}
+
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Monotonic now. In production the same clock as `std::time::Instant`, which is what the
@@ -162,7 +168,9 @@ pub struct ControlHandle {
     shutdown: Arc<watch::Sender<bool>>,
     log: ControlLog,
     status: Arc<StatusCell>,
-    heartbeat: Heartbeat,
+    /// Read when serving a status: the loop's heartbeat, the trip flag and the watchdog's
+    /// liveness (atomics only).
+    watchdog: WatchdogLink,
 }
 
 impl ControlHandle {
@@ -190,12 +198,21 @@ impl ControlHandle {
         Some(rx)
     }
 
-    /// The newest status the control task published, with the loop silence measured now,
-    /// independently of the loop, so a stalled loop is visible.
+    /// The newest status the control task published, with the watchdog values measured now,
+    /// independently of the loop, so a stalled loop or a failed watchdog is visible: the loop
+    /// silence, whether the loop counts as stalled (then the published supervisor values are
+    /// only the last known ones), a pending trip and the watchdog's own silence. Reads atomics
+    /// only, besides the status lock every reader takes.
     pub fn status(&self) -> ControlStatus {
         let mut status = self.status.read();
-        status.watchdog.loop_silent_ms =
-            u64::try_from(self.heartbeat.silent_for(now()).as_millis()).unwrap_or(u64::MAX);
+        let at = now();
+        let loop_silent = self.watchdog.heartbeat.silent_for(at);
+        let w = &mut status.watchdog;
+        w.loop_silent_ms = millis(loop_silent);
+        // A loop that has ended published its final status; it is not stalled.
+        w.loop_stalled = !self.is_stopped() && loop_silent > SUPERVISOR_TIMEOUT;
+        w.trip_pending = self.watchdog.trip.is_tripped();
+        w.watchdog_silent_ms = millis(self.watchdog.alive.silent_for(at));
         status
     }
 
@@ -259,10 +276,9 @@ pub fn build_with_timer(
     config.timer = timer.kind();
     let start = now();
     let log = ControlLog::with_observer(start, observer);
-    let heartbeat = Heartbeat::new(start);
-    let watchdog = Watchdog::new(heartbeat.clone(), SUPERVISOR_TIMEOUT);
-    let trip = watchdog.flag();
-    let core = ControlCore::dry_run(config, source, log.clone(), heartbeat.clone(), trip, start);
+    let watchdog = Watchdog::new(Heartbeat::new(start), SUPERVISOR_TIMEOUT);
+    let link = watchdog.link();
+    let core = ControlCore::dry_run(config, source, log.clone(), link.clone(), start);
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (input_tx, input_rx) = mailbox::mailbox();
@@ -277,7 +293,7 @@ pub fn build_with_timer(
             shutdown: Arc::new(shutdown_tx),
             log: log.clone(),
             status: status.clone(),
-            heartbeat,
+            watchdog: link,
         },
         sender_task: Box::pin(run_sender(
             core,
@@ -442,6 +458,10 @@ async fn run_sender(
                 // Diagnostics only: timestamps around the unchanged steps (see `timing`).
                 let control_start_qpc = qpc::now();
                 let wake = timer.last_wake().filter(|w| w.deadline == deadline);
+                // Safety signals from outside the loop first: a stall the watchdog saw (or a
+                // silent watchdog) is handled before any command queued meanwhile, so an arm
+                // or activation from this tick cannot follow it.
+                core.check_watchdog(at);
                 let inputs_taken = drain_inputs(&mut core, &mut inputs, at);
                 let answers = drain_commands(&mut core, &mut commands, at);
                 core.tick(at);
@@ -569,7 +589,15 @@ mod tests {
     }
 
     fn spawn_runtime(feed: &FrameFeed, request: Box<dyn RequestSource>) -> Setup {
-        let rt = build(feed.clone(), request, CoreConfig::default());
+        spawn_with_timer(feed, request, Box::new(TokioTimer))
+    }
+
+    fn spawn_with_timer(
+        feed: &FrameFeed,
+        request: Box<dyn RequestSource>,
+        timer: Box<dyn TickTimer>,
+    ) -> Setup {
+        let rt = build_with_timer(feed.clone(), request, CoreConfig::default(), timer, None);
         // The relay ends by itself at shutdown.
         drop(tokio::spawn(rt.relay_task));
         Setup {
@@ -922,8 +950,12 @@ mod tests {
     /// A running runtime with usable telemetry, brought into `state` (Disabled, Armed or
     /// Active) by the normal manual sequence.
     async fn runtime_in(state: State) -> (Setup, Feeder) {
+        runtime_with_timer_in(state, Box::new(TokioTimer)).await
+    }
+
+    async fn runtime_with_timer_in(state: State, timer: Box<dyn TickTimer>) -> (Setup, Feeder) {
         let (feed, tx) = feed_with_channel();
-        let setup = spawn_runtime(&feed, Box::new(NeutralRequests));
+        let setup = spawn_with_timer(&feed, Box::new(NeutralRequests), timer);
         let feeder = Feeder::start(tx, 7);
         run_for(300).await;
         match state {
@@ -1276,6 +1308,273 @@ mod tests {
         assert_eq!(count_messages(&log, MessageKind::Command), commands);
         assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
         stop(setup, feeder).await;
+    }
+
+    // ---- F-03 (4.6.4b): watchdog signals before commands, fresh status, watchdog liveness ----
+
+    /// Tokio's timer that, when asked, wakes the loop once `stall` late: a stalled control loop
+    /// on the paused clock, while the watchdog task keeps running.
+    struct StallingTimer(Arc<AtomicU64>);
+
+    impl TickTimer for StallingTimer {
+        fn kind(&self) -> super::super::timing::TimerKind {
+            super::super::timing::TimerKind::Tokio
+        }
+
+        fn wait_until(&mut self, deadline: Instant) -> super::super::timer::WaitFuture<'_> {
+            let extra = ms(self.0.swap(0, Ordering::SeqCst));
+            Box::pin(tokio::time::sleep_until(TokioInstant::from_std(
+                deadline + extra,
+            )))
+        }
+    }
+
+    /// A runtime in `state` whose loop can be stalled once with [`stall`].
+    async fn stallable_in(state: State) -> (Setup, Feeder, Arc<AtomicU64>) {
+        let stall = Arc::new(AtomicU64::new(0));
+        let (setup, feeder) =
+            runtime_with_timer_in(state, Box::new(StallingTimer(stall.clone()))).await;
+        (setup, feeder, stall)
+    }
+
+    /// Stalls the loop for `millis` from its next tick on and returns once the stall has begun
+    /// (the loop has ticked and is waiting `millis` too long).
+    async fn stall(stall: &AtomicU64, millis: u64) {
+        stall.store(millis, Ordering::SeqCst);
+        run_for(45).await;
+        assert_eq!(stall.load(Ordering::SeqCst), 0, "the stall has begun");
+    }
+
+    /// Queues the commands while the loop is stalled and returns their answers, which arrive
+    /// at the first tick after the stall.
+    async fn queue_during_stall(handle: &ControlHandle, commands: &[Command]) -> Vec<CommandReply> {
+        let pending: Vec<_> = commands
+            .iter()
+            .map(|c| handle.request(*c).expect("the control task runs"))
+            .collect();
+        run_for(500).await;
+        let mut replies = Vec::new();
+        for rx in pending {
+            replies.push(rx.await.expect("answered after the stall"));
+        }
+        replies
+    }
+
+    fn timed_out(reply: &CommandReply) -> bool {
+        matches!(
+            reply.response.result,
+            Err(Rejection::Safety(SafetyEvent::SupervisorTimeout { .. }))
+        ) && reply.response.transition.is_none()
+    }
+
+    fn transitions_to(log: &LogSnapshot, since: usize, to: State) -> usize {
+        decisions(log)[since..]
+            .iter()
+            .filter(|d| matches!(d, DecisionEvent::Transition(t) if t.to == to))
+            .count()
+    }
+
+    // 4.6.4b (1): a stall the watchdog saw is handled before an activation queued meanwhile.
+    #[tokio::test(start_paused = true)]
+    async fn a_watchdog_trip_is_handled_before_a_queued_activation() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Armed).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(&setup.handle, &[Command::Activate]).await;
+        let log = setup.handle.log().snapshot();
+        assert!(timed_out(&replies[0]), "{:?}", replies[0]);
+        assert_eq!(replies[0].state, State::Disabled);
+        assert!(decisions(&log)[since..].iter().any(|d| matches!(
+            d,
+            DecisionEvent::Transition(t) if t.from == State::Armed
+                && t.to == State::Disabled
+                && matches!(t.reason, Reason::Safety(SafetyEvent::SupervisorTimeout { .. }))
+        )));
+        assert_eq!(
+            transitions_to(&log, since, State::Active),
+            0,
+            "never active"
+        );
+        assert_eq!(count_messages(&log, MessageKind::Command), 0);
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        stop(setup, feeder).await;
+    }
+
+    // 4.6.4b (2): the whole batch queued during the stall follows the trip.
+    #[tokio::test(start_paused = true)]
+    async fn a_watchdog_trip_is_handled_before_a_queued_batch() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Disabled).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(&setup.handle, &[Command::Arm, Command::Activate]).await;
+        let log = setup.handle.log().snapshot();
+        assert!(replies.iter().all(timed_out), "{replies:?}");
+        assert!(replies.iter().all(|r| r.state == State::Disabled));
+        assert_eq!(transitions_to(&log, since, State::Armed), 0);
+        assert_eq!(transitions_to(&log, since, State::Active), 0);
+        assert_eq!(setup.handle.status().watchdog.trips, 1);
+        // The next tick without a safety event accepts commands again, as before.
+        let replies = send_batch(&setup.handle, &[Command::Arm]).await;
+        assert_eq!(replies[0].response.result, Ok(()));
+        assert_eq!(replies[0].state, State::Armed);
+        stop(setup, feeder).await;
+    }
+
+    // 4.6.4b (3): a fault from the trip is not overwritten by commands from the same tick, and
+    // only an explicit reset (and a new arm) leaves it.
+    #[tokio::test(start_paused = true)]
+    async fn a_watchdog_fault_is_not_overwritten_by_queued_commands() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        stall(&stall_ms, 150).await;
+        let commands = count_messages(&setup.handle.log().snapshot(), MessageKind::Command);
+        let replies = queue_during_stall(&setup.handle, &[Command::Activate, Command::Arm]).await;
+        assert!(replies.iter().all(timed_out), "{replies:?}");
+        assert!(replies.iter().all(|r| r.state == State::Fault));
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Fault.into());
+        assert_eq!(transitions_to(&log, since, State::Fault), 1);
+        assert_eq!(transitions_to(&log, since, State::Active), 0);
+        assert_eq!(count_messages(&log, MessageKind::Command), commands);
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
+        // Reset and arm work as before.
+        let replies = send_batch(&setup.handle, &[Command::ResetFault]).await;
+        assert_eq!(replies[0].state, State::Disabled);
+        let replies = send_batch(&setup.handle, &[Command::Arm]).await;
+        assert_eq!(replies[0].state, State::Armed);
+        stop(setup, feeder).await;
+    }
+
+    // 4.6.4b (8): the F-01 disarm priority is unchanged when a trip is handled first.
+    #[tokio::test(start_paused = true)]
+    async fn the_disarm_priority_holds_after_a_watchdog_trip() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(
+            &setup.handle,
+            &[Command::Arm, Command::Activate, Command::Disarm],
+        )
+        .await;
+        assert!(superseded(&replies[0]), "{:?}", replies[0]);
+        assert!(superseded(&replies[1]), "{:?}", replies[1]);
+        assert_eq!(replies[2].response.result, Ok(()));
+        // The trip came first: the disarm finds a fault, which it keeps.
+        assert!(replies.iter().all(|r| r.state == State::Fault));
+        let log = setup.handle.log().snapshot();
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
+        stop(setup, feeder).await;
+    }
+
+    // 4.6.4b (4): a stalled loop cannot hide a pending trip, and its published supervisor
+    // values are marked as last known.
+    #[tokio::test(start_paused = true)]
+    async fn the_status_shows_a_pending_trip_and_a_stalled_loop_while_the_loop_is_stuck() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        let before = setup.handle.status();
+        assert!(!before.watchdog.trip_pending);
+        assert!(!before.watchdog.loop_stalled);
+        stall(&stall_ms, 400).await;
+        run_for(150).await;
+        let during = setup.handle.status();
+        assert!(during.watchdog.trip_pending, "read from the flag itself");
+        assert!(during.watchdog.loop_stalled);
+        assert!(during.watchdog.loop_silent_ms > during.watchdog.timeout_ms);
+        // What the loop published last, now explicitly only the last known values.
+        assert_eq!(during.state, State::Active.into());
+        assert_eq!(during.watchdog.trips, 0, "consumed trips only");
+        run_for(400).await;
+        let after = setup.handle.status();
+        assert!(!after.watchdog.trip_pending, "consumed");
+        assert!(!after.watchdog.loop_stalled);
+        assert_eq!(after.watchdog.trips, 1);
+        assert_eq!(after.state, State::Fault.into());
+        stop(setup, feeder).await;
+    }
+
+    // 4.6.4b (5): the running watchdog task keeps its liveness fresh.
+    #[tokio::test(start_paused = true)]
+    async fn the_watchdog_task_records_its_liveness_at_every_check() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        for _ in 0..50 {
+            run_for(7).await;
+            let w = setup.handle.status().watchdog;
+            assert!(
+                w.watchdog_silent_ms <= millis(WATCHDOG_PERIOD),
+                "{}",
+                w.watchdog_silent_ms
+            );
+        }
+        stop(setup, feeder).await;
+    }
+
+    /// Stops the runtime after its watchdog task was aborted on purpose.
+    async fn stop_without_watchdog(setup: Setup, feeder: Feeder) {
+        feeder.stop().await;
+        setup.handle.shutdown();
+        setup.sender.await.unwrap();
+        assert!(setup.watchdog.await.unwrap_err().is_cancelled());
+    }
+
+    // 4.6.4b (6), (7): a failed watchdog is detected and never leads to an activation.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_watchdog_is_detected_and_refuses_arming() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        setup.watchdog.abort();
+        run_for(400).await;
+        let w = setup.handle.status().watchdog;
+        assert!(w.watchdog_silent_ms > w.watchdog_limit_ms, "{w:?}");
+        for _ in 0..5 {
+            let replies = send_batch(&setup.handle, &[Command::Arm, Command::Activate]).await;
+            for reply in &replies {
+                assert!(
+                    matches!(
+                        reply.response.result,
+                        Err(Rejection::Safety(SafetyEvent::WatchdogSilent { .. }))
+                    ),
+                    "{reply:?}"
+                );
+                assert_eq!(reply.state, State::Disabled);
+            }
+            run_for(400).await;
+        }
+        let log = setup.handle.log().snapshot();
+        assert_eq!(transitions_to(&log, since, State::Armed), 0);
+        assert_eq!(transitions_to(&log, since, State::Active), 0);
+        assert!(log.messages.is_empty());
+        stop_without_watchdog(setup, feeder).await;
+    }
+
+    // 4.6.4b (6): while Active, a failed watchdog faults control fail-closed.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_watchdog_faults_an_active_loop() {
+        let (setup, feeder) = runtime_in(State::Active).await;
+        setup.watchdog.abort();
+        run_for(500).await;
+        let log = setup.handle.log().snapshot();
+        let fault = decisions(&log)
+            .iter()
+            .find_map(|d| match d {
+                DecisionEvent::Transition(t) if t.to == State::Fault => Some(*t),
+                _ => None,
+            })
+            .expect("the loop faulted");
+        assert!(
+            matches!(
+                fault.reason,
+                Reason::Safety(SafetyEvent::WatchdogSilent { silent_for })
+                    if silent_for > super::super::watchdog::WATCHDOG_SILENCE_LIMIT
+            ),
+            "{fault:?}"
+        );
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
+        let commands = count_messages(&log, MessageKind::Command);
+        run_for(1_000).await;
+        let later = setup.handle.log().snapshot();
+        assert_eq!(count_messages(&later, MessageKind::Command), commands);
+        assert_eq!(setup.handle.status().state, State::Fault.into());
+        stop_without_watchdog(setup, feeder).await;
     }
 
     // A reset is neither an arm nor an activation; a disarm in its batch does not refuse it.

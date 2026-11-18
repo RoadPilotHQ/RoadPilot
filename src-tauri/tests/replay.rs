@@ -191,14 +191,12 @@ fn replay_via(fixture: &Fixture, path: Path) -> Outcome {
     let at = |us: i64| start + Duration::from_micros(u64::try_from(us).expect("monoUs >= 0"));
     let decisions = Arc::new(Decisions::default());
     let log = ControlLog::with_observer(start, Some(decisions.clone()));
-    let heartbeat = Heartbeat::new(start);
-    let trip = Watchdog::new(heartbeat.clone(), SUPERVISOR_TIMEOUT).flag();
+    let watchdog = Watchdog::new(Heartbeat::new(start), SUPERVISOR_TIMEOUT).link();
     let mut core = ControlCore::dry_run(
         CoreConfig::default(),
         Box::new(NeutralRequests),
         log,
-        heartbeat,
-        trip,
+        watchdog,
         start,
     );
 

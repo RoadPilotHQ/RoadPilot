@@ -308,6 +308,9 @@ describe('control section', () => {
           lastSilentMs: 140,
           loopSilentMs: 250,
           timeoutMs: 100,
+          loopStalled: true,
+          watchdogSilentMs: 8,
+          watchdogLimitMs: 250,
         },
       }),
     )
@@ -321,10 +324,70 @@ describe('control section', () => {
           lastSilentMs: 140,
           loopSilentMs: 250,
           timeoutMs: 100,
+          loopStalled: true,
+          watchdogSilentMs: 8,
+          watchdogLimitMs: 250,
         },
       }),
     )
     expect(section().getByText('Tripped · 2 trips so far')).toBeInTheDocument()
+  })
+
+  it('shows the state of a stalled loop only as last known and offers no arm or activation', async () => {
+    const fake = setup()
+    const watchdog = {
+      tripPending: true,
+      trips: 0,
+      lastTripAtMs: null,
+      lastSilentMs: null,
+      loopSilentMs: 400,
+      timeoutMs: 100,
+      loopStalled: true,
+      watchdogSilentMs: 8,
+      watchdogLimitMs: 250,
+    }
+    await fake.push(controlStatus({ state: 'armed', watchdog }))
+    const state = section().getByLabelText('Supervisor state')
+    expect(state).toHaveTextContent('Armed? Last known · control loop not responding')
+    expect(state).not.toHaveTextContent(/^Armed$/)
+    expect(button('Activate')).toBeDisabled()
+    expect(disarm()).toBeEnabled()
+    await fake.push(controlStatus({ state: 'disabled', watchdog }))
+    expect(button('Arm')).toBeDisabled()
+    expect(disarm()).toBeEnabled()
+    // Once the loop responds again, the state is current and commands are offered again.
+    await fake.push(
+      controlStatus({
+        state: 'disabled',
+        watchdog: { ...watchdog, tripPending: false, loopSilentMs: 12, loopStalled: false },
+      }),
+    )
+    expect(section().getByLabelText('Supervisor state')).toHaveTextContent(/^Disabled$/)
+    expect(button('Arm')).toBeEnabled()
+  })
+
+  it('shows a watchdog that is not running and its safety event', async () => {
+    const fake = setup()
+    await fake.push(
+      controlStatus({
+        state: 'fault',
+        lastSafetyEvent: { code: 'watchdogSilent', silentMs: 300, atMs: 9_000 },
+        watchdog: {
+          tripPending: false,
+          trips: 0,
+          lastTripAtMs: null,
+          lastSilentMs: null,
+          loopSilentMs: 12,
+          timeoutMs: 100,
+          loopStalled: false,
+          watchdogSilentMs: 1_200,
+          watchdogLimitMs: 250,
+        },
+      }),
+    )
+    const s = section()
+    expect(s.getByText('Watchdog not running for 1200 ms')).toBeInTheDocument()
+    expect(s.getByText(/^Watchdog not running · /)).toBeInTheDocument()
   })
 
   it('shows the measured tick interval percentiles and violations', async () => {
