@@ -53,6 +53,7 @@ export type RejectionCode =
   | 'notArmed'
   | 'faultNotReset'
   | 'notInFault'
+  | 'supersededByDisarm'
   | 'safety'
 
 export interface Rejection {

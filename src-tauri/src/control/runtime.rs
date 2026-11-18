@@ -14,7 +14,8 @@
 //!   replayed. The application uses a precise timer thread; tests use tokio's timer.
 //! * **Operator commands** are queued and processed at the start of the next tick (at most one
 //!   period later). Everything queued is processed together and any disarm first, so a disarm
-//!   is never stuck behind other commands.
+//!   is never stuck behind other commands. A disarm also has priority over its whole batch:
+//!   no arm or activation queued with it is carried out.
 //! * **No blocking on other threads.** The sender task never waits for a lock held by, and is
 //!   never woken by, a thread of normal priority: it is woken only by its timer (and once by
 //!   shutdown), it takes telemetry and commands with `try_recv` from queues that need no lock,
@@ -364,6 +365,11 @@ fn drain_inputs(
 /// Processes every queued command, any disarm first, publishes the resulting status, and only
 /// then answers each request, so a requester never sees a status older than its answer.
 /// Never waits for new commands.
+///
+/// A disarm has priority over its whole batch: if the batch contains one, every arm and
+/// activation in it is refused with `Rejection::SupersededByDisarm` instead of being
+/// processed, wherever it stands in the batch. Otherwise an arm and an activation queued in
+/// the same period as a disarm would re-arm control right after it (F-01).
 fn drain_commands(
     core: &mut ControlCore<DryRunSink>,
     queue: &mut mpsc::UnboundedReceiver<Request>,
@@ -380,9 +386,15 @@ fn drain_commands(
     let (disarms, others): (Vec<Request>, Vec<Request>) = batch
         .into_iter()
         .partition(|r| r.command == Command::Disarm);
+    let disarm_requested = !disarms.is_empty();
     let mut answered = Vec::with_capacity(disarms.len() + others.len());
     for request in disarms.into_iter().chain(others) {
-        let response = core.on_command(request.command, at);
+        let response = match request.command {
+            Command::Arm | Command::Activate if disarm_requested => {
+                core.supersede_by_disarm(request.command, at)
+            }
+            command => core.on_command(command, at),
+        };
         answered.push((request.reply, response));
     }
     let state = core.state();
@@ -860,13 +872,264 @@ mod tests {
                     e,
                     DecisionEvent::CommandRejected {
                         command: Command::Activate,
-                        rejection: Rejection::NotArmed
+                        rejection: Rejection::SupersededByDisarm
                     }
                 )
             })
-            .expect("the activation arrived after the disarm and was refused");
+            .expect("the activation was refused after the disarm, which has priority");
         assert!(disarm_at < rejected_at);
         feeder.stop().await;
+        setup.handle.shutdown();
+        setup.sender.await.unwrap();
+        setup.watchdog.await.unwrap();
+    }
+
+    /// Queues every command before the loop runs, so they form one batch, and returns the
+    /// replies in the order the commands were sent.
+    async fn send_batch(handle: &ControlHandle, commands: &[Command]) -> Vec<CommandReply> {
+        let pending: Vec<_> = commands
+            .iter()
+            .map(|c| handle.request(*c).expect("the control task runs"))
+            .collect();
+        run_for(45).await;
+        let mut replies = Vec::with_capacity(pending.len());
+        for rx in pending {
+            replies.push(rx.await.expect("the batch was answered"));
+        }
+        replies
+    }
+
+    /// A running runtime with usable telemetry, brought into `state` (Disabled, Armed or
+    /// Active) by the normal manual sequence.
+    async fn runtime_in(state: State) -> (Setup, Feeder) {
+        let (feed, tx) = feed_with_channel();
+        let setup = spawn_runtime(&feed, Box::new(NeutralRequests));
+        let feeder = Feeder::start(tx, 7);
+        run_for(300).await;
+        match state {
+            State::Disabled => {}
+            State::Armed => {
+                assert!(setup.handle.send(Command::Arm));
+                run_for(45).await;
+            }
+            State::Active => {
+                arm_and_activate(&setup.handle).await;
+                run_for(200).await;
+            }
+            State::Fault => unreachable!("not a starting state of these tests"),
+        }
+        assert_eq!(setup.handle.status().state, state.into());
+        (setup, feeder)
+    }
+
+    async fn stop(setup: Setup, feeder: Feeder) {
+        feeder.stop().await;
+        setup.handle.shutdown();
+        setup.sender.await.unwrap();
+        setup.watchdog.await.unwrap();
+    }
+
+    fn superseded(reply: &CommandReply) -> bool {
+        reply.response.result == Err(Rejection::SupersededByDisarm)
+            && reply.response.transition.is_none()
+    }
+
+    fn superseded_in_log(log: &LogSnapshot, command: Command) -> bool {
+        decisions(log).iter().any(|d| {
+            matches!(
+                d,
+                DecisionEvent::CommandRejected { command: c, rejection: Rejection::SupersededByDisarm }
+                    if *c == command
+            )
+        })
+    }
+
+    fn armed_or_activated(log: &LogSnapshot, since: usize) -> bool {
+        decisions(log)[since..].iter().any(|d| {
+            matches!(d, DecisionEvent::Transition(t) if t.to == State::Armed || t.to == State::Active)
+        })
+    }
+
+    // SUP-08 (F-01): a disarm at the end of a batch is not undone by the arm and activate
+    // processed before it.
+    #[tokio::test(start_paused = true)]
+    async fn sup_08_a_batch_arm_activate_disarm_stays_disabled() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        let replies = send_batch(
+            &setup.handle,
+            &[Command::Arm, Command::Activate, Command::Disarm],
+        )
+        .await;
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert!(
+            replies.iter().all(|r| r.state == State::Disabled),
+            "{replies:?}"
+        );
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        assert!(superseded(&replies[0]), "{:?}", replies[0]);
+        assert!(superseded(&replies[1]), "{:?}", replies[1]);
+        assert_eq!(replies[2].response.result, Ok(()));
+        assert!(superseded_in_log(&log, Command::Arm));
+        assert!(superseded_in_log(&log, Command::Activate));
+        assert!(!armed_or_activated(&log, since), "{:?}", decisions(&log));
+        assert!(
+            log.messages.is_empty(),
+            "nothing is encoded: {:?}",
+            log.messages
+        );
+        stop(setup, feeder).await;
+    }
+
+    // SUP-09
+    #[tokio::test(start_paused = true)]
+    async fn sup_09_a_batch_arm_disarm_stays_disabled() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        let replies = send_batch(&setup.handle, &[Command::Arm, Command::Disarm]).await;
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        assert!(replies.iter().all(|r| r.state == State::Disabled));
+        assert!(superseded(&replies[0]), "{:?}", replies[0]);
+        assert_eq!(replies[1].response.result, Ok(()));
+        assert!(superseded_in_log(&log, Command::Arm));
+        assert!(!armed_or_activated(&log, since));
+        assert!(
+            log.messages.is_empty(),
+            "nothing is encoded: {:?}",
+            log.messages
+        );
+        stop(setup, feeder).await;
+    }
+
+    // SUP-10: the disarm wins wherever it stands in the batch.
+    #[tokio::test(start_paused = true)]
+    async fn sup_10_armed_with_a_batch_disarm_arm_ends_disabled() {
+        let (setup, feeder) = runtime_in(State::Armed).await;
+        let since = setup.handle.log().snapshot().decisions.len();
+        let replies = send_batch(&setup.handle, &[Command::Disarm, Command::Arm]).await;
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        assert!(replies.iter().all(|r| r.state == State::Disabled));
+        assert_eq!(
+            replies[0]
+                .response
+                .transition
+                .map(|t| (t.from, t.to, t.reason)),
+            Some((State::Armed, State::Disabled, Reason::ManualDisarm))
+        );
+        assert!(superseded(&replies[1]), "{:?}", replies[1]);
+        assert!(superseded_in_log(&log, Command::Arm));
+        assert!(!armed_or_activated(&log, since));
+        assert_eq!(count_messages(&log, MessageKind::Command), 0);
+        stop(setup, feeder).await;
+    }
+
+    // SUP-11
+    #[tokio::test(start_paused = true)]
+    async fn sup_11_active_with_a_batch_disarm_activate_arm_encodes_one_disarm_only() {
+        let (setup, feeder) = runtime_in(State::Active).await;
+        let before = setup.handle.log().snapshot();
+        let since = before.decisions.len();
+        assert_eq!(count_messages(&before, MessageKind::Disarm), 0);
+        let commands = count_messages(&before, MessageKind::Command);
+        assert!(commands > 0, "output was running");
+        let replies = send_batch(
+            &setup.handle,
+            &[Command::Disarm, Command::Activate, Command::Arm],
+        )
+        .await;
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        assert!(replies.iter().all(|r| r.state == State::Disabled));
+        assert_eq!(
+            replies[0].response.transition.map(|t| t.reason),
+            Some(Reason::ManualDisarm)
+        );
+        assert!(superseded(&replies[1]), "{:?}", replies[1]);
+        assert!(superseded(&replies[2]), "{:?}", replies[2]);
+        assert!(superseded_in_log(&log, Command::Activate));
+        assert!(superseded_in_log(&log, Command::Arm));
+        assert!(!armed_or_activated(&log, since));
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
+        assert_eq!(
+            count_messages(&log, MessageKind::Command),
+            commands,
+            "no command after the disarm"
+        );
+        stop(setup, feeder).await;
+    }
+
+    // SUP-12
+    #[tokio::test(start_paused = true)]
+    async fn sup_12_active_with_a_batch_activate_disarm_encodes_one_disarm_only() {
+        let (setup, feeder) = runtime_in(State::Active).await;
+        let before = setup.handle.log().snapshot();
+        let since = before.decisions.len();
+        let commands = count_messages(&before, MessageKind::Command);
+        let replies = send_batch(&setup.handle, &[Command::Activate, Command::Disarm]).await;
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        assert!(superseded(&replies[0]), "{:?}", replies[0]);
+        assert_eq!(
+            replies[1].response.transition.map(|t| t.reason),
+            Some(Reason::ManualDisarm)
+        );
+        assert!(superseded_in_log(&log, Command::Activate));
+        assert!(!armed_or_activated(&log, since));
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
+        assert_eq!(count_messages(&log, MessageKind::Command), commands);
+        stop(setup, feeder).await;
+    }
+
+    // SUP-13: without a disarm in the batch the command semantics are unchanged.
+    #[tokio::test(start_paused = true)]
+    async fn sup_13_a_batch_without_disarm_arms_and_activates_as_before() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let replies = send_batch(&setup.handle, &[Command::Arm, Command::Activate]).await;
+        assert_eq!(
+            replies[0].response.transition.map(|t| t.reason),
+            Some(Reason::ManualArm)
+        );
+        assert_eq!(
+            replies[1].response.transition.map(|t| t.reason),
+            Some(Reason::ManualActivate)
+        );
+        assert!(replies.iter().all(|r| r.state == State::Active));
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Active.into());
+        assert!(count_messages(&log, MessageKind::Command) > 5);
+        assert!(!superseded_in_log(&log, Command::Arm));
+        assert!(!superseded_in_log(&log, Command::Activate));
+
+        // The other rejections are unchanged too.
+        let replies = send_batch(&setup.handle, &[Command::Arm, Command::Activate]).await;
+        assert_eq!(replies[0].response.result, Err(Rejection::AlreadyArmed));
+        assert_eq!(replies[1].response.result, Err(Rejection::NotArmed));
+        assert_eq!(setup.handle.status().state, State::Active.into());
+        stop(setup, feeder).await;
+    }
+
+    // A reset is neither an arm nor an activation; a disarm in its batch does not refuse it.
+    #[tokio::test(start_paused = true)]
+    async fn a_disarm_does_not_supersede_a_fault_reset_in_its_batch() {
+        let (setup, feeder) = runtime_in(State::Active).await;
+        feeder.stop().await; // the plugin disconnects: Active ends in Fault
+        run_for(1_000).await;
+        assert_eq!(setup.handle.status().state, State::Fault.into());
+        let replies = send_batch(&setup.handle, &[Command::ResetFault, Command::Disarm]).await;
+        assert_eq!(replies[0].response.result, Ok(()));
+        assert_eq!(
+            replies[0].response.transition.map(|t| t.reason),
+            Some(Reason::FaultReset)
+        );
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
         setup.handle.shutdown();
         setup.sender.await.unwrap();
         setup.watchdog.await.unwrap();

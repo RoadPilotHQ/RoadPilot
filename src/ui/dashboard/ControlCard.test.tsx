@@ -116,6 +116,43 @@ describe('control section', () => {
     expect(section().getByText('Arm: rejected – telemetry not ready')).toBeInTheDocument()
   })
 
+  it('names a disarm in the same batch as the reason an arm or activation was refused', async () => {
+    const fake = setup()
+    fake.answerWith((command) =>
+      Promise.resolve<CommandReply>({
+        command,
+        outcome: 'rejected',
+        rejection: { code: 'supersededByDisarm' },
+        state: 'disabled',
+      }),
+    )
+    await fake.push(
+      controlStatus({
+        recentDecisions: [
+          {
+            n: 12,
+            atMs: 5_000,
+            category: 'decision',
+            event: 'commandRejected',
+            command: 'activate',
+            rejection: { code: 'supersededByDisarm' },
+          },
+        ],
+      }),
+    )
+    await act(async () => {
+      fireEvent.click(button('Arm'))
+    })
+    const s = section()
+    expect(
+      s.getByText('Arm: rejected – a disarm was requested at the same time'),
+    ).toBeInTheDocument()
+    const list = within(s.getByRole('list', { name: 'Recent decisions' }))
+    expect(
+      list.getByText('Activate rejected: a disarm was requested at the same time'),
+    ).toBeInTheDocument()
+  })
+
   it('disarms with a single click, without a confirmation dialog', async () => {
     const fake = setup()
     await fake.push(active())

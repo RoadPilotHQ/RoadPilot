@@ -186,6 +186,10 @@ pub enum Rejection {
     /// A fault must be reset before arming.
     FaultNotReset,
     NotInFault,
+    /// An arm or activation was not processed because the same command batch contains a
+    /// disarm; the disarm has priority over the whole batch. Assigned by the runtime's batch
+    /// processing (see `runtime`), never by [`Supervisor::command`].
+    SupersededByDisarm,
     /// A safety event occurred while the command was processed; the transition it caused is
     /// reported in [`Response::transition`].
     Safety(SafetyEvent),

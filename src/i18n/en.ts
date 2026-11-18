@@ -258,6 +258,7 @@ export const en = {
   'control.rejection.notArmed': 'not armed',
   'control.rejection.faultNotReset': 'reset the fault first',
   'control.rejection.notInFault': 'no fault to reset',
+  'control.rejection.supersededByDisarm': 'a disarm was requested at the same time',
   'control.rejection.safety': 'safety event',
   'control.withheld.outputNotPermitted': 'output not permitted',
   'control.withheld.nonFiniteRequest': 'invalid controller value',

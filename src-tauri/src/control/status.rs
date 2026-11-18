@@ -307,6 +307,7 @@ pub enum RejectionDto {
     NotArmed,
     FaultNotReset,
     NotInFault,
+    SupersededByDisarm,
     Safety { event: SafetyEventDto },
 }
 
@@ -323,6 +324,7 @@ impl From<Rejection> for RejectionDto {
             Rejection::NotArmed => Self::NotArmed,
             Rejection::FaultNotReset => Self::FaultNotReset,
             Rejection::NotInFault => Self::NotInFault,
+            Rejection::SupersededByDisarm => Self::SupersededByDisarm,
             Rejection::Safety(event) => Self::Safety {
                 event: event.into(),
             },

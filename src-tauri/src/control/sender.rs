@@ -43,7 +43,7 @@ use super::schedule::{Scheduler, Timing, Verdict};
 use super::sink::{Delivery, DryRunSink, MessageSink, OperatingMode};
 use super::status::{ControlStatus, RECENT_DECISIONS, StatusInput};
 use super::supervisor::{
-    Command, Reason, Response, SafetyEvent, Supervisor, SupervisorConfig, Transition,
+    Command, Reason, Rejection, Response, SafetyEvent, Supervisor, SupervisorConfig, Transition,
 };
 use super::timing::{TickDiagnostics, TimerKind, TimingStats};
 use super::vehicle::VehicleState;
@@ -495,6 +495,21 @@ impl<S: MessageSink> ControlCore<S> {
             self.flush_disarm(now);
         }
         response
+    }
+
+    /// Refuses an arm or activation because its command batch also contains a disarm, which
+    /// has priority over the whole batch. The supervisor is not consulted and nothing changes;
+    /// the refusal is logged like any other.
+    pub fn supersede_by_disarm(&mut self, command: Command, now: Instant) -> Response {
+        debug_assert!(matches!(command, Command::Arm | Command::Activate));
+        self.last_now = now;
+        let rejection = Rejection::SupersededByDisarm;
+        self.log
+            .decision(now, DecisionEvent::CommandRejected { command, rejection });
+        Response {
+            result: Err(rejection),
+            transition: None,
+        }
     }
 
     /// Runs one control tick at `now`. See the module documentation for the order.
