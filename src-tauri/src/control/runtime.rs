@@ -104,12 +104,16 @@ struct StatusCell {
 }
 
 impl StatusCell {
-    /// Waits for the lock. Used only for command batches and shutdown, never at a tick.
+    /// Waits for the lock. Used only once, after the control loop has ended (shutdown); never
+    /// in a tick or a command batch.
     fn publish(&self, status: ControlStatus) {
         *self.status.lock().unwrap_or_else(PoisonError::into_inner) = status;
     }
 
     /// Publishes only if no reader holds the status right now; otherwise the next tick will.
+    /// A skipped status is dropped, not queued: the previous status stays published whole
+    /// (it is only ever replaced as a complete value under the lock), the skip is counted in
+    /// the tick diagnostics, and the next tick offers a fresh, complete status.
     /// Returns how long the `try_lock` and the hold (assignment, including the release of the
     /// previous status) took, for diagnostics; the locking itself is unchanged.
     fn publish_if_free(&self, status: ControlStatus) -> PublishTiming {
@@ -362,9 +366,22 @@ fn drain_inputs(
     })
 }
 
-/// Processes every queued command, any disarm first, publishes the resulting status, and only
-/// then answers each request, so a requester never sees a status older than its answer.
-/// Never waits for new commands.
+/// Answers to one command batch, sent by [`Answers::send`] once the tick has offered its
+/// status.
+struct Answers(Vec<(oneshot::Sender<CommandReply>, CommandReply)>);
+
+impl Answers {
+    fn send(self) {
+        for (reply, answer) in self.0 {
+            // The requester may have given up waiting; that is not an error.
+            let _ = reply.send(answer);
+        }
+    }
+}
+
+/// Processes every queued command, any disarm first, and returns the answers. Never waits
+/// for new commands, and never touches the status: the tick that follows publishes it without
+/// waiting, and the answers are sent after that (see `run_sender`).
 ///
 /// A disarm has priority over its whole batch: if the batch contains one, every arm and
 /// activation in it is refused with `Rejection::SupersededByDisarm` instead of being
@@ -373,15 +390,14 @@ fn drain_inputs(
 fn drain_commands(
     core: &mut ControlCore<DryRunSink>,
     queue: &mut mpsc::UnboundedReceiver<Request>,
-    status: &StatusCell,
     at: Instant,
-) {
+) -> Answers {
     let mut batch = Vec::new();
     while let Ok(request) = queue.try_recv() {
         batch.push(request);
     }
     if batch.is_empty() {
-        return;
+        return Answers(Vec::new());
     }
     let (disarms, others): (Vec<Request>, Vec<Request>) = batch
         .into_iter()
@@ -398,13 +414,12 @@ fn drain_commands(
         answered.push((request.reply, response));
     }
     let state = core.state();
-    status.publish(core.status(at));
-    for (reply, response) in answered {
-        if let Some(reply) = reply {
-            // The requester may have given up waiting; that is not an error.
-            let _ = reply.send(CommandReply { response, state });
-        }
-    }
+    Answers(
+        answered
+            .into_iter()
+            .filter_map(|(reply, response)| Some((reply?, CommandReply { response, state })))
+            .collect(),
+    )
 }
 
 async fn run_sender(
@@ -428,7 +443,7 @@ async fn run_sender(
                 let control_start_qpc = qpc::now();
                 let wake = timer.last_wake().filter(|w| w.deadline == deadline);
                 let inputs_taken = drain_inputs(&mut core, &mut inputs, at);
-                drain_commands(&mut core, &mut commands, &status, at);
+                let answers = drain_commands(&mut core, &mut commands, at);
                 core.tick(at);
                 let work_done = now();
                 core.tick_finished(work_done);
@@ -452,12 +467,17 @@ async fn run_sender(
                     status_lock_hold: publish.hold,
                     inputs: inputs_taken,
                 });
+                // After the publication, so a requester never sees a status older than its
+                // answer, unless a reader held the status: then the answer is not held back,
+                // its `state` is authoritative and the status follows at a later tick.
+                answers.send();
             }
         }
     }
     let at = now();
     let report = core.shutdown(at);
-    // The final status (disarmed) is published before the task ends.
+    // The final status (disarmed) is published before the task ends. The only waiting
+    // publication: the control loop has ended, so no tick can be delayed by it.
     status.publish(core.status(at));
     report
 }
@@ -1113,6 +1133,148 @@ mod tests {
         assert_eq!(replies[0].response.result, Err(Rejection::AlreadyArmed));
         assert_eq!(replies[1].response.result, Err(Rejection::NotArmed));
         assert_eq!(setup.handle.status().state, State::Active.into());
+        stop(setup, feeder).await;
+    }
+
+    // ---- F-02: the status is never published with a waiting lock in the loop ----
+
+    fn skipped(status: &ControlStatus) -> u64 {
+        status.timing.diagnostics.status_publish_skipped
+    }
+
+    // F-02 (1): with no reader, the status is published before the answer, as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_free_status_is_published_before_the_answer() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let replies = send_batch(&setup.handle, &[Command::Arm]).await;
+        assert_eq!(replies[0].state, State::Armed);
+        let status = setup.handle.status();
+        assert_eq!(
+            status.state,
+            State::Armed.into(),
+            "no older than the answer"
+        );
+        assert_eq!(skipped(&status), 0);
+        stop(setup, feeder).await;
+    }
+
+    // F-02 (2)-(5): a held status neither stops the loop nor the answers; the skipped
+    // publications are counted, the old status stays whole, and publishing resumes.
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test plays a reader that holds the status while the loop runs"
+    )]
+    async fn a_held_status_is_skipped_kept_whole_and_published_again_after_release() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let before = setup.handle.status();
+        let ticks_before = before.timing.ticks;
+        {
+            let reader = setup.handle.hold_status();
+            let answer = setup.handle.request(Command::Arm).unwrap();
+            run_for(200).await;
+            // The loop did not wait: the command was processed and answered meanwhile.
+            let reply = answer
+                .await
+                .expect("answered while the reader held the status");
+            assert_eq!(reply.response.result, Ok(()));
+            assert_eq!(reply.state, State::Armed);
+            assert!(
+                decisions(&setup.handle.log().snapshot())
+                    .iter()
+                    .any(|d| matches!(d, DecisionEvent::Transition(t) if t.to == State::Armed))
+            );
+            // The published status is still the complete previous one, unchanged.
+            let mut held = reader.clone();
+            held.watchdog.loop_silent_ms = before.watchdog.loop_silent_ms;
+            assert_eq!(held, before);
+        }
+        run_for(45).await;
+        let after = setup.handle.status();
+        assert_eq!(after.state, State::Armed.into());
+        assert!(after.now_ms > before.now_ms);
+        let ticks = after.timing.ticks - ticks_before;
+        let skips = skipped(&after);
+        assert!((4..=6).contains(&skips), "{skips} skipped in {ticks} ticks");
+        assert!(ticks > skips, "a later tick published again");
+        run_for(400).await;
+        assert_eq!(skipped(&setup.handle.status()), skips, "no further skips");
+        stop(setup, feeder).await;
+    }
+
+    // F-02 (6): a long hold skips one publication per tick and queues nothing: after release
+    // the next tick publishes the current status, not a backlog.
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test plays a reader that holds the status while the loop runs"
+    )]
+    async fn a_long_hold_queues_no_statuses() {
+        let (setup, feeder) = runtime_in(State::Disabled).await;
+        let before = setup.handle.status();
+        {
+            let _reader = setup.handle.hold_status();
+            assert!(setup.handle.send(Command::Arm));
+            run_for(1_000).await;
+            assert!(setup.handle.send(Command::Activate));
+            run_for(1_000).await;
+        }
+        run_for(45).await;
+        let after = setup.handle.status();
+        let ticks = after.timing.ticks - before.timing.ticks;
+        assert!(ticks >= 50, "the loop kept its rate: {ticks} ticks");
+        let skips = skipped(&after);
+        assert!(
+            (49..=51).contains(&skips),
+            "one skip per held tick: {skips}"
+        );
+        assert_eq!(after.state, State::Active.into());
+        assert!(
+            after.now_ms >= before.now_ms + 2_000,
+            "the newest status, not an old one: {} -> {}",
+            before.now_ms,
+            after.now_ms
+        );
+        // Output ran while the status was held.
+        assert!(count_messages(&setup.handle.log().snapshot(), MessageKind::Command) > 20);
+        stop(setup, feeder).await;
+    }
+
+    // F-02 (7): command processing and the disarm priority do not depend on the status lock.
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test plays a reader that holds the status while the loop runs"
+    )]
+    async fn the_disarm_priority_holds_while_a_reader_holds_the_status() {
+        let (setup, feeder) = runtime_in(State::Active).await;
+        let commands = {
+            let _reader = setup.handle.hold_status();
+            let replies = send_batch(
+                &setup.handle,
+                &[Command::Arm, Command::Activate, Command::Disarm],
+            )
+            .await;
+            assert!(superseded(&replies[0]), "{:?}", replies[0]);
+            assert!(superseded(&replies[1]), "{:?}", replies[1]);
+            assert_eq!(
+                replies[2].response.transition.map(|t| t.reason),
+                Some(Reason::ManualDisarm)
+            );
+            assert!(replies.iter().all(|r| r.state == State::Disabled));
+            let log = setup.handle.log().snapshot();
+            assert_eq!(
+                count_messages(&log, MessageKind::Disarm),
+                1,
+                "encoded at once"
+            );
+            count_messages(&log, MessageKind::Command)
+        };
+        run_for(400).await;
+        let log = setup.handle.log().snapshot();
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        assert_eq!(count_messages(&log, MessageKind::Command), commands);
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
         stop(setup, feeder).await;
     }
 

@@ -874,6 +874,43 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_holding_the_status_never_blocks_command_processing() {
+        // F-02: a command batch used to publish the status with a blocking lock, so a reader
+        // holding the status stopped the elevated control loop at the next command.
+        let rig = Rig::active();
+        let handle = handle_of(&rig.slot);
+        let log = handle.log();
+        let count = |log: &crate::control::log::ControlLog| {
+            log.snapshot()
+                .messages
+                .iter()
+                .filter(|e| e.event.kind == crate::control::log::MessageKind::Command)
+                .count()
+        };
+        {
+            let _reader = handle.hold_status();
+            // A harmless command (refused while Active) makes the loop process a batch.
+            let mut answer = handle.request(Command::Activate).unwrap();
+            let before = count(&log);
+            std::thread::sleep(ms(300));
+            let during = count(&log) - before;
+            assert!(
+                during >= 5,
+                "only {during} commands were encoded after a command while a reader held the status"
+            );
+            let reply = answer
+                .try_recv()
+                .expect("the command was answered while the reader held the status");
+            assert_eq!(reply.state, crate::control::supervisor::State::Active);
+        }
+        let ticks = rig.slot.status().timing.ticks;
+        wait_until("a newer status", ms(1_000), || {
+            rig.slot.status().timing.ticks > ticks
+        });
+        assert_eq!(rig.slot.status().state, StateCode::Active);
+    }
+
+    #[test]
     fn the_application_measures_the_timer_wake_and_the_hand_off_to_the_control_thread() {
         let rig = Rig::start();
         std::thread::sleep(ms(300));
