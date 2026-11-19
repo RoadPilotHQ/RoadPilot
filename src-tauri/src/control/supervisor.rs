@@ -48,7 +48,42 @@
 use super::freshness::{Assessment, Sample, Unusable};
 use super::vehicle::InvalidFrame;
 use roadpilot_telemetry_client::GameId;
+use std::marker::PhantomData;
 use std::time::Duration;
+
+/// Proof that this supervisor has just carried out a manual activation: the only thing that
+/// allows the output gate to open (see `gate`).
+///
+/// * It is created only here, by the transition Armed -> Active with
+///   [`Reason::ManualActivate`]; its field is private, so no other code can build one.
+/// * It can be taken once ([`Supervisor::take_activation_proof`]), and only while that
+///   activation is the current state: every later transition (a safety event, a disarm, a
+///   shutdown, a fault reset) withdraws an untaken proof.
+/// * It is neither `Clone` nor `Copy`, and it borrows the supervisor mutably for as long as it
+///   exists: no state change is possible while a proof is held, so a proof can never outlive
+///   the activation it stands for.
+///
+/// ```compile_fail
+/// use roadpilot_lib::control::supervisor::Supervisor;
+/// let mut supervisor = Supervisor::default();
+/// let proof = supervisor.take_activation_proof();
+/// supervisor.shutdown(); // a state change while the proof exists: does not compile
+/// drop(proof);
+/// ```
+///
+/// The same lines in the other order compile, so the example above fails for the borrow alone:
+///
+/// ```
+/// use roadpilot_lib::control::supervisor::Supervisor;
+/// let mut supervisor = Supervisor::default();
+/// let proof = supervisor.take_activation_proof();
+/// drop(proof);
+/// supervisor.shutdown(); // the proof is gone: allowed
+/// ```
+#[derive(Debug)]
+pub struct ManualArm<'a> {
+    _activation: PhantomData<&'a mut Supervisor>,
+}
 
 /// Default test speed cap. Deliberately low; raising it is a conscious configuration act.
 pub const DEFAULT_SPEED_CAP_MPS: f32 = 5.0;
@@ -225,6 +260,8 @@ pub struct Supervisor {
     state: State,
     binding: Option<Binding>,
     last_transition: Option<Transition>,
+    /// The last transition was a manual activation whose proof has not been taken yet.
+    activation_proof: bool,
 }
 
 impl Supervisor {
@@ -234,7 +271,21 @@ impl Supervisor {
             state: State::Disabled,
             binding: None,
             last_transition: None,
+            activation_proof: false,
         }
+    }
+
+    /// The proof of the manual activation that is the current state, once. `None` in every
+    /// other case: not Active, Active through anything but the last transition being
+    /// [`Reason::ManualActivate`], or the proof was already taken. See [`ManualArm`].
+    pub fn take_activation_proof(&mut self) -> Option<ManualArm<'_>> {
+        if self.state != State::Active || !self.activation_proof {
+            return None;
+        }
+        self.activation_proof = false;
+        Some(ManualArm {
+            _activation: PhantomData,
+        })
     }
 
     pub fn state(&self) -> State {
@@ -264,6 +315,10 @@ impl Supervisor {
         if to != State::Armed && to != State::Active {
             self.binding = None;
         }
+        // Only the manual activation itself creates a proof; every other transition withdraws
+        // one that was not taken.
+        self.activation_proof =
+            to == State::Active && t.from == State::Armed && reason == Reason::ManualActivate;
         self.last_transition = Some(t);
         t
     }
@@ -451,10 +506,111 @@ impl Default for Supervisor {
     }
 }
 
+/// Supervisors in a given state through the real command sequence, for tests of other
+/// modules (the output gate needs a genuine activation proof).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::super::freshness::{Assessment, Sample};
+    use super::super::vehicle::{VehicleState, test_support::running_frame};
+    use super::{Command, State, Supervisor};
+    use std::time::Duration;
+
+    /// A usable vehicle state of epoch 1, session 7, at 3 m/s.
+    pub fn usable() -> Assessment {
+        let mut frame = running_frame(7, 10, 1_000_000);
+        frame.truck.as_mut().unwrap().speed_mps = Some(3.0);
+        Assessment::Usable(Sample {
+            state: VehicleState::from_frame(&frame).unwrap(),
+            epoch: 1,
+            age: Duration::from_millis(10),
+        })
+    }
+
+    /// Armed and manually activated; its activation proof has not been taken.
+    pub fn activated() -> Supervisor {
+        let mut s = Supervisor::default();
+        assert!(s.command(Command::Arm, &usable()).result.is_ok());
+        assert!(s.command(Command::Activate, &usable()).result.is_ok());
+        assert_eq!(s.state(), State::Active);
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::vehicle::{FrameIdentity, VehicleState, test_support::running_frame};
     use super::*;
+
+    // ---- the activation proof (4.6.4d step 1) ----
+
+    #[test]
+    fn a_manual_activation_yields_exactly_one_proof() {
+        let mut s = active();
+        assert!(s.take_activation_proof().is_some());
+        assert!(s.take_activation_proof().is_none(), "taken once");
+        assert_eq!(s.state(), State::Active, "taking it changes nothing");
+    }
+
+    #[test]
+    fn no_state_but_a_fresh_manual_activation_yields_a_proof() {
+        let mut s = Supervisor::default();
+        assert!(s.take_activation_proof().is_none(), "disabled");
+        s.command(Command::Arm, &ok());
+        assert!(s.take_activation_proof().is_none(), "armed");
+        // A refused activation (safety event) does not yield one.
+        s.command(Command::Activate, &Assessment::Unusable(Unusable::Paused));
+        assert!(s.take_activation_proof().is_none(), "refused activation");
+        // A second activation request while Active does not create another one.
+        let mut s = active();
+        assert!(s.take_activation_proof().is_some());
+        assert!(s.command(Command::Activate, &ok()).result.is_err());
+        assert!(s.take_activation_proof().is_none(), "no second proof");
+    }
+
+    #[test]
+    fn every_transition_after_the_activation_withdraws_an_untaken_proof() {
+        // Disarm, safety events, external events, shutdown.
+        let mut s = active();
+        s.command(Command::Disarm, &ok());
+        assert!(s.take_activation_proof().is_none(), "after a disarm");
+        for (assessment, _) in safety_cases() {
+            let mut s = active();
+            s.update(&assessment);
+            assert_eq!(s.state(), State::Fault);
+            assert!(s.take_activation_proof().is_none(), "after a fault");
+        }
+        for event in external_events() {
+            let mut s = active();
+            s.report(event);
+            assert!(s.take_activation_proof().is_none(), "after {event:?}");
+        }
+        let mut s = active();
+        s.shutdown();
+        assert!(s.take_activation_proof().is_none(), "after a shutdown");
+    }
+
+    #[test]
+    fn a_fault_reset_never_yields_a_proof_without_a_new_arm_and_activation() {
+        let mut s = active(); // proof not taken
+        s.update(&Assessment::Unusable(Unusable::Paused));
+        assert!(s.command(Command::ResetFault, &ok()).result.is_ok());
+        assert_eq!(s.state(), State::Disabled);
+        assert!(s.take_activation_proof().is_none(), "after the reset");
+        assert!(s.command(Command::Arm, &ok()).result.is_ok());
+        assert!(
+            s.take_activation_proof().is_none(),
+            "armed again, not active"
+        );
+        assert!(s.command(Command::Activate, &ok()).result.is_ok());
+        assert!(s.take_activation_proof().is_some(), "the new full sequence");
+    }
+
+    #[test]
+    fn the_test_support_activation_is_genuine() {
+        let mut s = test_support::activated();
+        assert!(s.take_activation_proof().is_some());
+        assert!(s.take_activation_proof().is_none());
+    }
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)

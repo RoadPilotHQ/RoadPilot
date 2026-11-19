@@ -169,6 +169,31 @@ mod dry_run_proof {
     }
 
     #[test]
+    fn only_the_gate_itself_names_the_gate_opener() {
+        // The right to open the output gate belongs to the control core alone. Until the core
+        // is integrated (4.6.4d step 2) no source but the gate's own may name it; the
+        // application files are scanned too.
+        let needle = ["Gate", "Opener"].concat();
+        let allowed = ["gate"];
+        let application = [
+            ("../control_app", include_str!("../control_app.rs")),
+            ("../lib", include_str!("../lib.rs")),
+        ];
+        for (name, source) in SOURCES.iter().chain(application.iter()) {
+            if allowed.contains(name) {
+                continue;
+            }
+            for (number, line) in code_lines(source) {
+                assert!(
+                    !line.contains(needle.as_str()),
+                    "control/{name}.rs:{} names the gate opener: {line}",
+                    number + 1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn nothing_but_the_telemetry_feed_type_is_imported_from_outside_the_control_module() {
         // The runtime is the only file that may name the telemetry module, and only its
         // frame feed; the rest of the control code is independent of the transport.
