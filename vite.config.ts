@@ -13,5 +13,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // The layout tests read the theme as text; other stylesheets stay stubbed.
+    css: { include: [/theme\.css/] },
   },
 })

@@ -277,38 +277,35 @@ button:focus-visible {
   display: grid;
   grid-template-columns: 1fr 1.15fr 1.25fr;
   grid-template-areas:
-    'vehicle autopilot assist'
-    'job route route'
+    'autopilot assist job'
+    'route route route'
     'dynamics navigation environment'
     'position position position';
   gap: var(--gap);
 }
 
 .grid > :nth-child(1) {
-  grid-area: vehicle;
-}
-.grid > :nth-child(2) {
   grid-area: autopilot;
 }
-.grid > :nth-child(3) {
+.grid > :nth-child(2) {
   grid-area: assist;
 }
-.grid > :nth-child(4) {
+.grid > :nth-child(3) {
   grid-area: job;
 }
-.grid > :nth-child(5) {
+.grid > :nth-child(4) {
   grid-area: route;
 }
-.grid > :nth-child(6) {
+.grid > :nth-child(5) {
   grid-area: dynamics;
 }
-.grid > :nth-child(7) {
+.grid > :nth-child(6) {
   grid-area: navigation;
 }
-.grid > :nth-child(8) {
+.grid > :nth-child(7) {
   grid-area: environment;
 }
-.grid > :nth-child(9) {
+.grid > :nth-child(8) {
   grid-area: position;
 }
 
@@ -524,15 +521,11 @@ button:focus-visible {
   .grid {
     grid-template-columns: 1fr 1fr;
     grid-template-areas:
-      'vehicle autopilot'
-      'assist assist'
+      'autopilot assist'
       'job route'
       'dynamics navigation'
       'environment environment'
       'position position';
-  }
-  .grid > :nth-child(5) {
-    grid-area: route;
   }
 }
 
@@ -713,4 +706,296 @@ button:focus-visible {
   min-width: 56px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* Vehicle data (read-only telemetry) */
+.vehicle-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.vehicle-head .card-title {
+  margin: 0;
+}
+
+.vehicle-truck {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.vehicle-units {
+  margin-left: auto;
+  min-width: 190px;
+}
+
+/* Demo values must never look like a live session. */
+.tag-demo {
+  border-style: dashed;
+  border-color: var(--amber);
+  background: #f8ecd0;
+  color: #6b4d12;
+}
+
+.vehicle-demo .speed-value,
+.vehicle-demo .gear-value,
+.vehicle-demo .rpm-value,
+.vehicle-demo .fuel-percent {
+  color: #8a7a62;
+}
+
+.tag-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-color: var(--red);
+  background: var(--red);
+  color: #fff;
+}
+
+.link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  font-size: 13px;
+}
+
+.link-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+}
+
+.link-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.link-connected .link-dot {
+  background: var(--green);
+}
+.link-connecting .link-dot,
+.link-stale .link-dot {
+  background: var(--amber);
+}
+.link-error .link-dot {
+  background: var(--red);
+}
+.link-stale,
+.link-error {
+  border-color: var(--amber);
+}
+.link-error {
+  border-color: var(--red);
+}
+
+.link-game {
+  font-weight: 600;
+}
+
+.link-detail {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.vehicle-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1.1fr);
+  gap: var(--gap);
+}
+
+.vehicle-panel {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fffdf8;
+}
+
+.vehicle-panel-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.vehicle-panel .row-value {
+  text-align: right;
+}
+
+/* Anything that is not a current value is muted, so it never reads like data. */
+.value-missing,
+.value-noData,
+.value-unsupported {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.value-invalid {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.vehicle-speed {
+  border-color: var(--orange-soft);
+}
+
+.speed-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 72px;
+}
+
+.speed-value {
+  font-size: clamp(48px, 7vw, 72px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-unit {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--orange);
+}
+
+.speed-missing {
+  font-size: 20px;
+  align-self: center;
+}
+
+.speed-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  margin: 4px 0 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.powertrain-main {
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 6px;
+}
+
+.gear-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.gear-value {
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.gear-value.value-missing,
+.gear-value.value-noData,
+.gear-value.value-invalid {
+  font-size: 13px;
+  text-align: center;
+}
+
+.rpm-box {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rpm-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.rpm-value.value-missing,
+.rpm-value.value-noData,
+.rpm-value.value-invalid {
+  font-size: 14px;
+}
+
+.meter {
+  height: 10px;
+  border-radius: 999px;
+  background: #eadfce;
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--orange);
+  transition: width 0.2s;
+}
+
+.meter-warn .meter-fill {
+  background: var(--red);
+}
+
+.fuel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.fuel-percent {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.vehicle-fuel .meter {
+  margin-bottom: 4px;
+}
+
+@media (max-width: 1000px) {
+  .vehicle-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .vehicle-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .vehicle-units {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+  .link-detail {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
 }

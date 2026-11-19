@@ -12,7 +12,7 @@ import {
 } from '../dashboard/DetailCards'
 import { CurrentJobCard, RouteProgressCard } from '../dashboard/JobCards'
 import { OverviewCards } from '../dashboard/OverviewCards'
-import { VehicleDataCard } from '../dashboard/VehicleDataCard'
+import { VehicleDashboard } from '../vehicle/VehicleDashboard'
 import type { PageId } from '../components/TopNav'
 
 /** States whether the dashboard shows live telemetry or sample data, and why. */
@@ -53,8 +53,8 @@ export function DashboardPage() {
       <DataSourceBanner />
       <ControlCard />
       <OverviewCards />
+      <VehicleDashboard />
       <div className="grid">
-        <VehicleDataCard />
         <AutopilotCard />
         <AssistanceCard />
         <CurrentJobCard />

@@ -27,6 +27,7 @@ function setup() {
 }
 
 const card = (name: string) => within(screen.getByRole('region', { name }))
+const panel = (name: string) => within(card('Vehicle Data').getByRole('region', { name }))
 const badge = () => screen.getByRole('status')
 
 const live = (data: TelemetryData = fullData()): Partial<TelemetryUpdate> => ({
@@ -58,18 +59,21 @@ describe('dashboard with live telemetry', () => {
     expect(badge()).toHaveTextContent('ETS2 Connected')
     expect(screen.getByText('Live data')).toBeInTheDocument()
     expect(screen.queryByText('Demo data')).not.toBeInTheDocument()
-    const vehicle = card('Vehicle Data')
-    expect(vehicle.getByText('83 km/h')).toBeInTheDocument()
-    expect(vehicle.getByText('1,350 rpm')).toBeInTheDocument()
-    expect(vehicle.getByText('11')).toBeInTheDocument()
-    expect(vehicle.getByText('413 l · 52 %')).toBeInTheDocument()
-    expect(vehicle.getByLabelText('Calculated by RoadPilot from game values')).toBeInTheDocument()
-    expect(vehicle.getByText('Running')).toBeInTheDocument()
-    expect(vehicle.getByText('88 °C')).toBeInTheDocument()
-    expect(vehicle.getByText('1,240 km')).toBeInTheDocument()
-    expect(vehicle.getByText('60 l')).toBeInTheDocument()
-    expect(vehicle.getByText('102 °C')).toBeInTheDocument()
-    expect(vehicle.getByText('24.1 V')).toBeInTheDocument()
+    expect(panel('Speed').getByText('83')).toBeInTheDocument()
+    expect(panel('Speed').getByText('km/h')).toBeInTheDocument()
+    expect(panel('Engine speed and gear').getByText('1,350 rpm')).toBeInTheDocument()
+    expect(panel('Engine speed and gear').getByText('11')).toBeInTheDocument()
+    const fuel = panel('Fuel')
+    expect(fuel.getByText('413 l of 800 l')).toBeInTheDocument()
+    expect(fuel.getByText('52 %')).toBeInTheDocument()
+    expect(fuel.getByLabelText('Calculated by RoadPilot from game values')).toBeInTheDocument()
+    expect(fuel.getByText('1,240 km')).toBeInTheDocument()
+    expect(fuel.getByText('60 l')).toBeInTheDocument()
+    const engine = panel('Engine')
+    expect(engine.getByText('Running')).toBeInTheDocument()
+    expect(engine.getByText('88 °C')).toBeInTheDocument()
+    expect(engine.getByText('102 °C')).toBeInTheDocument()
+    expect(engine.getByText('24.1 V')).toBeInTheDocument()
   })
 
   it('shows driving dynamics, navigation, job and environment', async () => {
@@ -120,8 +124,11 @@ describe('dashboard with live telemetry', () => {
     const data = emptyData()
     data.vehicle.speedKmh = 50
     await send(live(data))
-    expect(card('Vehicle Data').getByText('50 km/h')).toBeInTheDocument()
-    expect(card('Vehicle Data').getAllByText('Not available')).toHaveLength(12)
+    expect(panel('Speed').getByText('50')).toBeInTheDocument()
+    // Every supported vehicle value except the speed; the three values the telemetry does
+    // not carry at all are labelled differently.
+    expect(card('Vehicle Data').getAllByText('Not available')).toHaveLength(24)
+    expect(card('Vehicle Data').getAllByText('Not provided by the telemetry')).toHaveLength(3)
     expect(card('Driving Dynamics').getAllByText('Not available')).toHaveLength(5)
     expect(card('Navigation').getAllByText('Not available')).toHaveLength(3)
     expect(card('Vehicle Position').getAllByText('Not available')).toHaveLength(6)
@@ -151,12 +158,16 @@ describe('dashboard with live telemetry', () => {
     const reversing = fullData()
     Object.assign(reversing.vehicle, { speedKmh: -6.2, engineRpm: 900, gear: -1 })
     await send(live(reversing))
-    expect(card('Vehicle Data').getByText('6 km/h')).toBeInTheDocument()
-    expect(card('Vehicle Data').getByText('R1')).toBeInTheDocument()
+    expect(panel('Speed').getByText('6')).toBeInTheDocument()
+    expect(panel('Speed').getByText('Reversing')).toBeInTheDocument()
+    expect(panel('Engine speed and gear').getByText('R1')).toBeInTheDocument()
+    expect(panel('Engine speed and gear').getByText('Reverse')).toBeInTheDocument()
     const neutral = fullData()
     Object.assign(neutral.vehicle, { speedKmh: 0, gear: 0 })
     await send(live(neutral))
-    expect(card('Vehicle Data').getByText('N')).toBeInTheDocument()
+    expect(panel('Speed').getByText('0')).toBeInTheDocument()
+    expect(panel('Engine speed and gear').getByText('N')).toBeInTheDocument()
+    expect(panel('Engine speed and gear').getByText('Neutral')).toBeInTheDocument()
   })
 
   it('clears live values when the connection is interrupted', async () => {
@@ -165,8 +176,14 @@ describe('dashboard with live telemetry', () => {
     await send({ status: 'reconnecting', game: 'ets2' })
     expect(badge()).toHaveTextContent('ETS2 Reconnecting…')
     expect(screen.getByText('Telemetry interrupted')).toBeInTheDocument()
-    expect(card('Vehicle Data').queryByText('83 km/h')).not.toBeInTheDocument()
-    expect(card('Vehicle Data').getAllByText('No data')).toHaveLength(13)
+    expect(
+      within(screen.getByRole('group', { name: 'Telemetry link' })).getByText('Stale'),
+    ).toBeInTheDocument()
+    expect(panel('Speed').queryByText('83')).not.toBeInTheDocument()
+    expect(panel('Speed').getAllByText('No data')).toHaveLength(2)
+    // No vehicle value of the interrupted session remains on screen.
+    expect(card('Vehicle Data').queryAllByText(/^-?\d/)).toHaveLength(0)
+    expect(card('Vehicle Data').getAllByText('No data')).toHaveLength(29)
     expect(card('Driving Dynamics').getAllByText('No data')).toHaveLength(5)
     expect(card('Environment').getAllByText('No data')).toHaveLength(3)
   })
@@ -177,7 +194,8 @@ describe('dashboard with live telemetry', () => {
     await send({ status: 'disconnected' })
     expect(badge()).toHaveTextContent('Game not running')
     expect(screen.getByText('Demo data')).toBeInTheDocument()
-    expect(card('Vehicle Data').getByText('80 km/h')).toBeInTheDocument()
+    expect(panel('Speed').getByText('80')).toBeInTheDocument()
+    expect(card('Vehicle Data').getByText('Demo')).toBeInTheDocument()
     expect(screen.getByText('Hamburg → Praha', { selector: '.job-route' })).toBeInTheDocument()
   })
 
