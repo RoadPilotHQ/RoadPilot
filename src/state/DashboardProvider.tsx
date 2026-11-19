@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   useSyncExternalStore,
@@ -16,7 +17,18 @@ import type {
   Preferences,
   UnitPreference,
 } from '@/domain/types'
+import type { PathTrace } from '@/domain/path'
+import { createPathStore } from './pathStore'
 import { loadPreferences, savePreferences } from './preferences'
+
+const PathContext = createContext<PathTrace | null>(null)
+
+/** The truck's traveled path in the current game (see `domain/path.ts`). */
+export function usePathTrace(): PathTrace {
+  const trace = useContext(PathContext)
+  if (!trace) throw new Error('usePathTrace must be used inside <DashboardProvider>')
+  return trace
+}
 
 interface DashboardContextValue {
   snapshot: DashboardSnapshot
@@ -38,6 +50,10 @@ export function DashboardProvider({
 }) {
   const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot)
   const [preferences, setPreferences] = useState(() => loadPreferences())
+  // The traveled path is recorded from every snapshot of this source, whatever is on screen.
+  const pathStore = useMemo(() => createPathStore(source), [source])
+  useEffect(() => pathStore.attach(), [pathStore])
+  const path = useSyncExternalStore(pathStore.subscribe, pathStore.getTrace)
 
   const update = useCallback((change: (prev: Preferences) => Preferences) => {
     setPreferences((prev) => {
@@ -61,7 +77,11 @@ export function DashboardProvider({
     [snapshot, preferences, update],
   )
 
-  return <DashboardContext.Provider value={value}>{children}</DashboardContext.Provider>
+  return (
+    <DashboardContext.Provider value={value}>
+      <PathContext.Provider value={path}>{children}</PathContext.Provider>
+    </DashboardContext.Provider>
+  )
 }
 
 export function useDashboard(): DashboardContextValue {

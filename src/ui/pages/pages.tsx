@@ -7,6 +7,7 @@ import { ControlCard } from '../dashboard/ControlCard'
 import { DynamicsCard, EnvironmentCard, PositionCard } from '../dashboard/DetailCards'
 import { CurrentJob } from '../job/CurrentJob'
 import { RouteInfo } from '../route/RouteInfo'
+import { NavigationArea } from '../navigation/NavigationArea'
 import { OverviewCards } from '../dashboard/OverviewCards'
 import { VehicleDashboard } from '../vehicle/VehicleDashboard'
 import type { PageId } from '../components/TopNav'
@@ -49,12 +50,15 @@ export function DashboardPage() {
       <DataSourceBanner />
       <ControlCard />
       <OverviewCards />
+      <CurrentJob />
+      <div className="navigation-layout">
+        <NavigationArea />
+        <RouteInfo />
+      </div>
       <VehicleDashboard />
       <div className="grid">
         <AutopilotCard />
         <AssistanceCard />
-        <CurrentJob />
-        <RouteInfo />
         <DynamicsCard />
         <EnvironmentCard />
         <PositionCard />

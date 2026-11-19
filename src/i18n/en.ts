@@ -199,6 +199,24 @@ export const en = {
   'dynamics.cruise.set': 'On · {value} km/h',
 
   'navigation.speedLimit.none': 'None shown',
+  'navigation.title': 'Navigation',
+  'navigation.traceTag': 'Traveled path · not a map',
+  'navigation.view': 'View',
+  'navigation.view.follow': 'Follow truck',
+  'navigation.view.fit': 'Whole path',
+  'navigation.canvasLabel': 'Traveled path of the truck, {count} points',
+  'navigation.empty.demo':
+    'No game connected. The path the truck travels is traced here from live telemetry.',
+  'navigation.empty.noData': 'No current telemetry, so no position to trace.',
+  'navigation.empty.noPosition': 'The telemetry provides no position yet.',
+  'navigation.stale': 'Position not current · last {age} ago',
+  'navigation.legend.start': 'Start of trace',
+  'navigation.legend.current': 'Last position and heading',
+  'navigation.points': '{count} points',
+  'navigation.rejected': '{count} invalid positions skipped',
+  'navigation.scale': 'Scale: {value}',
+  'navigation.note':
+    'Traced from the telemetry position in game-world metres, north up. No roads, no map, no route and no destination; it is not a geographic map.',
 
   'environment.title': 'Environment',
   'environment.gameTime': 'Game time',
