@@ -2,17 +2,19 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import '@/theme/theme.css'
 import { createDefaultControlSource } from '@/backend/controlSource'
+import { createDefaultMapSource } from '@/backend/mapSource'
 import { createDefaultSource } from '@/backend/telemetrySource'
 import { App } from './App'
 
 const source = createDefaultSource()
 const controlSource = createDefaultControlSource()
+const mapSource = createDefaultMapSource()
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Root element #root not found')
 
 createRoot(root).render(
   <StrictMode>
-    <App source={source} controlSource={controlSource} />
+    <App source={source} controlSource={controlSource} mapSource={mapSource} />
   </StrictMode>,
 )

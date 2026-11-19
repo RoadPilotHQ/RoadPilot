@@ -32,11 +32,18 @@ export function parsePreferences(raw: unknown): Preferences {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const distance = DISTANCES.find((d) => d === obj.drivingDistance)
   const units = UNIT_PREFERENCES.find((u) => u === obj.units)
+  const packages = (
+    typeof obj.mapPackages === 'object' && obj.mapPackages !== null ? obj.mapPackages : {}
+  ) as Record<string, unknown>
+  const folder = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v : null)
   return {
     autopilot: pickBooleans(AUTOPILOT_FEATURES, obj.autopilot, DEFAULT_PREFERENCES.autopilot),
     assistance: pickBooleans(ASSISTANCE_SYSTEMS, obj.assistance, DEFAULT_PREFERENCES.assistance),
     drivingDistance: distance ?? DEFAULT_PREFERENCES.drivingDistance,
     units: units ?? DEFAULT_PREFERENCES.units,
+    mapPackages: { ets2: folder(packages.ets2), ats: folder(packages.ats) },
+    mapGame:
+      obj.mapGame === 'ats' || obj.mapGame === 'ets2' ? obj.mapGame : DEFAULT_PREFERENCES.mapGame,
   }
 }
 

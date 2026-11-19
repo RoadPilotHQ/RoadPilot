@@ -35,4 +35,19 @@ describe('preferences', () => {
       drivingDistance: 'long',
     })
   })
+
+  it('stores a package folder per game and ignores anything else', () => {
+    expect(DEFAULT_PREFERENCES.mapPackages).toEqual({ ets2: null, ats: null })
+    const p = parsePreferences({
+      mapGame: 'ats',
+      mapPackages: { ets2: 'D:/Maps/ets2', ats: 42, ets3: 'x' },
+    })
+    expect(p.mapPackages).toEqual({ ets2: 'D:/Maps/ets2', ats: null })
+    expect(p.mapGame).toBe('ats')
+    expect(parsePreferences({ mapGame: 'ets3', mapPackages: 'D:' }).mapPackages).toEqual({
+      ets2: null,
+      ats: null,
+    })
+    expect(parsePreferences({ mapPackages: { ats: '   ' } }).mapPackages.ats).toBeNull()
+  })
 })

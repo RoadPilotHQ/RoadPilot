@@ -6,6 +6,7 @@ import { link } from '@/domain/vehicle'
 import { useUnitSystem } from '../useLink'
 import { useNow } from '../vehicle/useNow'
 import { useVehicleFormat } from '../vehicle/format'
+import { MapPackagePanel } from './MapPackagePanel'
 import { PathCanvas } from './PathCanvas'
 import { scaleBar, type View, type ViewMode } from './pathView'
 
@@ -93,6 +94,7 @@ export function NavigationArea() {
         ) : null}
       </div>
       <p className="note">{f.t('navigation.note')}</p>
+      <MapPackagePanel />
     </Card>
   )
 }

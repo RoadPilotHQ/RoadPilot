@@ -2568,6 +2568,7 @@ name = "roadpilot"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "roadpilot-map-package",
  "roadpilot-telemetry-client",
  "serde",
  "serde_json",
@@ -2576,6 +2577,19 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "roadpilot-map-model"
+version = "0.1.0"
+source = "git+https://github.com/RoadPilotHQ/RoadPilot-Map.git?rev=77e60941c00ed156c1526f891b10c443a46af0fd#77e60941c00ed156c1526f891b10c443a46af0fd"
+
+[[package]]
+name = "roadpilot-map-package"
+version = "0.1.0"
+source = "git+https://github.com/RoadPilotHQ/RoadPilot-Map.git?rev=77e60941c00ed156c1526f891b10c443a46af0fd#77e60941c00ed156c1526f891b10c443a46af0fd"
+dependencies = [
+ "roadpilot-map-model",
 ]
 
 [[package]]

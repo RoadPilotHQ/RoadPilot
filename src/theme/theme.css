@@ -1200,3 +1200,98 @@ button:focus-visible {
     min-height: 280px;
   }
 }
+
+/* Map package selection */
+.map-package {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+
+.map-package summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.map-state {
+  font-weight: 500;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.map-state-ready {
+  color: #2d6237;
+}
+
+.map-state-error,
+.map-state-game_mismatch,
+.map-state-unsupported_version {
+  color: var(--red);
+}
+
+.map-package-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.map-package-game {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.map-package-game .segmented {
+  min-width: 180px;
+}
+
+.map-package-folder {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.map-package-folder input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+}
+
+.map-package-folder input:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 1px;
+}
+
+.map-package-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.map-package .note {
+  margin: 0;
+}
+
+.map-package-command {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

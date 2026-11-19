@@ -221,6 +221,13 @@ export interface Preferences {
   drivingDistance: DrivingDistance
   /** Display units of the vehicle data. */
   units: UnitPreference
+  /**
+   * Folders of locally generated RoadPilot-Map packages, per game. Chosen by the user; the
+   * application never searches for or generates packages.
+   */
+  mapPackages: Record<GameId, string | null>
+  /** The game whose map is shown while no game is connected. */
+  mapGame: GameId
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -235,4 +242,6 @@ export const DEFAULT_PREFERENCES: Preferences = {
   },
   drivingDistance: 'medium',
   units: 'auto',
+  mapPackages: { ets2: null, ats: null },
+  mapGame: 'ets2',
 }

@@ -1,6 +1,7 @@
 pub mod control;
 mod control_app;
 mod diagnostics;
+mod map;
 mod platform;
 mod telemetry;
 
@@ -55,6 +56,8 @@ fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R
         control_app::control_activate,
         control_app::control_disarm,
         control_app::control_reset_fault,
+        map::map_select,
+        map::map_status,
     ])
 }
 
@@ -100,6 +103,14 @@ pub fn run() {
             }
             app.manage(control);
             app.manage(RecorderState(Mutex::new(recorder)));
+
+            // Road maps (display only): nothing is loaded until the user selects a package.
+            let map_emitter = app.handle().clone();
+            app.manage(map::MapServiceState(map::service::MapService::new(Some(
+                Box::new(move |status| {
+                    let _ = map_emitter.emit(map::MAP_STATUS_EVENT, status);
+                }),
+            ))));
 
             app.manage(TelemetryState {
                 latest,
@@ -176,6 +187,7 @@ mod tests {
             .unwrap();
         let app = register_commands(mock_builder())
             .manage(control)
+            .manage(map::MapServiceState(map::service::MapService::new(None)))
             .manage(TelemetryState {
                 latest: Arc::new(Mutex::new(TelemetryUpdate::disconnected())),
                 task: Mutex::new(None),
@@ -230,6 +242,23 @@ mod tests {
             );
         }
         assert!(invoke(&webview, "telemetry_snapshot", json!({})).is_ok());
+        shutdown(&app);
+    }
+
+    #[test]
+    fn the_map_commands_answer_without_a_package() {
+        let (app, webview) = app();
+        let status = invoke(&webview, "map_status", json!({})).unwrap();
+        assert_eq!(status["state"], "none");
+        let selected = invoke(
+            &webview,
+            "map_select",
+            json!({ "game": "ats", "path": null }),
+        )
+        .unwrap();
+        assert_eq!(selected["state"], "none");
+        assert_eq!(selected["game"], "ats");
+        assert!(invoke(&webview, "map_select", json!({ "game": "ets3" })).is_err());
         shutdown(&app);
     }
 

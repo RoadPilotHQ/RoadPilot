@@ -14,6 +14,7 @@ import type {
   AutopilotFeature,
   DashboardSnapshot,
   DrivingDistance,
+  GameId,
   Preferences,
   UnitPreference,
 } from '@/domain/types'
@@ -37,6 +38,8 @@ interface DashboardContextValue {
   setAssistanceSystem: (system: AssistanceSystem, enabled: boolean) => void
   setDrivingDistance: (distance: DrivingDistance) => void
   setUnits: (units: UnitPreference) => void
+  setMapPackage: (game: GameId, folder: string | null) => void
+  setMapGame: (game: GameId) => void
 }
 
 const DashboardContext = createContext<DashboardContextValue | null>(null)
@@ -73,6 +76,9 @@ export function DashboardProvider({
         update((p) => ({ ...p, assistance: { ...p.assistance, [system]: enabled } })),
       setDrivingDistance: (drivingDistance) => update((p) => ({ ...p, drivingDistance })),
       setUnits: (units) => update((p) => ({ ...p, units })),
+      setMapPackage: (game, folder) =>
+        update((p) => ({ ...p, mapPackages: { ...p.mapPackages, [game]: folder } })),
+      setMapGame: (mapGame) => update((p) => (p.mapGame === mapGame ? p : { ...p, mapGame })),
     }),
     [snapshot, preferences, update],
   )
