@@ -1,20 +1,15 @@
-import { Gauge, Package, Route } from 'lucide-react'
+import { Gauge } from 'lucide-react'
 import { SteeringWheel } from '../components/SteeringWheel'
 import { useDashboard } from '@/state/DashboardProvider'
 import { useI18n } from '@/i18n'
-import { formatDuration } from '../format'
 
 export function OverviewCards() {
   const { t, formatNumber } = useI18n()
   const { snapshot } = useDashboard()
-  const { vehicle, job, autopilotActive, mode } = snapshot
+  const { vehicle, autopilotActive, mode } = snapshot
   const noData = t('common.noData')
   // In live mode a missing value means the telemetry does not provide it.
   const missing = mode === 'live' && vehicle ? t('common.unavailable') : noData
-  const jobMissing = mode === 'live' ? t('common.unavailable') : t('job.none')
-  const activeJob = job?.state === 'active' ? job : null
-  const duration =
-    activeJob?.remainingMinutes != null ? formatDuration(activeJob.remainingMinutes) : null
 
   return (
     <div className="overview">
@@ -49,42 +44,6 @@ export function OverviewCards() {
             </>
           ) : (
             <div className="overview-value text-muted">{missing}</div>
-          )}
-        </div>
-      </div>
-
-      <div className="card overview-card">
-        <Package size={38} className="icon-orange" aria-hidden />
-        <div>
-          <div className="label">{t('overview.job')}</div>
-          {activeJob?.sourceCity && activeJob.destinationCity ? (
-            <div className="overview-value overview-value-sm">
-              {t('job.route', {
-                origin: activeJob.sourceCity,
-                destination: activeJob.destinationCity,
-              })}
-            </div>
-          ) : (
-            <div className="overview-value overview-value-sm text-muted">{jobMissing}</div>
-          )}
-        </div>
-      </div>
-
-      <div className="card overview-card">
-        <Route size={38} className="icon-orange" aria-hidden />
-        <div>
-          <div className="label">{t('overview.remaining')}</div>
-          {activeJob?.remainingKm != null ? (
-            <>
-              <div className="overview-value">
-                {formatNumber(Math.round(activeJob.remainingKm))} {t('unit.km')}
-              </div>
-              {duration ? <div className="sub">{t('route.eta', duration)}</div> : null}
-            </>
-          ) : (
-            <div className="overview-value text-muted">
-              {mode === 'live' ? t('common.unavailable') : noData}
-            </div>
           )}
         </div>
       </div>

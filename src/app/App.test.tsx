@@ -21,11 +21,15 @@ describe('App', () => {
       'Vehicle Data',
       'Autopilot Settings',
       'Assistance Systems',
-      'Route Progress',
+      'Current Job',
+      'Route Information',
     ]) {
       expect(screen.getByRole('region', { name: title })).toBeInTheDocument()
     }
-    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '48')
+    expect(screen.getByRole('meter', { name: 'Route progress' })).toHaveAttribute(
+      'aria-valuenow',
+      '48',
+    )
   })
 
   it('toggles a setting and persists it', () => {
@@ -59,7 +63,9 @@ describe('App', () => {
     const empty = { getSnapshot: () => snapshot, subscribe: () => () => {} }
     render(<App source={empty} />)
     expect(screen.getAllByText('No data').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('No active job').length).toBeGreaterThan(0)
+    expect(screen.getByRole('region', { name: 'Current Job' })).toHaveTextContent(
+      'The telemetry has not reported any job information.',
+    )
   })
 
   it('navigates to other sections', () => {

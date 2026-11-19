@@ -433,7 +433,7 @@ describe('control section', () => {
       'Vehicle Data',
       'Autopilot Settings',
       'Assistance Systems',
-      'Route Progress',
+      'Route Information',
     ]) {
       expect(screen.getByRole('region', { name: title })).toBeInTheDocument()
     }

@@ -86,10 +86,11 @@ describe('dashboard with live telemetry', () => {
     expect(dynamics.getByText('12 % right')).toBeInTheDocument()
     expect(dynamics.getByText('On · 80 km/h')).toBeInTheDocument()
 
-    const navigation = card('Navigation')
-    expect(navigation.getByText('510 km')).toBeInTheDocument()
-    expect(navigation.getByText('≈ 6 h 40 min')).toBeInTheDocument()
-    expect(navigation.getByText('90 km/h')).toBeInTheDocument()
+    const route = card('Route Information')
+    expect(route.getByText('510 km')).toBeInTheDocument()
+    expect(route.getByText('≈ 6 h 40 min')).toBeInTheDocument()
+    expect(route.getByText('90 km/h')).toBeInTheDocument()
+    expect(route.getByText('≈ 25 %')).toBeInTheDocument()
 
     const job = card('Current Job')
     expect(job.getByText('Berlin')).toBeInTheDocument()
@@ -98,10 +99,6 @@ describe('dashboard with live telemetry', () => {
     expect(job.getByText('18,000 kg')).toBeInTheDocument()
     expect(job.getByText('€31,000')).toBeInTheDocument()
     expect(job.getByText('Today, 18:05')).toBeInTheDocument()
-
-    const route = card('Route Progress')
-    expect(route.getByText('≈ 25 %')).toBeInTheDocument()
-    expect(route.getByText('510 km remaining')).toBeInTheDocument()
 
     const environment = card('Environment')
     expect(environment.getByText('09:20')).toBeInTheDocument()
@@ -131,7 +128,8 @@ describe('dashboard with live telemetry', () => {
     expect(card('Vehicle Data').getAllByText('Not available')).toHaveLength(24)
     expect(card('Vehicle Data').getAllByText('Not provided by the telemetry')).toHaveLength(3)
     expect(card('Driving Dynamics').getAllByText('Not available')).toHaveLength(5)
-    expect(card('Navigation').getAllByText('Not available')).toHaveLength(3)
+    // Five route rows and the progress.
+    expect(card('Route Information').getAllByText('Not available')).toHaveLength(6)
     expect(card('Vehicle Position').getAllByText('Not available')).toHaveLength(6)
     expect(card('Current Job').getByText('Unavailable')).toBeInTheDocument()
     // No demo job is mixed into live data.

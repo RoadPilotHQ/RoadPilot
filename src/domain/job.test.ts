@@ -40,7 +40,6 @@ describe('jobView', () => {
     expect(j.read('currency')).toEqual({ kind: 'value', value: 'EUR' })
     expect(j.read('cargoLoaded')).toEqual({ kind: 'value', value: true })
     expect(j.read('timeToDeadlineMin')).toEqual({ kind: 'value', value: 125 })
-    expect(j.read('remainingKm')).toEqual({ kind: 'value', value: 510 })
   })
 
   it('reports no active job without any job values', () => {
@@ -49,11 +48,10 @@ describe('jobView', () => {
     expect(j.read('cargo')).toEqual({ kind: 'missing' })
   })
 
-  it('keeps a delivered job with its revenue and no route values', () => {
+  it('keeps a delivered job with its revenue', () => {
     const j = view(withJob({ state: 'delivered', deliveredRevenue: 32000 }))
     expect(j.status).toBe('delivered')
     expect(j.read('deliveredRevenue')).toEqual({ kind: 'value', value: 32000 })
-    expect(j.read('remainingKm')).toEqual({ kind: 'missing' })
   })
 
   it('keeps a cancelled job as cancelled, never as failed', () => {
@@ -167,7 +165,6 @@ describe('job wire paths and markets', () => {
       'job.sourceCity',
       'job.sourceCompany',
       'navigation.distanceM',
-      'navigation.timeS',
     ])
     expect(invalidJobFields(['job.cargoDamage', 'truck.gear'])).toEqual(['cargoDamagePercent'])
   })

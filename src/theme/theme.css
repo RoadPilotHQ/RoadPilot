@@ -223,7 +223,7 @@ button:focus-visible {
 /* Overview */
 .overview {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--gap);
 }
 
@@ -278,8 +278,7 @@ button:focus-visible {
   grid-template-columns: 1fr 1.15fr 1.25fr;
   grid-template-areas:
     'autopilot assist job'
-    'route route route'
-    'dynamics navigation environment'
+    'route dynamics environment'
     'position position position';
   gap: var(--gap);
 }
@@ -300,12 +299,9 @@ button:focus-visible {
   grid-area: dynamics;
 }
 .grid > :nth-child(6) {
-  grid-area: navigation;
-}
-.grid > :nth-child(7) {
   grid-area: environment;
 }
-.grid > :nth-child(8) {
+.grid > :nth-child(7) {
   grid-area: position;
 }
 
@@ -433,84 +429,8 @@ button:focus-visible {
   font-weight: 600;
 }
 
-/* Job + route */
-.job-route {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 700;
-  font-size: 15px;
-  margin-bottom: 12px;
-}
-
-.facts {
-  display: grid;
-  grid-template-columns: repeat(4, auto);
-  gap: 0;
-  margin: 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
-.facts > div {
-  padding: 0 12px;
-  border-left: 1px solid var(--border);
-}
-
-.facts > div:first-child {
-  padding-left: 0;
-  border-left: 0;
-}
-
-.facts dt {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.facts dd {
-  margin: 2px 0 0;
-  font-weight: 700;
-  font-size: 13px;
-}
-
-.route-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-}
-
-.route-head .card-title {
-  margin-bottom: 12px;
-}
-
 .route-percent {
   font-weight: 700;
-}
-
-.progress {
-  height: 10px;
-  border-radius: 999px;
-  background: #eadfce;
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--orange);
-}
-
-.route-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 14px;
-}
-
-.route-eta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 
 /* Smaller windows */
@@ -523,8 +443,7 @@ button:focus-visible {
     grid-template-areas:
       'autopilot assist'
       'job route'
-      'dynamics navigation'
-      'environment environment'
+      'dynamics environment'
       'position position';
   }
 }
@@ -545,10 +464,6 @@ button:focus-visible {
   }
   .grid > * {
     grid-area: auto !important;
-  }
-  .facts {
-    grid-template-columns: repeat(2, auto);
-    row-gap: 10px;
   }
 }
 
@@ -1094,4 +1009,53 @@ button:focus-visible {
   .job-arrow {
     transform: rotate(90deg);
   }
+}
+
+/* Route information (Route Advisor values and approximate calculations) */
+.route-info-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.route-info-head .card-title {
+  margin: 0;
+}
+
+.route-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.route-progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.route-progress-head .label {
+  flex: 1;
+}
+
+.route-info .row-value {
+  text-align: right;
+}
+
+.source-tag {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.source-game {
+  border-color: var(--orange-soft);
+  color: #8a4210;
+}
+
+.source-calculated {
+  border-style: dashed;
 }

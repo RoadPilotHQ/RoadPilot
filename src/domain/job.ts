@@ -71,8 +71,7 @@ export const JOB_INVALID_TARGETS: Readonly<Record<string, readonly JobField[]>> 
   'job.jobMarket': ['jobMarket'],
   'job.deliveredRevenue': ['deliveredRevenue'],
   'job.cancelPenalty': ['cancelPenalty'],
-  'navigation.distanceM': ['progressPercent', 'remainingKm'],
-  'navigation.timeS': ['remainingMinutes'],
+  'navigation.distanceM': ['progressPercent'],
 }
 
 export function invalidJobFields(wirePaths: readonly string[]): JobField[] {

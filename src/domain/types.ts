@@ -88,6 +88,8 @@ export interface TelemetryMeta {
   invalidVehicleFields: VehicleField[]
   /** Job values removed as invalid in this frame. */
   invalidJobFields: JobField[]
+  /** Route Advisor values removed as invalid in this frame. */
+  invalidNavigationFields: NavigationField[]
   /** Wire paths of all values removed as invalid, as reported by the telemetry reader. */
   invalidFields: string[]
 }
@@ -108,11 +110,14 @@ export interface DynamicsData {
 /** Route Advisor values as provided by the game. */
 export interface NavigationData {
   distanceKm: number | null
+  /** Route Advisor time estimate; whether it counts game or real time is not confirmed. */
   etaMinutes: number | null
   speedLimitKmh: number | null
   /** `false` when the game reports no speed limit. */
   speedLimitShown: boolean | null
 }
+
+export type NavigationField = keyof NavigationData
 
 export interface EnvironmentData {
   /** In-game clock time `HH:MM`. */
@@ -176,9 +181,6 @@ export interface JobData {
   deliveredRevenue: number | null
   /** Penalty of a cancelled job. */
   cancelPenalty: number | null
-  /** Route Advisor values while the job is active. */
-  remainingKm: number | null
-  remainingMinutes: number | null
 }
 
 export type JobField = Exclude<keyof JobData, 'state'>

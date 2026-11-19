@@ -49,8 +49,6 @@ export const en = {
   'overview.autopilot.inactive': 'Inactive',
   'overview.speed': 'Speed',
   'overview.speed.target': 'Target: {value} km/h',
-  'overview.job': 'Current Job',
-  'overview.remaining': 'Remaining',
 
   'unit.kmh': 'km/h',
   'unit.mph': 'mph',
@@ -200,12 +198,7 @@ export const en = {
   'dynamics.cruise': 'Cruise control',
   'dynamics.cruise.set': 'On · {value} km/h',
 
-  'navigation.title': 'Navigation',
-  'navigation.distance': 'Remaining distance',
-  'navigation.eta': 'Estimated arrival',
-  'navigation.speedLimit': 'Speed limit',
   'navigation.speedLimit.none': 'None shown',
-  'navigation.source': 'Values from the in-game Route Advisor.',
 
   'environment.title': 'Environment',
   'environment.gameTime': 'Game time',
@@ -251,9 +244,6 @@ export const en = {
   'job.income': 'Income',
   'job.deadline': 'Deadline',
   'job.route': '{origin} → {destination}',
-  'job.none': 'No active job',
-  'job.delivered': 'Job delivered',
-  'job.cancelled': 'Job cancelled',
   'job.revenue': 'Revenue',
   'job.deadline.today': 'Today, {time}',
   'job.deadline.tomorrow': 'Tomorrow, {time}',
@@ -283,12 +273,25 @@ export const en = {
   'job.market.external_market': 'External market',
   'job.localizedHint': 'Names as shown by the game.',
 
-  'route.title': 'Route Progress',
+  'route.title': 'Route Information',
+  'route.percent': '≈ {value} %',
+  'route.noActiveJob': 'No active job',
+  'route.source.game': 'Game',
+  'route.source.calculated': 'Calculated',
+  'route.source.gameHint': 'Reported by the game (in-game Route Advisor or job).',
+  'route.source.calculatedHint': 'Calculated by RoadPilot from game values. Approximate.',
+  'route.remainingDistance': 'Remaining distance',
+  'route.remainingTime': 'Remaining driving time',
+  'route.timeScaleHint':
+    'Route Advisor estimate. Whether it counts game time or real time is not confirmed.',
+  'route.speedLimit': 'Speed limit',
+  'route.jobDistance': 'Job distance',
+  'route.drivenDistance': 'Driven distance',
+  'route.note':
+    'Game values come from the in-game Route Advisor. Calculated values are approximate. RoadPilot plans no route and gives no directions.',
   'route.remaining': '{distance} remaining',
   'route.eta': '≈ {hours} h {minutes} min',
   'route.progress': 'Route progress',
-  'route.approximate':
-    'Approximate: calculated from the Route Advisor distance and the planned job distance',
 
   'page.driving.title': 'Driving',
   'page.settings.title': 'Settings',

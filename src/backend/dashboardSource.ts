@@ -1,11 +1,14 @@
 import type { TelemetryData, TelemetryUpdate } from '@/domain/telemetry'
 import { invalidJobFields } from '@/domain/job'
+import { invalidNavigationFields } from '@/domain/route'
 import { boundaryChecks, count, nonNegative } from '@/domain/reading'
 import type {
   DashboardSnapshot,
   DeadlineValue,
   JobData,
   JobField,
+  NavigationData,
+  NavigationField,
   VehicleData,
   VehicleField,
 } from '@/domain/types'
@@ -103,8 +106,6 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
     progressPercent: 48,
     deliveredRevenue: null,
     cancelPenalty: null,
-    remainingKm: 742,
-    remainingMinutes: 552,
   },
   dynamics: {
     accelerationMs2: 0.2,
@@ -173,7 +174,9 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
   const invalid = new Set(invalidVehicleFields(source.invalidFields))
   const vehicle = vehicleValues(v, invalid)
   const invalidJob = new Set(invalidJobFields(source.invalidFields))
-  const job = jobValues(j, n, invalidJob)
+  const job = jobValues(j, invalidJob)
+  const invalidNavigation = new Set(invalidNavigationFields(source.invalidFields))
+  const navigation = navigationValues(n, invalidNavigation)
   return {
     mode: 'live',
     connection: update.status,
@@ -186,6 +189,7 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
       receivedAtUnixMs: source.receivedAtUnixMs,
       invalidVehicleFields: [...invalid],
       invalidJobFields: [...invalidJob],
+      invalidNavigationFields: [...invalidNavigation],
       invalidFields: source.invalidFields,
     },
     lastFrameAtUnixMs: source.receivedAtUnixMs,
@@ -201,12 +205,7 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
       cruiseControl: v.cruiseControlOn,
       cruiseControlKmh: v.cruiseControlKmh,
     },
-    navigation: {
-      distanceKm: n.distanceKm,
-      etaMinutes: n.etaMin,
-      speedLimitKmh: n.speedLimitKmh,
-      speedLimitShown: n.speedLimitShown,
-    },
+    navigation,
     environment: { gameClock: e.gameClock, weather: null, rain: null },
     position: data.position,
     availability: AVAILABILITY,
@@ -232,8 +231,26 @@ const EMPTY_JOB: JobData = {
   progressPercent: null,
   deliveredRevenue: null,
   cancelPenalty: null,
-  remainingKm: null,
-  remainingMinutes: null,
+}
+
+/**
+ * Route Advisor values of one frame, checked like the vehicle values. A speed limit needs
+ * its "shown" flag: a limit without it, or a limit while none is shown, is invalid.
+ */
+function navigationValues(
+  n: TelemetryData['navigation'],
+  invalid: Set<NavigationField>,
+): NavigationData {
+  const { num, flag, reject } = boundaryChecks(invalid)
+  const shown = flag('speedLimitShown', n.speedLimitShown)
+  let limit = num('speedLimitKmh', n.speedLimitKmh, (v) => v > 0)
+  if (limit != null && shown !== true) limit = reject('speedLimitKmh')
+  return {
+    distanceKm: num('distanceKm', n.distanceKm, nonNegative),
+    etaMinutes: num('etaMinutes', n.etaMin, nonNegative),
+    speedLimitKmh: limit,
+    speedLimitShown: shown,
+  }
 }
 
 const isDeadline = (d: unknown): d is DeadlineValue =>
@@ -248,16 +265,11 @@ const isDeadline = (d: unknown): d is DeadlineValue =>
  * job information (`unknown`): nothing is shown as a job then. Without an active job the
  * game's job fields are not shown either.
  */
-function jobValues(
-  j: TelemetryData['job'],
-  n: TelemetryData['navigation'],
-  invalid: Set<JobField>,
-): JobData | null {
+function jobValues(j: TelemetryData['job'], invalid: Set<JobField>): JobData | null {
   if (j.state === 'unknown') return null
   if (j.state === 'none') return EMPTY_JOB
   const { num, flag, text, reject } = boundaryChecks(invalid)
   const amount = (field: JobField, value: unknown) => num(field, value, Number.isInteger)
-  const active = j.state === 'active'
   return {
     state: j.state,
     cargo: text('cargo', j.cargo),
@@ -277,10 +289,6 @@ function jobValues(
     progressPercent: num('progressPercent', j.progressPercent, (p) => p >= 0 && p <= 100),
     deliveredRevenue: amount('deliveredRevenue', j.deliveredRevenue),
     cancelPenalty: amount('cancelPenalty', j.cancelPenalty),
-    // Route Advisor values describe the current route, which is the job route only while
-    // a job is active.
-    remainingKm: active ? num('remainingKm', n.distanceKm, nonNegative) : null,
-    remainingMinutes: active ? num('remainingMinutes', n.etaMin, nonNegative) : null,
   }
 }
 

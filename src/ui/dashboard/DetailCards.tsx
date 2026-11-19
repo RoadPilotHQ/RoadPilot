@@ -1,6 +1,5 @@
 import {
   Activity,
-  CircleGauge,
   Clock,
   CloudRain,
   CloudSun,
@@ -9,13 +8,11 @@ import {
   MapPin,
   Navigation,
   OctagonMinus,
-  Timer,
 } from 'lucide-react'
 import { useDashboard } from '@/state/DashboardProvider'
 import { useI18n } from '@/i18n'
 import { SteeringWheel } from '../components/SteeringWheel'
 import { Card } from '../components/controls'
-import { formatDuration } from '../format'
 import { Row, useValueText } from './rows'
 
 const percent = (fraction: number) => Math.round(Math.abs(fraction) * 100)
@@ -71,46 +68,6 @@ export function DynamicsCard() {
           )}
         />
       </ul>
-    </Card>
-  )
-}
-
-export function NavigationCard() {
-  const { t, formatNumber } = useI18n()
-  const { navigation, mode } = useDashboard().snapshot
-  const show = useValueText(navigation !== null)
-
-  return (
-    <Card title={t('navigation.title')}>
-      <ul className="rows">
-        <Row
-          icon={<MapPin size={18} />}
-          label={t('navigation.distance')}
-          value={show(
-            navigation?.distanceKm,
-            (v) => `${formatNumber(Math.round(v))} ${t('unit.km')}`,
-          )}
-        />
-        <Row
-          icon={<Timer size={18} />}
-          label={t('navigation.eta')}
-          value={show(navigation?.etaMinutes, (v) => t('route.eta', formatDuration(v)))}
-        />
-        <Row
-          icon={<CircleGauge size={18} />}
-          label={t('navigation.speedLimit')}
-          value={show(navigation?.speedLimitShown, (shown) =>
-            shown && navigation?.speedLimitKmh != null
-              ? `${formatNumber(navigation.speedLimitKmh)} ${t('unit.kmh')}`
-              : t('navigation.speedLimit.none'),
-          )}
-        />
-      </ul>
-      {mode === 'live' ? (
-        <p className="note">
-          <Navigation size={12} aria-hidden /> {t('navigation.source')}
-        </p>
-      ) : null}
     </Card>
   )
 }

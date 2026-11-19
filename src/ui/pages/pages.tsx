@@ -4,14 +4,9 @@ import { Card } from '../components/controls'
 import { AssistanceCard } from '../dashboard/AssistanceCard'
 import { AutopilotCard } from '../dashboard/AutopilotCard'
 import { ControlCard } from '../dashboard/ControlCard'
-import {
-  DynamicsCard,
-  EnvironmentCard,
-  NavigationCard,
-  PositionCard,
-} from '../dashboard/DetailCards'
-import { RouteProgressCard } from '../dashboard/JobCards'
+import { DynamicsCard, EnvironmentCard, PositionCard } from '../dashboard/DetailCards'
 import { CurrentJob } from '../job/CurrentJob'
+import { RouteInfo } from '../route/RouteInfo'
 import { OverviewCards } from '../dashboard/OverviewCards'
 import { VehicleDashboard } from '../vehicle/VehicleDashboard'
 import type { PageId } from '../components/TopNav'
@@ -59,9 +54,8 @@ export function DashboardPage() {
         <AutopilotCard />
         <AssistanceCard />
         <CurrentJob />
-        <RouteProgressCard />
+        <RouteInfo />
         <DynamicsCard />
-        <NavigationCard />
         <EnvironmentCard />
         <PositionCard />
       </div>

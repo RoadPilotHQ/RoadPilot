@@ -28,6 +28,7 @@ const at = (receivedAtUnixMs: number) => ({
     receivedAtUnixMs,
     invalidVehicleFields: [],
     invalidJobFields: [],
+    invalidNavigationFields: [],
     invalidFields: [],
   },
 })

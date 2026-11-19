@@ -76,8 +76,6 @@ describe('snapshotFromTelemetry', () => {
       cargoMassKg: 18000,
       income: 31000,
       currency: 'EUR',
-      remainingKm: 510,
-      remainingMinutes: 400,
       progressPercent: 25,
     })
     expect(s.navigation).toEqual({
@@ -119,7 +117,6 @@ describe('snapshotFromTelemetry', () => {
     const job = snapshotFromTelemetry(update({ status: 'connected', data: delivered })).job
     expect(job?.state).toBe('delivered')
     expect(job?.deliveredRevenue).toBe(32000)
-    expect(job?.remainingKm).toBeNull()
 
     const unknown = fullData()
     unknown.job = emptyData().job

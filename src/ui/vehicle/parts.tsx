@@ -32,6 +32,7 @@ export function ValueRow({
   state = 'value',
   calculated = false,
   hint,
+  badge,
 }: {
   icon: ReactNode
   label: string
@@ -39,6 +40,8 @@ export function ValueRow({
   state?: ValueState
   calculated?: boolean
   hint?: string
+  /** Shown next to the label, e.g. where the value comes from. */
+  badge?: ReactNode
 }) {
   const { t } = useI18n()
   const title =
@@ -55,7 +58,10 @@ export function ValueRow({
       <span className="row-icon" aria-hidden>
         {icon}
       </span>
-      <span className="row-label">{label}</span>
+      <span className="row-label">
+        {label}
+        {badge}
+      </span>
       <span className={`row-value value-${state}`} title={title}>
         {value}
         {calculated && state === 'value' ? (
