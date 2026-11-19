@@ -138,15 +138,15 @@ Game detection looks for `eurotrucks2.exe` and `amtrucks.exe`. It only distingui
 
 ## Data quality
 
-| Kind                     | How RoadPilot handles it                                                                                                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Valid live data          | Shown while `connected`. Every update carries the frame's sequence, SDK simulation time and RoadPilot's receive time (`data.source`). |
-| Missing data             | `null`; shown as **Not available**. Never replaced by zero or a demo value.                                                           |
-| Invalid data             | Removed by the client (non-finite or outside plausibility bounds); listed in `data.source.invalidFields`; shown as **Not available**. |
-| Stale data               | Not shown: after 2 s without frames the state becomes `reconnecting` and all values are cleared.                                      |
-| Calculated data          | Derived by RoadPilot from game values; marked with `*` in the dashboard (see below).                                                  |
-| Unavailable from the SDK | Weather, rain, day/night, traffic, road information: shown as **Not provided by the game**.                                           |
-| Demo data                | Only when not connected, under the **Demo data** banner. Never mixed with live values.                                                |
+| Kind                     | How RoadPilot handles it                                                                                                                                                                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valid live data          | Shown while `connected`. Every update carries the frame's sequence, SDK simulation time and RoadPilot's receive time (`data.source`).                                                                                                                         |
+| Missing data             | `null`; shown as **Not available**. Never replaced by zero or a demo value.                                                                                                                                                                                   |
+| Invalid data             | Removed by the client (non-finite or outside plausibility bounds); listed in `data.source.invalidFields`; shown as **Not available**.                                                                                                                         |
+| Stale data               | Not shown: after 2 s without frames the state becomes `reconnecting` and all values are cleared. The vehicle section also stops showing values on its own when the newest frame is older than 3 s ([vehicle-dashboard.md](vehicle-dashboard.md#link-states)). |
+| Calculated data          | Derived by RoadPilot from game values; marked with `*` in the dashboard (see below).                                                                                                                                                                          |
+| Unavailable from the SDK | Weather, rain, day/night, traffic, road information: shown as **Not provided by the game**.                                                                                                                                                                   |
+| Demo data                | Only when not connected, under the **Demo data** banner. Never mixed with live values.                                                                                                                                                                        |
 
 ## Supported fields (schema 2)
 
