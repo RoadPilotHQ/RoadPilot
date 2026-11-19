@@ -8,7 +8,11 @@ import { App } from './App'
 
 const source = createDefaultSource()
 const controlSource = createDefaultControlSource()
-const mapSource = createDefaultMapSource()
+// Development only: `?syntheticMap` shows a generated test map in a plain browser.
+const mapSource =
+  import.meta.env.DEV && new URLSearchParams(window.location.search).has('syntheticMap')
+    ? (await import('@/dev/syntheticMap')).createSyntheticMapSource()
+    : createDefaultMapSource()
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Root element #root not found')

@@ -1078,11 +1078,6 @@ button:focus-visible {
   margin: 0;
 }
 
-.navigation-mode {
-  margin-left: auto;
-  min-width: 220px;
-}
-
 .navigation-stage {
   position: relative;
   flex: 1;
@@ -1192,10 +1187,6 @@ button:focus-visible {
 }
 
 @media (max-width: 720px) {
-  .navigation-mode {
-    margin-left: 0;
-    flex-basis: 100%;
-  }
   .navigation-stage {
     min-height: 280px;
   }
@@ -1294,4 +1285,104 @@ button:focus-visible {
   border: 1px solid var(--border);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+/* Road map view (real map geometry, display only) */
+.navigation-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.navigation-controls .segmented {
+  min-width: 200px;
+}
+
+.navigation-controls .segmented-option {
+  white-space: nowrap;
+}
+
+/* A plain surface: the grid of the traveled-path view would read like a placeholder map. */
+.navigation-stage-map {
+  background-color: #f8f1e6;
+  background-image: none;
+}
+
+.road-map {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.road-map:active {
+  cursor: grabbing;
+}
+
+.map-zoom {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.map-zoom-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgb(255 249 239 / 92%);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.map-zoom-button:hover {
+  border-color: var(--orange-soft);
+}
+
+.map-badges {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 52px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.legend-road {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 18px;
+  border-top: 3px solid;
+}
+
+.legend-line-dashed {
+  border-top-style: dashed;
+  border-top-width: 2px;
+}
+
+@media (max-width: 720px) {
+  .navigation-controls {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+  .navigation-controls .segmented {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
 }

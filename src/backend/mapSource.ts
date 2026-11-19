@@ -34,6 +34,8 @@ export interface MapSnapshot {
   available: boolean
   /** `null` until the backend has reported anything. */
   status: MapStatus | null
+  /** A synthetic test map (development only); always labelled as such. */
+  synthetic?: boolean
 }
 
 /** Why a tile is not available. */

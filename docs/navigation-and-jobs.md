@@ -49,6 +49,8 @@ RoadPilot **calculates no route and gives no directions**, and it derives **no a
 
 ## Navigation area (step 2.3)
 
+Since Phase 2.4C the area has two separate views: **Road map** (the real road network of a local RoadPilot-Map package, see [map.md](map.md)) and **Traveled path** (described here). The truck and its path are never drawn on the road map.
+
 `src/ui/navigation/NavigationArea.tsx` shows the **path the truck has traveled**, traced from telemetry positions. It is labelled "Traveled path · not a map": no roads, no map package, no route, no destination, and no claim of geographic accuracy.
 
 - **Recording** (`src/domain/path.ts`, `src/state/pathStore.ts`): every snapshot is offered to the trace, whatever is on screen. Only live, connected (or paused) frames with a position count; demo data, interrupted or stale links add nothing. A point is stored after at least 2 m of movement. A move of more than 1,000 m between two samples (ferry, train, teleport, new session) starts a new segment instead of drawing a line. Positions that are not finite or beyond ±10,000 km are skipped and counted.

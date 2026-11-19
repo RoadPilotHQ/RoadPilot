@@ -25,7 +25,9 @@ describe('map package selection', () => {
   it('starts without a package and never searches for one', async () => {
     const { fake } = setup()
     await flush()
-    expect(nav().getByText('No map package selected')).toBeInTheDocument()
+    expect(
+      nav().getByText('No map package selected', { selector: '.map-state' }),
+    ).toBeInTheDocument()
     // Only the empty selection for the default game: nothing was looked up.
     expect(fake.selections).toEqual([{ game: 'ets2', path: null, reload: false }])
   })
@@ -120,7 +122,7 @@ describe('map package selection', () => {
     ]
     for (const [status, text] of cases) {
       act(() => fake.emit(status))
-      expect(nav().getByText(text)).toBeInTheDocument()
+      expect(nav().getByText(text, { selector: '.map-state' })).toBeInTheDocument()
     }
     expect(screen.queryByText(/someone/, { selector: '.map-state' })).not.toBeInTheDocument()
   })
