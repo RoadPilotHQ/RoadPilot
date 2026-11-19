@@ -77,6 +77,13 @@ fn vehicle(t: &proto::TruckState, c: &proto::TruckConfig) -> Vehicle {
         oil_temperature_c: t.oil_temperature_c.map(round1),
         water_temperature_c: t.water_temperature_c.map(round1),
         battery_voltage_v: t.battery_voltage_v.map(round1),
+        oil_pressure_psi: t.oil_pressure_psi.map(round1),
+        brake_air_pressure_psi: t.brake_air_pressure_psi.map(round1),
+        brake_temperature_c: t.brake_temperature_c.map(round1),
+        odometer_km: t.odometer_km.map(round1),
+        rpm_limit: c.rpm_limit.map(f32::round),
+        forward_gears: c.forward_gears,
+        reverse_gears: c.reverse_gears,
         parking_brake: t.parking_brake,
         engine_brake: t.motor_brake,
         retarder_level: t.retarder_level,
@@ -293,6 +300,15 @@ mod tests {
         assert_eq!(v.cruise_control_on, Some(true));
         assert_eq!(v.cruise_control_kmh, Some(80.0)); // 22.222 m/s
         assert_eq!(v.retarder_steps, Some(3));
+        assert_eq!(v.oil_pressure_psi, Some(55.0));
+        assert_eq!(v.brake_air_pressure_psi, Some(120.0));
+        assert_eq!(v.brake_temperature_c, Some(45.0));
+        assert_eq!(v.odometer_km, Some(123_456.7));
+        assert_eq!(v.rpm_limit, Some(2500.0));
+        assert_eq!(v.forward_gears, Some(12));
+        assert_eq!(v.reverse_gears, Some(2));
+        assert_eq!(v.engine_brake, Some(true));
+        assert_eq!(v.displayed_gear, Some(11));
         assert_eq!(v.brand.as_deref(), Some("Scania"));
         assert_eq!(v.wheelbase_m, Some(3.0)); // front z -1.75, drive z 1.25
 
@@ -414,6 +430,10 @@ mod tests {
         assert_eq!(d.vehicle.cruise_control_kmh, None);
         assert_eq!(d.vehicle.speed_kmh, None);
         assert_eq!(d.vehicle.adblue_l, None);
+        assert_eq!(d.vehicle.odometer_km, None);
+        assert_eq!(d.vehicle.brake_air_pressure_psi, None);
+        assert_eq!(d.vehicle.rpm_limit, None);
+        assert_eq!(d.vehicle.forward_gears, None);
         assert!(d.position.is_none());
         assert_eq!(d.job.state, JobState::Unknown);
         assert_eq!(d.navigation, Navigation::default());

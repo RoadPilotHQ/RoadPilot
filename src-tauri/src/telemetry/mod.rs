@@ -13,3 +13,6 @@ pub mod process;
 pub mod status;
 pub mod visualization;
 pub mod visualization_stream;
+
+#[cfg(test)]
+mod dashboard_replay;

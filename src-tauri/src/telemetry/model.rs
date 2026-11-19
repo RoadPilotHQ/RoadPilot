@@ -126,6 +126,15 @@ pub struct Vehicle {
     /// Approximated by the game, not simulated.
     pub water_temperature_c: Option<f32>,
     pub battery_voltage_v: Option<f32>,
+    pub oil_pressure_psi: Option<f32>,
+    pub brake_air_pressure_psi: Option<f32>,
+    pub brake_temperature_c: Option<f32>,
+    /// Total distance driven by the truck, from the game's odometer.
+    pub odometer_km: Option<f32>,
+    /// Engine speed limit from the truck configuration.
+    pub rpm_limit: Option<f32>,
+    pub forward_gears: Option<u32>,
+    pub reverse_gears: Option<u32>,
     pub parking_brake: Option<bool>,
     pub engine_brake: Option<bool>,
     pub retarder_level: Option<u32>,
@@ -285,6 +294,21 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(json["data"]["vehicle"]["gear"], -1);
+        for key in [
+            "odometerKm",
+            "oilPressurePsi",
+            "brakeAirPressurePsi",
+            "brakeTemperatureC",
+            "rpmLimit",
+            "forwardGears",
+            "reverseGears",
+        ] {
+            assert_eq!(
+                json["data"]["vehicle"][key],
+                serde_json::Value::Null,
+                "{key}"
+            );
+        }
         assert_eq!(json["data"]["job"]["state"], "unknown");
         assert_eq!(json["data"]["position"], serde_json::Value::Null);
         assert_eq!(json["data"]["source"]["receivedAtUnixMs"], 0);

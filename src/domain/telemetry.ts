@@ -42,6 +42,15 @@ export interface TelemetryData {
     oilTemperatureC: number | null
     waterTemperatureC: number | null
     batteryVoltageV: number | null
+    oilPressurePsi: number | null
+    brakeAirPressurePsi: number | null
+    brakeTemperatureC: number | null
+    /** Game odometer, total distance driven by the truck. */
+    odometerKm: number | null
+    /** Engine speed limit from the truck configuration. */
+    rpmLimit: number | null
+    forwardGears: number | null
+    reverseGears: number | null
     parkingBrake: boolean | null
     engineBrake: boolean | null
     retarderLevel: number | null
@@ -50,6 +59,8 @@ export interface TelemetryData {
     cruiseControlKmh: number | null
     brand: string | null
     model: string | null
+    /** Calculated from the wheel geometry; not shown by the dashboard. */
+    wheelbaseM: number | null
   }
   dynamics: {
     longitudinalVelocityMs: number | null

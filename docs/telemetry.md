@@ -165,6 +165,10 @@ Field names in `TelemetryUpdate.data` (Rust `model.rs`, TypeScript `src/domain/t
 | `fuelConsumptionLPer100km`                                | l/100 km                               | SDK average l/km × 100 (ATS: mostly static per SDK)        |
 | `adblueL`, `adblueCapacityL`                              | litres                                 | SDK (not provided by ATS)                                  |
 | `oilTemperatureC`, `waterTemperatureC`, `batteryVoltageV` | °C, V                                  | SDK (loosely approximated by the game)                     |
+| `oilPressurePsi`, `brakeAirPressurePsi`                   | psi                                    | SDK                                                        |
+| `brakeTemperatureC`                                       | °C                                     | SDK (approximated by the game)                             |
+| `odometerKm`                                              | km                                     | SDK odometer                                               |
+| `rpmLimit`, `forwardGears`, `reverseGears`                | rpm, count                             | Truck configuration                                        |
 | `parkingBrake`, `engineBrake`                             | bool                                   | SDK                                                        |
 | `retarderLevel`, `retarderSteps`                          | step                                   | SDK channel / configuration                                |
 | `cruiseControlOn`                                         | bool                                   | **Calculated:** set speed > 0 (the SDK reports 0 when off) |
