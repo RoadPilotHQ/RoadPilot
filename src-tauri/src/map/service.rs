@@ -5,8 +5,10 @@
 //! overtaken by a newer request is discarded, so a slow ATS load can never appear while ETS2
 //! is selected.
 
+use super::display::LEVELS;
 use super::loader::{self, LoadFailure, LoadedMap};
 use super::status::{MapError, MapErrorCode, MapState, MapStatus};
+use super::tiles::{self, CACHE_BUDGET_BYTES, MAX_TILE_INDEX, TileCache, TileKey};
 use crate::telemetry::model::Game;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,7 +34,30 @@ struct Inner {
 
 struct Shared {
     inner: Mutex<Inner>,
+    /// Encoded tiles of the loaded map. Keyed by content id, cleared on every release.
+    tiles: Mutex<TileCache>,
     listener: Option<StatusListener>,
+}
+
+/// Why a tile was not delivered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileError {
+    /// No map is ready for that game.
+    NotReady,
+    /// The request names another package (an older one, or the other game's).
+    WrongMap,
+    /// Level or tile index out of range.
+    InvalidRequest,
+}
+
+impl TileError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NotReady => "not_ready",
+            Self::WrongMap => "wrong_map",
+            Self::InvalidRequest => "invalid_request",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -53,6 +78,7 @@ impl MapService {
                     #[cfg(test)]
                     worker: None,
                 }),
+                tiles: Mutex::new(TileCache::new(CACHE_BUDGET_BYTES)),
                 listener,
             }),
         }
@@ -69,8 +95,6 @@ impl MapService {
     }
 
     /// The loaded map, if it is ready and belongs to `game`.
-    // Read by the tile commands of step 2.4B; until then only by tests.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn loaded(&self, game: Game) -> Option<Arc<LoadedMap>> {
         let inner = self.lock();
         inner.loaded.clone().filter(|m| m.game == game)
@@ -96,6 +120,7 @@ impl MapService {
         // Release first: nothing of the previous selection stays in use.
         inner.generation += 1;
         inner.loaded = None;
+        self.clear_tiles();
         inner.request = request.clone();
         let generation = inner.generation;
         let Some(request) = request else {
@@ -128,6 +153,55 @@ impl MapService {
             }
         }
         status
+    }
+
+    fn clear_tiles(&self) {
+        self.shared
+            .tiles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
+    /// One encoded tile of the loaded map of `game`. The content id must name the loaded
+    /// package, so a request made for a previous package can never be answered with another.
+    pub fn tile(
+        &self,
+        game: Game,
+        content_id: u64,
+        level: u8,
+        x: i32,
+        z: i32,
+    ) -> Result<Arc<Vec<u8>>, TileError> {
+        if usize::from(level) >= LEVELS.len()
+            || x.abs() > MAX_TILE_INDEX
+            || z.abs() > MAX_TILE_INDEX
+        {
+            return Err(TileError::InvalidRequest);
+        }
+        let map = self.loaded(game).ok_or(TileError::NotReady)?;
+        if map.content_id != content_id {
+            return Err(TileError::WrongMap);
+        }
+        let key = TileKey {
+            content_id,
+            level,
+            x,
+            z,
+        };
+        // Encoding under the cache lock: two requests for one tile never encode it twice.
+        let mut cache = self.shared.tiles.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tile) = cache.get(&key) {
+            return Ok(tile);
+        }
+        let tile = Arc::new(tiles::encode(&map.display, content_id, level, x, z));
+        cache.insert(key, tile.clone());
+        Ok(tile)
+    }
+
+    #[cfg(test)]
+    fn cached_tiles(&self) -> usize {
+        self.shared.tiles.lock().unwrap().len()
     }
 
     /// Stores `status` with the next revision and notifies the listener, outside the lock.
@@ -175,6 +249,8 @@ impl MapService {
                     s.counts = Some(map.counts);
                     s.bounds = Some(map.bounds);
                     s.load_ms = Some(map.load_ms);
+                    s.tile_sizes = Some(LEVELS.iter().map(|l| l.tile_size).collect());
+                    s.skipped_roads = Some(map.display.skipped);
                     inner.loaded = Some(Arc::new(map));
                 }
                 Err(LoadFailure::GameMismatch { package_game }) => {
@@ -373,5 +449,61 @@ mod tests {
         assert_eq!(s.game, Some(Game::Ets2));
         assert_eq!(s.content_id, Some(format!("{:016x}", ets2.content_id())));
         assert!(service.loaded(Game::Ats).is_none());
+    }
+
+    #[test]
+    fn serves_tiles_of_the_loaded_map_only() {
+        let service = MapService::new(None);
+        let ats = package(Game::Ats);
+        assert_eq!(
+            service.tile(Game::Ats, ats.content_id(), 0, 0, 0),
+            Err(TileError::NotReady)
+        );
+        service.select(Some(Game::Ats), Some(ats.dir().into()), false);
+        let ready = service.wait();
+        assert_eq!(ready.skipped_roads, Some(0));
+        assert_eq!(
+            ready.tile_sizes.as_deref(),
+            Some(&[1024.0, 4096.0, 16384.0, 65536.0][..])
+        );
+        let tile = service.tile(Game::Ats, ats.content_id(), 0, 0, 0).unwrap();
+        assert_eq!(tiles::decode(&tile).unwrap().4.len(), 1);
+        assert_eq!(
+            service.tile(Game::Ets2, ats.content_id(), 0, 0, 0),
+            Err(TileError::NotReady)
+        );
+        assert_eq!(
+            service.tile(Game::Ats, ats.content_id() ^ 1, 0, 0, 0),
+            Err(TileError::WrongMap)
+        );
+        assert_eq!(
+            service.tile(Game::Ats, ats.content_id(), 4, 0, 0),
+            Err(TileError::InvalidRequest)
+        );
+        assert_eq!(
+            service.tile(Game::Ats, ats.content_id(), 0, MAX_TILE_INDEX + 1, 0),
+            Err(TileError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn repeated_requests_are_served_from_the_cache_and_cleared_on_switch() {
+        let service = MapService::new(None);
+        let ats = package(Game::Ats);
+        let ets2 = package(Game::Ets2);
+        service.select(Some(Game::Ats), Some(ats.dir().into()), false);
+        service.wait();
+        let a = service.tile(Game::Ats, ats.content_id(), 0, 0, 0).unwrap();
+        let b = service.tile(Game::Ats, ats.content_id(), 0, 0, 0).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "the second request is a cache hit");
+        assert_eq!(service.cached_tiles(), 1);
+        service.select(Some(Game::Ets2), Some(ets2.dir().into()), false);
+        assert_eq!(service.cached_tiles(), 0, "cleared at once");
+        service.wait();
+        assert_eq!(
+            service.tile(Game::Ats, ats.content_id(), 0, 0, 0),
+            Err(TileError::NotReady)
+        );
+        assert!(service.tile(Game::Ets2, ets2.content_id(), 0, 0, 0).is_ok());
     }
 }

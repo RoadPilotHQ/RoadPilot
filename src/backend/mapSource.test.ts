@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseMapStatus } from '@/domain/map'
 import { fakeMapBridge, READY_ATS } from '@/test/fakeMap'
+import { GOLDEN_REQUEST, GOLDEN_TILE_HEX, hexToBuffer } from '@/test/tileFixtures'
 import { createMapSource, unavailableMapSource } from './mapSource'
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
@@ -43,6 +44,46 @@ describe('map source', () => {
   })
 })
 
+describe('map tiles', () => {
+  it('decodes binary tiles and checks them against the request', async () => {
+    const fake = fakeMapBridge()
+    fake.bridge.tile = async () => hexToBuffer(GOLDEN_TILE_HEX)
+    const source = createMapSource(fake.bridge)
+    const ok = await source.fetchTile('ets2', GOLDEN_REQUEST)
+    expect('tile' in ok && ok.tile.roads.length).toBe(2)
+    // The same bytes for another tile are refused.
+    const other = await source.fetchTile('ets2', { ...GOLDEN_REQUEST, x: 5 })
+    expect(other).toEqual({ failure: 'malformed' })
+  })
+
+  it('accepts a byte array as well', async () => {
+    const fake = fakeMapBridge()
+    fake.bridge.tile = async () => new Uint8Array(hexToBuffer(GOLDEN_TILE_HEX))
+    const r = await createMapSource(fake.bridge).fetchTile('ets2', GOLDEN_REQUEST)
+    expect('tile' in r).toBe(true)
+  })
+
+  it('reports backend refusals and garbage without throwing', async () => {
+    const fake = fakeMapBridge()
+    const source = createMapSource(fake.bridge)
+    for (const code of ['not_ready', 'wrong_map', 'invalid_request'] as const) {
+      fake.bridge.tile = async () => {
+        throw code
+      }
+      expect(await source.fetchTile('ats', GOLDEN_REQUEST)).toEqual({ failure: code })
+    }
+    fake.bridge.tile = async () => {
+      throw new Error('ipc broken')
+    }
+    expect(await source.fetchTile('ats', GOLDEN_REQUEST)).toEqual({ failure: 'unavailable' })
+    fake.bridge.tile = async () => ({ json: 'not a tile' })
+    expect(await source.fetchTile('ats', GOLDEN_REQUEST)).toEqual({ failure: 'malformed' })
+    expect(await unavailableMapSource.fetchTile('ats', GOLDEN_REQUEST)).toEqual({
+      failure: 'unavailable',
+    })
+  })
+})
+
 describe('parseMapStatus', () => {
   const base = { state: 'none', revision: 1 }
 
@@ -50,6 +91,13 @@ describe('parseMapStatus', () => {
     const s = parseMapStatus({ ...READY_ATS, revision: 4 })
     expect(s?.state).toBe('ready')
     expect(s?.bounds).toEqual([-119599, -72101, 40644, 75090])
+  })
+
+  it('requires the tile sizes of a ready map', () => {
+    expect(parseMapStatus({ ...READY_ATS, revision: 1, tileSizes: null })).toBeNull()
+    expect(parseMapStatus({ ...READY_ATS, revision: 1 })?.tileSizes).toEqual([
+      1024, 4096, 16384, 65536,
+    ])
   })
 
   it('rejects a ready status without content id, bounds or game', () => {

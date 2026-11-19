@@ -1,12 +1,19 @@
 //! Loads one RoadPilot-Map package folder: manifest checks first (cheap), then the full,
-//! checksum-verified read with the reference reader of `roadpilot-map-package`.
+//! checksum-verified read with the reference reader of `roadpilot-map-package`
+//! (`verify_files` and `read_geometry`).
 //!
 //! The package stays the source of truth. Nothing is written, cached on disk or sent
 //! anywhere; the raw records are dropped as soon as the display data is prepared.
 
+use super::display::{self, DisplayMap};
 use super::status::{LoadPhase, MapCounts, MapError, MapErrorCode, content_id_hex};
 use crate::telemetry::model::Game;
-use roadpilot_map_package::{ManifestError, MapPackage, PackageError, read_manifest};
+use roadpilot_map_package::{
+    GEOMETRY_FORMAT_NAME, GeometryData, LanesRecord, Manifest, ManifestError, PackageError,
+    read_geometry, read_manifest, verify_files,
+};
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::time::Instant;
 
@@ -36,6 +43,8 @@ pub struct LoadedMap {
     /// `[min_x, min_z, max_x, max_z]` of the nodes, map world units.
     pub bounds: [f64; 4],
     pub load_ms: u64,
+    /// Simplified geometry per level of detail; the only map data kept in memory.
+    pub display: DisplayMap,
 }
 
 impl LoadedMap {
@@ -103,7 +112,7 @@ pub fn describe(error: &PackageError) -> LoadFailure {
 }
 
 /// Reads the manifest only and checks schema version and game. Fast; no data file is read.
-pub fn check_manifest(dir: &Path, game: Game) -> Result<(u64, String), LoadFailure> {
+pub fn check_manifest(dir: &Path, game: Game) -> Result<Manifest, LoadFailure> {
     if !dir.is_dir() {
         return Err(failed(MapErrorCode::NotFound, "the folder does not exist"));
     }
@@ -118,10 +127,60 @@ pub fn check_manifest(dir: &Path, game: Game) -> Result<(u64, String), LoadFailu
             package_game: manifest.game,
         });
     }
-    Ok((
-        manifest.content_id(),
-        format!("{}.{}", manifest.schema_major, manifest.schema_minor),
-    ))
+    Ok(manifest)
+}
+
+/// Verifies and reads the geometry with the reference reader, with the same checks as
+/// `MapPackage::open` except its spatial index, which RoadPilot does not use (it keeps its own
+/// tile grid and drops the records): every listed file against size and checksum, the geometry
+/// file (format, header, order, references, footer) and the record counts of the manifest.
+fn read_verified(dir: &Path, manifest: &Manifest) -> Result<GeometryData, PackageError> {
+    verify_files(dir, manifest)?;
+    let entry = manifest.file("geometry").ok_or_else(|| {
+        PackageError::Inconsistent("the manifest lists no geometry file".to_owned())
+    })?;
+    if entry.format != GEOMETRY_FORMAT_NAME {
+        return Err(PackageError::FileMismatch {
+            name: entry.name.clone(),
+            reason: format!("has format {:?}", entry.format),
+        });
+    }
+    let file = File::open(dir.join(&entry.name)).map_err(|e| PackageError::FileMismatch {
+        name: entry.name.clone(),
+        reason: format!("cannot be opened ({:?})", e.kind()),
+    })?;
+    let data = read_geometry(BufReader::new(file), Some(manifest.length_tolerance))
+        .map_err(PackageError::Geometry)?;
+    let lanes: u64 = data
+        .roads
+        .iter()
+        .map(|r| match &r.lanes {
+            LanesRecord::Resolved(l) => l.len() as u64,
+            LanesRecord::Unresolved(_) => 0,
+        })
+        .sum();
+    for (name, declared, found) in [
+        ("nodes", manifest.counts.nodes, data.nodes.len() as u64),
+        ("roads", manifest.counts.roads, data.roads.len() as u64),
+        ("lanes", manifest.counts.lanes, lanes),
+        (
+            "junctions",
+            manifest.counts.junctions,
+            data.junctions.len() as u64,
+        ),
+        (
+            "connections",
+            manifest.counts.connections,
+            data.connections.len() as u64,
+        ),
+    ] {
+        if declared != found {
+            return Err(PackageError::Inconsistent(format!(
+                "{name}: the manifest says {declared}, the geometry file has {found}"
+            )));
+        }
+    }
+    Ok(data)
 }
 
 /// Loads and validates a package for `game`. `phase` reports progress; the call blocks, so it
@@ -129,21 +188,14 @@ pub fn check_manifest(dir: &Path, game: Game) -> Result<(u64, String), LoadFailu
 pub fn load(dir: &Path, game: Game, phase: &dyn Fn(LoadPhase)) -> Result<LoadedMap, LoadFailure> {
     let started = Instant::now();
     phase(LoadPhase::Manifest);
-    let (content_id, schema) = check_manifest(dir, game)?;
+    let manifest = check_manifest(dir, game)?;
+    let content_id = manifest.content_id();
+    let schema = format!("{}.{}", manifest.schema_major, manifest.schema_minor);
 
     phase(LoadPhase::Reading);
-    // Verifies size and checksum of every listed file, reads and validates the geometry,
-    // compares the counts and builds the reference spatial index.
-    let package = MapPackage::open(dir).map_err(|e| describe(&e))?;
-    if package.manifest().content_id() != content_id || package.manifest().game != game_name(game) {
-        return Err(failed(
-            MapErrorCode::Inconsistent,
-            "the package changed while it was being loaded",
-        ));
-    }
+    let data = read_verified(dir, &manifest).map_err(|e| describe(&e))?;
 
     phase(LoadPhase::Preparing);
-    let data = package.data();
     let mut bounds = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
     for node in &data.nodes {
         let x = f64::from(node.position[0]) / 256.0;
@@ -166,8 +218,12 @@ pub fn load(dir: &Path, game: Game, phase: &dyn Fn(LoadPhase)) -> Result<LoadedM
         roads: data.roads.len() as u64,
         junctions: data.junctions.len() as u64,
     };
-    // The raw records are released here.
-    drop(package);
+    let display = display::build(&data);
+    if display.levels[0].roads.is_empty() {
+        return Err(failed(MapErrorCode::Unusable, "no road can be drawn"));
+    }
+    // The raw records are released here; only the display data stays.
+    drop(data);
     Ok(LoadedMap {
         game,
         content_id,
@@ -175,6 +231,7 @@ pub fn load(dir: &Path, game: Game, phase: &dyn Fn(LoadPhase)) -> Result<LoadedM
         counts,
         bounds,
         load_ms: started.elapsed().as_millis() as u64,
+        display,
     })
 }
 
@@ -304,6 +361,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_counts_that_disagree_with_the_manifest() {
+        let pkg = TestPackage::new("ats")
+            .road(straight(1, (0.0, 0.0), (50.0, 0.0)))
+            .write();
+        let path = pkg.dir().join("manifest.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"roads\":1,"));
+        std::fs::write(&path, text.replacen("\"roads\":1,", "\"roads\":2,", 1)).unwrap();
+        let (c, detail) = code(load(pkg.dir(), Game::Ats, &|_| {}).unwrap_err());
+        assert_eq!(c, MapErrorCode::Inconsistent);
+        assert!(detail.starts_with("roads:"), "{detail}");
+    }
+
+    #[test]
     fn rejects_a_geometry_file_without_footer_even_with_a_matching_checksum() {
         let pkg = TestPackage::new("ats")
             .road(straight(1, (0.0, 0.0), (50.0, 0.0)))
@@ -342,6 +413,55 @@ mod tests {
                 map.counts.junctions,
                 map.load_ms
             );
+            for (i, level) in map.display.levels.iter().enumerate() {
+                let largest = level.tiles.keys().map(|(x, z)| {
+                    crate::map::tiles::encode(&map.display, map.content_id, i as u8, *x, *z).len()
+                });
+                println!(
+                    "  level {i}: {} roads, {} points, {} tiles, largest tile {} bytes",
+                    level.roads.len(),
+                    level.points,
+                    level.tiles.len(),
+                    largest.max().unwrap_or(0)
+                );
+            }
+            // A viewport of 8 × 6 tiles around the middle of the map, encoded cold, per level.
+            let (cx, cz) = (
+                (map.bounds[0] + map.bounds[2]) / 2.0,
+                (map.bounds[1] + map.bounds[3]) / 2.0,
+            );
+            for (i, spec) in crate::map::display::LEVELS.iter().enumerate() {
+                let (tx, tz) = (
+                    (cx / spec.tile_size).floor() as i32,
+                    (cz / spec.tile_size).floor() as i32,
+                );
+                let started = std::time::Instant::now();
+                let mut bytes = 0;
+                for x in tx - 4..tx + 4 {
+                    for z in tz - 3..tz + 3 {
+                        bytes +=
+                            crate::map::tiles::encode(&map.display, map.content_id, i as u8, x, z)
+                                .len();
+                    }
+                }
+                println!(
+                    "  level {i}: 48 tiles encoded in {:.2} ms, {} KiB",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    bytes / 1024
+                );
+            }
+            println!(
+                "  display data about {} MiB, {} roads skipped",
+                map.display.heap_bytes() / (1024 * 1024),
+                map.display.skipped
+            );
+            // Lets an outside tool sample the steady memory while the map is held.
+            if let Some(ms) = std::env::var_os("ROADPILOT_MAP_HOLD_MS")
+                .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
+            {
+                println!("  holding the loaded map for {ms} ms");
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             let other = match game {
                 Game::Ats => Game::Ets2,
                 Game::Ets2 => Game::Ats,

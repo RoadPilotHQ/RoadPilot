@@ -9,11 +9,13 @@
 //! not placed on the map: whether telemetry and map coordinates agree is only partly verified
 //! (see docs/map.md).
 
+pub mod display;
 pub mod loader;
 pub mod service;
 pub mod status;
 #[cfg(test)]
 pub mod testkit;
+pub mod tiles;
 
 use crate::telemetry::model::Game;
 use service::MapService;
@@ -54,6 +56,26 @@ pub fn map_select(
     Ok(state
         .0
         .select(game, parse_dir(path.as_deref()), reload.unwrap_or(false)))
+}
+
+/// One map tile as binary data (format: `tiles.rs`). Errors are short codes: `not_ready`,
+/// `wrong_map`, `invalid_request`.
+#[tauri::command]
+pub fn map_tile(
+    state: tauri::State<'_, MapServiceState>,
+    game: String,
+    content_id: String,
+    level: u8,
+    x: i32,
+    z: i32,
+) -> Result<tauri::ipc::Response, String> {
+    let game = parse_game(Some(&game))?.ok_or("unknown game")?;
+    let content_id = u64::from_str_radix(&content_id, 16).map_err(|_| "invalid_request")?;
+    state
+        .0
+        .tile(game, content_id, level, x, z)
+        .map(|tile| tauri::ipc::Response::new(tile.as_ref().clone()))
+        .map_err(|e| e.code().to_owned())
 }
 
 #[tauri::command]

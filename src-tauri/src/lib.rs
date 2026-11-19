@@ -58,6 +58,7 @@ fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R
         control_app::control_reset_fault,
         map::map_select,
         map::map_status,
+        map::map_tile,
     ])
 }
 
@@ -259,6 +260,62 @@ mod tests {
         assert_eq!(selected["state"], "none");
         assert_eq!(selected["game"], "ats");
         assert!(invoke(&webview, "map_select", json!({ "game": "ets3" })).is_err());
+        let tile = invoke(
+            &webview,
+            "map_tile",
+            json!({ "game": "ats", "contentId": "00000000000000ab", "level": 0, "x": 0, "z": 0 }),
+        );
+        assert_eq!(tile, Err(json!("not_ready")));
+        shutdown(&app);
+    }
+
+    #[test]
+    fn map_tiles_arrive_as_binary_data() {
+        use crate::map::testkit::{Road, TestPackage};
+        let (app, webview) = app();
+        let pkg = TestPackage::new("ats")
+            .road(Road::straight(
+                1,
+                (10.0, 10.0),
+                (90.0, 10.0),
+                "traffic_lane.road.local",
+            ))
+            .write();
+        let service = &app.state::<map::MapServiceState>().0;
+        service.select(
+            Some(telemetry::model::Game::Ats),
+            Some(pkg.dir().into()),
+            false,
+        );
+        assert_eq!(service.wait().state, map::status::MapState::Ready);
+        let response = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "map_tile".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: if cfg!(windows) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .unwrap(),
+                body: InvokeBody::Json(json!({
+                    "game": "ats",
+                    "contentId": format!("{:016x}", pkg.content_id()),
+                    "level": 0, "x": 0, "z": 0
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .unwrap();
+        let tauri::ipc::InvokeResponseBody::Raw(bytes) = response else {
+            panic!("a tile must be binary, not JSON");
+        };
+        assert_eq!(&bytes[0..4], b"RPMT");
+        assert_eq!(map::tiles::decode(&bytes).unwrap().4.len(), 1);
         shutdown(&app);
     }
 

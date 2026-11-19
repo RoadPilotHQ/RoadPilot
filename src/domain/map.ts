@@ -45,6 +45,10 @@ export interface MapStatus {
   bounds: [number, number, number, number] | null
   error: { code: MapErrorCode | string; detail: string } | null
   loadMs: number | null
+  /** Tile edge length per level of detail (map world units), once ready. */
+  tileSizes: number[] | null
+  /** Roads that cannot be drawn (missing nodes, non-finite geometry). */
+  skippedRoads: number | null
   revision: number
 }
 
@@ -77,7 +81,11 @@ export function parseMapStatus(raw: unknown): MapStatus | null {
       : null
   const contentId =
     typeof raw.contentId === 'string' && /^[0-9a-f]{16}$/.test(raw.contentId) ? raw.contentId : null
-  if (state === 'ready' && (!contentId || !bounds || !isGame(raw.game))) return null
+  if (
+    state === 'ready' &&
+    (!contentId || !bounds || !isGame(raw.game) || !Array.isArray(raw.tileSizes))
+  )
+    return null
   return {
     state,
     game: isGame(raw.game) ? raw.game : null,
@@ -92,6 +100,13 @@ export function parseMapStatus(raw: unknown): MapStatus | null {
     bounds,
     error,
     loadMs: finite(raw.loadMs) ? raw.loadMs : null,
+    skippedRoads: finite(raw.skippedRoads) ? raw.skippedRoads : null,
+    tileSizes:
+      Array.isArray(raw.tileSizes) &&
+      raw.tileSizes.length > 0 &&
+      raw.tileSizes.every((v) => finite(v) && v > 0)
+        ? (raw.tileSizes as number[])
+        : null,
     revision: raw.revision,
   }
 }

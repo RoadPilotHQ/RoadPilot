@@ -89,6 +89,10 @@ pub struct MapStatus {
     pub error: Option<MapError>,
     /// How long verifying, reading and preparing took.
     pub load_ms: Option<u64>,
+    /// Tile edge length per level of detail (world units), once ready.
+    pub tile_sizes: Option<Vec<f64>>,
+    /// Roads that cannot be drawn (missing nodes, non-finite geometry), once ready.
+    pub skipped_roads: Option<u32>,
     /// Increases with every change, so the frontend can order updates.
     pub revision: u64,
 }
@@ -106,6 +110,8 @@ impl MapStatus {
             bounds: None,
             error: None,
             load_ms: None,
+            tile_sizes: None,
+            skipped_roads: None,
             revision,
         }
     }
