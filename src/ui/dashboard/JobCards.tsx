@@ -1,86 +1,8 @@
-import { Clock, Truck } from 'lucide-react'
-import type { DeadlineValue, JobData } from '@/domain/types'
+import { Clock } from 'lucide-react'
 import { useDashboard } from '@/state/DashboardProvider'
 import { useI18n } from '@/i18n'
 import { Card } from '../components/controls'
-import { clampPercent, formatCurrency, formatDuration } from '../format'
-
-function useDeadlineText() {
-  const { t } = useI18n()
-  return (deadline: DeadlineValue): string => {
-    if (deadline.dayOffset <= 0) return t('job.deadline.today', { time: deadline.time })
-    if (deadline.dayOffset === 1) return t('job.deadline.tomorrow', { time: deadline.time })
-    return t('job.deadline.inDays', { days: deadline.dayOffset, time: deadline.time })
-  }
-}
-
-/** Text for a job without details: none, delivered, cancelled, or unknown. */
-function useJobStatusText() {
-  const { t } = useI18n()
-  const { mode } = useDashboard().snapshot
-  return (job: JobData | null): string => {
-    if (!job) return mode === 'live' ? t('common.unavailable') : t('job.none')
-    if (job.state === 'delivered') return t('job.delivered')
-    if (job.state === 'cancelled') return t('job.cancelled')
-    return t('job.none')
-  }
-}
-
-export function CurrentJobCard() {
-  const { t, formatNumber, locale } = useI18n()
-  const { job } = useDashboard().snapshot
-  const deadlineText = useDeadlineText()
-  const statusText = useJobStatusText()
-  const unavailable = t('common.unavailable')
-  const money = (value: number | null) =>
-    value != null && job?.currency ? formatCurrency(value, job.currency, locale) : unavailable
-
-  if (!job || job.state === 'none') {
-    return (
-      <Card title={t('job.title')} className="job-card">
-        <p className="note">{statusText(job)}</p>
-      </Card>
-    )
-  }
-
-  const finished = job.state === 'delivered' || job.state === 'cancelled'
-  return (
-    <Card title={t('job.title')} className="job-card">
-      <div className="job-route">
-        <Truck size={18} className="icon-orange" aria-hidden />
-        {t('job.route', {
-          origin: job.origin ?? unavailable,
-          destination: job.destination ?? unavailable,
-        })}
-        {finished ? <span className="tag">{statusText(job)}</span> : null}
-      </div>
-      <dl className="facts">
-        <div>
-          <dt>{t('job.cargo')}</dt>
-          <dd>{job.cargo ?? unavailable}</dd>
-        </div>
-        <div>
-          <dt>{t('job.weight')}</dt>
-          <dd>
-            {job.weightKg != null
-              ? `${formatNumber(Math.round(job.weightKg))} ${t('unit.kg')}`
-              : unavailable}
-          </dd>
-        </div>
-        <div>
-          <dt>{job.state === 'delivered' ? t('job.revenue') : t('job.income')}</dt>
-          <dd>
-            {money(job.state === 'delivered' && job.revenue != null ? job.revenue : job.income)}
-          </dd>
-        </div>
-        <div>
-          <dt>{t('job.deadline')}</dt>
-          <dd>{job.deadline ? deadlineText(job.deadline) : unavailable}</dd>
-        </div>
-      </dl>
-    </Card>
-  )
-}
+import { clampPercent, formatDuration } from '../format'
 
 export function RouteProgressCard() {
   const { t, formatNumber } = useI18n()

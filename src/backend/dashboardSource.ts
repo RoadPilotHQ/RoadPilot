@@ -1,5 +1,14 @@
 import type { TelemetryData, TelemetryUpdate } from '@/domain/telemetry'
-import type { DashboardSnapshot, JobData, VehicleData, VehicleField } from '@/domain/types'
+import { invalidJobFields } from '@/domain/job'
+import { boundaryChecks, count, nonNegative } from '@/domain/reading'
+import type {
+  DashboardSnapshot,
+  DeadlineValue,
+  JobData,
+  JobField,
+  VehicleData,
+  VehicleField,
+} from '@/domain/types'
 import { invalidVehicleFields } from '@/domain/vehicle'
 
 /**
@@ -78,16 +87,24 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
   job: {
     state: 'active',
     cargo: 'Electronics',
-    weightKg: 12400,
+    cargoMassKg: 12400,
+    cargoDamagePercent: 0.8,
+    cargoLoaded: true,
+    jobMarket: 'freight_market',
+    sourceCity: 'Hamburg',
+    sourceCompany: 'Port terminal',
+    destinationCity: 'Praha',
+    destinationCompany: 'Distribution centre',
     income: 24360,
     currency: 'EUR',
-    origin: 'Hamburg',
-    destination: 'Praha',
     deadline: { dayOffset: 1, time: '14:32' },
+    timeToDeadlineMin: 1752,
+    plannedDistanceKm: 1427,
+    progressPercent: 48,
+    deliveredRevenue: null,
+    cancelPenalty: null,
     remainingKm: 742,
     remainingMinutes: 552,
-    progressPercent: 48,
-    revenue: null,
   },
   dynamics: {
     accelerationMs2: 0.2,
@@ -109,22 +126,7 @@ export const DEMO_SNAPSHOT: DashboardSnapshot = {
  * a fractional gear or a percentage outside 0–100 is reported as invalid, never shown.
  */
 function vehicleValues(v: TelemetryData['vehicle'], invalid: Set<VehicleField>): VehicleData {
-  const reject = (field: VehicleField) => {
-    invalid.add(field)
-    return null
-  }
-  const num = (field: VehicleField, value: unknown, ok: (n: number) => boolean = () => true) =>
-    value == null
-      ? null
-      : typeof value === 'number' && Number.isFinite(value) && ok(value)
-        ? value
-        : reject(field)
-  const nonNegative = (n: number) => n >= 0
-  const count = (n: number) => Number.isInteger(n) && n >= 0
-  const flag = (field: VehicleField, value: unknown) =>
-    value == null ? null : typeof value === 'boolean' ? value : reject(field)
-  const text = (field: VehicleField, value: unknown) =>
-    value == null ? null : typeof value === 'string' ? value : reject(field)
+  const { num, flag, text } = boundaryChecks(invalid)
   return {
     brand: text('brand', v.brand),
     model: text('model', v.model),
@@ -168,9 +170,10 @@ function vehicleValues(v: TelemetryData['vehicle'], invalid: Set<VehicleField>):
 /** Live view of one telemetry frame. Missing values stay `null`; nothing is filled in. */
 function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSnapshot {
   const { vehicle: v, dynamics: d, job: j, navigation: n, environment: e, source } = data
-  const jobKnown = j.state !== 'unknown' && j.state !== 'none'
   const invalid = new Set(invalidVehicleFields(source.invalidFields))
   const vehicle = vehicleValues(v, invalid)
+  const invalidJob = new Set(invalidJobFields(source.invalidFields))
+  const job = jobValues(j, n, invalidJob)
   return {
     mode: 'live',
     connection: update.status,
@@ -182,32 +185,14 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
       sequence: source.sequence,
       receivedAtUnixMs: source.receivedAtUnixMs,
       invalidVehicleFields: [...invalid],
+      invalidJobFields: [...invalidJob],
       invalidFields: source.invalidFields,
     },
     lastFrameAtUnixMs: source.receivedAtUnixMs,
     error: null,
     autopilotActive: false,
     vehicle,
-    job: jobKnown
-      ? {
-          state: j.state,
-          cargo: j.cargo,
-          weightKg: j.cargoMassKg,
-          income: j.income,
-          currency: j.currency,
-          origin: j.sourceCity,
-          destination: j.destinationCity,
-          deadline: j.deadline,
-          // Route Advisor values describe the current route, which is the job route
-          // only while a job is active.
-          remainingKm: j.state === 'active' ? n.distanceKm : null,
-          remainingMinutes: j.state === 'active' ? n.etaMin : null,
-          progressPercent: j.progressPercent,
-          revenue: j.deliveredRevenue,
-        }
-      : j.state === 'none'
-        ? { ...EMPTY_JOB, state: 'none' }
-        : null,
+    job,
     dynamics: {
       accelerationMs2: d.longitudinalAccelerationMs2,
       throttle: d.throttleInput,
@@ -231,16 +216,72 @@ function liveSnapshot(update: TelemetryUpdate, data: TelemetryData): DashboardSn
 const EMPTY_JOB: JobData = {
   state: 'none',
   cargo: null,
-  weightKg: null,
+  cargoMassKg: null,
+  cargoDamagePercent: null,
+  cargoLoaded: null,
+  jobMarket: null,
+  sourceCity: null,
+  sourceCompany: null,
+  destinationCity: null,
+  destinationCompany: null,
   income: null,
   currency: null,
-  origin: null,
-  destination: null,
   deadline: null,
+  timeToDeadlineMin: null,
+  plannedDistanceKm: null,
+  progressPercent: null,
+  deliveredRevenue: null,
+  cancelPenalty: null,
   remainingKm: null,
   remainingMinutes: null,
-  progressPercent: null,
-  revenue: null,
+}
+
+const isDeadline = (d: unknown): d is DeadlineValue =>
+  typeof d === 'object' &&
+  d !== null &&
+  Number.isInteger((d as DeadlineValue).dayOffset) &&
+  typeof (d as DeadlineValue).time === 'string' &&
+  /^\d{2}:\d{2}$/.test((d as DeadlineValue).time)
+
+/**
+ * Job values of one frame, checked like the vehicle values. `null` when the telemetry has no
+ * job information (`unknown`): nothing is shown as a job then. Without an active job the
+ * game's job fields are not shown either.
+ */
+function jobValues(
+  j: TelemetryData['job'],
+  n: TelemetryData['navigation'],
+  invalid: Set<JobField>,
+): JobData | null {
+  if (j.state === 'unknown') return null
+  if (j.state === 'none') return EMPTY_JOB
+  const { num, flag, text, reject } = boundaryChecks(invalid)
+  const amount = (field: JobField, value: unknown) => num(field, value, Number.isInteger)
+  const active = j.state === 'active'
+  return {
+    state: j.state,
+    cargo: text('cargo', j.cargo),
+    cargoMassKg: num('cargoMassKg', j.cargoMassKg, nonNegative),
+    cargoDamagePercent: num('cargoDamagePercent', j.cargoDamagePercent, (p) => p >= 0 && p <= 100),
+    cargoLoaded: flag('cargoLoaded', j.cargoLoaded),
+    jobMarket: text('jobMarket', j.jobMarket),
+    sourceCity: text('sourceCity', j.sourceCity),
+    sourceCompany: text('sourceCompany', j.sourceCompany),
+    destinationCity: text('destinationCity', j.destinationCity),
+    destinationCompany: text('destinationCompany', j.destinationCompany),
+    income: num('income', j.income, count),
+    currency: text('currency', j.currency),
+    deadline: j.deadline == null ? null : isDeadline(j.deadline) ? j.deadline : reject('deadline'),
+    timeToDeadlineMin: num('timeToDeadlineMin', j.timeToDeadlineMin, Number.isInteger),
+    plannedDistanceKm: num('plannedDistanceKm', j.plannedDistanceKm, nonNegative),
+    progressPercent: num('progressPercent', j.progressPercent, (p) => p >= 0 && p <= 100),
+    deliveredRevenue: amount('deliveredRevenue', j.deliveredRevenue),
+    cancelPenalty: amount('cancelPenalty', j.cancelPenalty),
+    // Route Advisor values describe the current route, which is the job route only while
+    // a job is active.
+    remainingKm: active ? num('remainingKm', n.distanceKm, nonNegative) : null,
+    remainingMinutes: active ? num('remainingMinutes', n.etaMin, nonNegative) : null,
+  }
 }
 
 /**

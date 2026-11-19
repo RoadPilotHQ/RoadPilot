@@ -10,7 +10,8 @@ import {
   NavigationCard,
   PositionCard,
 } from '../dashboard/DetailCards'
-import { CurrentJobCard, RouteProgressCard } from '../dashboard/JobCards'
+import { RouteProgressCard } from '../dashboard/JobCards'
+import { CurrentJob } from '../job/CurrentJob'
 import { OverviewCards } from '../dashboard/OverviewCards'
 import { VehicleDashboard } from '../vehicle/VehicleDashboard'
 import type { PageId } from '../components/TopNav'
@@ -57,7 +58,7 @@ export function DashboardPage() {
       <div className="grid">
         <AutopilotCard />
         <AssistanceCard />
-        <CurrentJobCard />
+        <CurrentJob />
         <RouteProgressCard />
         <DynamicsCard />
         <NavigationCard />

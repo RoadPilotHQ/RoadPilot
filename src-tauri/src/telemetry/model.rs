@@ -219,6 +219,8 @@ pub struct Job {
     pub cargo: Option<String>,
     pub cargo_mass_kg: Option<f32>,
     pub cargo_damage_percent: Option<f32>,
+    /// The cargo is loaded on the trailer.
+    pub cargo_loaded: Option<bool>,
     pub source_city: Option<String>,
     pub source_company: Option<String>,
     pub destination_city: Option<String>,
@@ -234,6 +236,8 @@ pub struct Job {
     pub progress_percent: Option<f32>,
     pub delivered_revenue: Option<i64>,
     pub cancel_penalty: Option<i64>,
+    /// Game job market token as sent by the game, for example `freight_market`.
+    pub job_market: Option<String>,
 }
 
 /// Calculated from the absolute deadline and the current game time.

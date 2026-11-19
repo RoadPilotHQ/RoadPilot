@@ -71,9 +71,9 @@ describe('snapshotFromTelemetry', () => {
     expect(s.job).toMatchObject({
       state: 'active',
       cargo: 'Machinery',
-      origin: 'Berlin',
-      destination: 'Wien',
-      weightKg: 18000,
+      sourceCity: 'Berlin',
+      destinationCity: 'Wien',
+      cargoMassKg: 18000,
       income: 31000,
       currency: 'EUR',
       remainingKm: 510,
@@ -118,7 +118,7 @@ describe('snapshotFromTelemetry', () => {
     delivered.job = { ...delivered.job, state: 'delivered', deliveredRevenue: 32000 }
     const job = snapshotFromTelemetry(update({ status: 'connected', data: delivered })).job
     expect(job?.state).toBe('delivered')
-    expect(job?.revenue).toBe(32000)
+    expect(job?.deliveredRevenue).toBe(32000)
     expect(job?.remainingKm).toBeNull()
 
     const unknown = fullData()

@@ -27,6 +27,7 @@ const at = (receivedAtUnixMs: number) => ({
     sequence: 1,
     receivedAtUnixMs,
     invalidVehicleFields: [],
+    invalidJobFields: [],
     invalidFields: [],
   },
 })

@@ -38,6 +38,6 @@ export function useVehicleFormat() {
         minute: '2-digit',
         second: '2-digit',
       })
-    return { t, number, measure, reading, gear, age, clock }
+    return { t, locale, number, measure, reading, gear, age, clock }
   }, [t, locale])
 }

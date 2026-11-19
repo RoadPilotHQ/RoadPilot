@@ -26,6 +26,10 @@ export type UnitKey =
   | 'unit.fahrenheit'
   | 'unit.bar'
   | 'unit.psi'
+  | 'unit.kg'
+  | 'unit.lb'
+  | 'unit.m'
+  | 'unit.ft'
 
 export interface Measure {
   value: number
@@ -35,6 +39,21 @@ export interface Measure {
 const KM_PER_MILE = 1.609344
 const LITRES_PER_US_GALLON = 3.785411784
 const BAR_PER_PSI = 0.0689475729
+const KG_PER_POUND = 0.45359237
+const METRES_PER_FOOT = 0.3048
+
+export function mass(kg: number, system: UnitSystem): Measure {
+  return system === 'imperial'
+    ? { value: kg / KG_PER_POUND, unit: 'unit.lb' }
+    : { value: kg, unit: 'unit.kg' }
+}
+
+/** Short lengths, for example a scale bar; long ones use `distance`. */
+export function length(metres: number, system: UnitSystem): Measure {
+  return system === 'imperial'
+    ? { value: metres / METRES_PER_FOOT, unit: 'unit.ft' }
+    : { value: metres, unit: 'unit.m' }
+}
 /** l/100 km × mpg (US) = 100 × litres per gallon / km per mile. */
 const MPG_TIMES_L_PER_100KM = (100 * LITRES_PER_US_GALLON) / KM_PER_MILE
 

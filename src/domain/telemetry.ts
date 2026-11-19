@@ -94,6 +94,7 @@ export interface TelemetryData {
     cargo: string | null
     cargoMassKg: number | null
     cargoDamagePercent: number | null
+    cargoLoaded: boolean | null
     sourceCity: string | null
     sourceCompany: string | null
     destinationCity: string | null
@@ -106,6 +107,8 @@ export interface TelemetryData {
     progressPercent: number | null
     deliveredRevenue: number | null
     cancelPenalty: number | null
+    /** Game job market token, e.g. `freight_market`. */
+    jobMarket: string | null
   }
   navigation: {
     distanceKm: number | null

@@ -2,17 +2,10 @@
  * How the vehicle data dashboard reads values and the telemetry link. Pure functions: time is
  * passed in, so every state is testable without a clock or a game.
  */
+import { fieldsFromPaths, read, type Reading } from './reading'
 import type { ConnectionState, DashboardSnapshot, VehicleData, VehicleField } from './types'
 
-/**
- * One displayed value:
- * - `value`: current and valid.
- * - `missing`: supported by RoadPilot, but this game, plugin or frame did not provide it.
- * - `invalid`: provided, but rejected as invalid (non-finite or implausible).
- * - `noData`: there is no current telemetry at all (not connected, interrupted or stale).
- */
-export type Reading<T> =
-  { kind: 'value'; value: T } | { kind: 'missing' } | { kind: 'invalid' } | { kind: 'noData' }
+export type { Reading } from './reading'
 
 /** The five link states the dashboard distinguishes. */
 export type LinkState = 'disconnected' | 'connecting' | 'connected' | 'stale' | 'error'
@@ -56,10 +49,17 @@ export function link(
   return { state, ageMs, paused: snapshot.connection === 'connected' && snapshot.paused }
 }
 
-/** Whether vehicle values may be shown as current: live and connected, or labelled demo data. */
-export function valuesCurrent(snapshot: DashboardSnapshot, current: Link): boolean {
-  if (!snapshot.vehicle) return false
+/**
+ * Whether the snapshot's values may be shown as current: live and connected (also while
+ * paused), or labelled demo data. Stale, interrupted or failed links have no current values.
+ */
+export function dataCurrent(snapshot: Pick<DashboardSnapshot, 'mode'>, current: Link): boolean {
   return snapshot.mode === 'demo' || current.state === 'connected'
+}
+
+/** Whether vehicle values may be shown as current. */
+export function valuesCurrent(snapshot: DashboardSnapshot, current: Link): boolean {
+  return snapshot.vehicle !== null && dataCurrent(snapshot, current)
 }
 
 export function readVehicle<K extends VehicleField>(
@@ -67,11 +67,10 @@ export function readVehicle<K extends VehicleField>(
   field: K,
   current: boolean,
 ): Reading<NonNullable<VehicleData[K]>> {
-  const vehicle = snapshot.vehicle
-  if (!vehicle || !current) return { kind: 'noData' }
-  if (snapshot.telemetry?.invalidVehicleFields.includes(field)) return { kind: 'invalid' }
-  const value = vehicle[field]
-  return value == null ? { kind: 'missing' } : { kind: 'value', value }
+  return read(snapshot.vehicle?.[field], {
+    current: current && snapshot.vehicle !== null,
+    invalid: snapshot.telemetry?.invalidVehicleFields.includes(field) ?? false,
+  })
 }
 
 /**
@@ -107,9 +106,7 @@ export const INVALID_FIELD_TARGETS: Readonly<Record<string, readonly VehicleFiel
 }
 
 export function invalidVehicleFields(wirePaths: readonly string[]): VehicleField[] {
-  const fields = new Set<VehicleField>()
-  for (const path of wirePaths) INVALID_FIELD_TARGETS[path]?.forEach((f) => fields.add(f))
-  return [...fields]
+  return fieldsFromPaths(INVALID_FIELD_TARGETS, wirePaths)
 }
 
 /**

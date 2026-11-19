@@ -214,6 +214,7 @@ fn job(j: Option<&proto::Job>, game: Game, now_min: Option<u32>, nav: &Navigatio
         cargo: j.cargo.clone(),
         cargo_mass_kg: j.cargo_mass_kg.map(f32::round),
         cargo_damage_percent: j.cargo_damage.map(|d| round1(d * 100.0)),
+        cargo_loaded: j.cargo_loaded,
         source_city: j.source_city.clone(),
         source_company: j.source_company.clone(),
         destination_city: j.destination_city.clone(),
@@ -235,6 +236,7 @@ fn job(j: Option<&proto::Job>, game: Game, now_min: Option<u32>, nav: &Navigatio
         progress_percent,
         delivered_revenue: j.delivered_revenue,
         cancel_penalty: j.cancel_penalty,
+        job_market: j.job_market.clone(),
     }
 }
 
@@ -319,6 +321,11 @@ mod tests {
         assert_eq!(j.income, Some(24_360));
         assert_eq!(j.currency, Some("EUR"));
         assert_eq!(j.cargo_damage_percent, Some(1.5));
+        assert_eq!(j.cargo_loaded, Some(true));
+        assert_eq!(j.job_market.as_deref(), Some("freight_market"));
+        assert_eq!(j.source_company.as_deref(), Some("Tradeaux"));
+        assert_eq!(j.destination_company.as_deref(), Some("Kaarfor"));
+        assert_eq!(j.planned_distance_km, Some(742));
         // Deadline minute 3412 = day 2, 08:52; now = minute 2000 = day 1.
         assert_eq!(
             j.deadline,

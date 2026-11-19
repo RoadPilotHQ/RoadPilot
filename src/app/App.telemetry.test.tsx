@@ -92,7 +92,8 @@ describe('dashboard with live telemetry', () => {
     expect(navigation.getByText('90 km/h')).toBeInTheDocument()
 
     const job = card('Current Job')
-    expect(job.getByText('Berlin → Wien')).toBeInTheDocument()
+    expect(job.getByText('Berlin')).toBeInTheDocument()
+    expect(job.getByText('Wien')).toBeInTheDocument()
     expect(job.getByText('Machinery')).toBeInTheDocument()
     expect(job.getByText('18,000 kg')).toBeInTheDocument()
     expect(job.getByText('€31,000')).toBeInTheDocument()
@@ -132,7 +133,7 @@ describe('dashboard with live telemetry', () => {
     expect(card('Driving Dynamics').getAllByText('Not available')).toHaveLength(5)
     expect(card('Navigation').getAllByText('Not available')).toHaveLength(3)
     expect(card('Vehicle Position').getAllByText('Not available')).toHaveLength(6)
-    expect(card('Current Job').getByText('Not available')).toBeInTheDocument()
+    expect(card('Current Job').getByText('Unavailable')).toBeInTheDocument()
     // No demo job is mixed into live data.
     expect(screen.queryByText('Hamburg → Praha')).not.toBeInTheDocument()
     expect(screen.queryByText('80 km/h')).not.toBeInTheDocument()
@@ -148,7 +149,7 @@ describe('dashboard with live telemetry', () => {
     const delivered = fullData()
     delivered.job = { ...delivered.job, state: 'delivered', deliveredRevenue: 32000 }
     await send(live(delivered))
-    expect(card('Current Job').getByText('Job delivered')).toBeInTheDocument()
+    expect(card('Current Job').getByText('Delivered')).toBeInTheDocument()
     expect(card('Current Job').getByText('€32,000')).toBeInTheDocument()
   })
 
@@ -196,7 +197,8 @@ describe('dashboard with live telemetry', () => {
     expect(screen.getByText('Demo data')).toBeInTheDocument()
     expect(panel('Speed').getByText('80')).toBeInTheDocument()
     expect(card('Vehicle Data').getByText('Demo')).toBeInTheDocument()
-    expect(screen.getByText('Hamburg → Praha', { selector: '.job-route' })).toBeInTheDocument()
+    expect(card('Current Job').getByText('Hamburg')).toBeInTheDocument()
+    expect(card('Current Job').getByText('Demo')).toBeInTheDocument()
   })
 
   it('explains unavailable telemetry and endpoint errors', async () => {

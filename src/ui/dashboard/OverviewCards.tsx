@@ -57,9 +57,12 @@ export function OverviewCards() {
         <Package size={38} className="icon-orange" aria-hidden />
         <div>
           <div className="label">{t('overview.job')}</div>
-          {activeJob?.origin && activeJob.destination ? (
+          {activeJob?.sourceCity && activeJob.destinationCity ? (
             <div className="overview-value overview-value-sm">
-              {t('job.route', { origin: activeJob.origin, destination: activeJob.destination })}
+              {t('job.route', {
+                origin: activeJob.sourceCity,
+                destination: activeJob.destinationCity,
+              })}
             </div>
           ) : (
             <div className="overview-value overview-value-sm text-muted">{jobMissing}</div>

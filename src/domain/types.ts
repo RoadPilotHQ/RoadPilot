@@ -86,6 +86,8 @@ export interface TelemetryMeta {
   receivedAtUnixMs: number
   /** Vehicle values removed as invalid in this frame. */
   invalidVehicleFields: VehicleField[]
+  /** Job values removed as invalid in this frame. */
+  invalidJobFields: JobField[]
   /** Wire paths of all values removed as invalid, as reported by the telemetry reader. */
   invalidFields: string[]
 }
@@ -143,23 +145,43 @@ export interface DeadlineValue {
   time: string
 }
 
+/**
+ * The job as reported by the game. Names are localized by the game; RoadPilot has no ids for
+ * cities or companies. `null` means not provided; see `TelemetryMeta.invalidJobFields`.
+ */
 export interface JobData {
   state: JobState
   cargo: string | null
-  weightKg: number | null
+  cargoMassKg: number | null
+  /** 0–100. */
+  cargoDamagePercent: number | null
+  cargoLoaded: boolean | null
+  /** Game job market token, e.g. `freight_market`. */
+  jobMarket: string | null
+  sourceCity: string | null
+  sourceCompany: string | null
+  destinationCity: string | null
+  destinationCompany: string | null
   income: number | null
-  /** ISO 4217 code. */
+  /** ISO 4217 code of the game currency: EUR in ETS2, USD in ATS. */
   currency: string | null
-  origin: string | null
-  destination: string | null
+  /** Calculated from the absolute deadline and the game clock. */
   deadline: DeadlineValue | null
-  remainingKm: number | null
-  remainingMinutes: number | null
+  /** Calculated, in game minutes; negative when late. */
+  timeToDeadlineMin: number | null
+  plannedDistanceKm: number | null
   /** Calculated and approximate in live mode. */
   progressPercent: number | null
   /** Revenue of a delivered job. */
-  revenue: number | null
+  deliveredRevenue: number | null
+  /** Penalty of a cancelled job. */
+  cancelPenalty: number | null
+  /** Route Advisor values while the job is active. */
+  remainingKm: number | null
+  remainingMinutes: number | null
 }
+
+export type JobField = Exclude<keyof JobData, 'state'>
 
 export interface DashboardSnapshot {
   mode: DataMode
