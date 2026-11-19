@@ -195,9 +195,11 @@ pub enum Rejection {
     /// processing (see `runtime`), never by [`Supervisor::command`].
     SupersededByDisarm,
     /// A safety event occurred while the command was processed; the transition it caused is
-    /// reported in [`Response::transition`]. Also used, without a transition, for an arm or
-    /// activation refused because a safety event from outside the loop (watchdog trip or
-    /// silent watchdog) was handled in the same tick before the command.
+    /// reported in [`Response::transition`]. Also used, without a transition, for an arm,
+    /// activation or fault reset refused by the control core because a safety event was
+    /// handled earlier in the same processing step: one from outside the loop (watchdog trip,
+    /// silent watchdog, tick gap) or a safety transition caused by an earlier command of the
+    /// same batch. A reset never acknowledges a fault of its own step.
     Safety(SafetyEvent),
 }
 

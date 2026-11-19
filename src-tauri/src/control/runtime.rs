@@ -461,7 +461,7 @@ async fn run_sender(
                 // Safety signals from outside the loop first: a stall the watchdog saw (or a
                 // silent watchdog) is handled before any command queued meanwhile, so an arm
                 // or activation from this tick cannot follow it.
-                core.check_watchdog(at);
+                core.check_external_safety(at);
                 let inputs_taken = drain_inputs(&mut core, &mut inputs, at);
                 let answers = drain_commands(&mut core, &mut commands, at);
                 core.tick(at);
@@ -1594,6 +1594,103 @@ mod tests {
         setup.handle.shutdown();
         setup.sender.await.unwrap();
         setup.watchdog.await.unwrap();
+    }
+
+    // ---- 4.6.4c: a safety event wins over a fault reset of the same batch ----
+
+    fn reset_refused_for_timeout(reply: &CommandReply) -> bool {
+        timed_out(reply) && reply.state == State::Fault
+    }
+
+    fn fault_resets(log: &LogSnapshot) -> usize {
+        decisions(log)
+            .iter()
+            .filter(|d| matches!(d, DecisionEvent::Transition(t) if t.reason == Reason::FaultReset))
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reset_in_the_batch_of_a_trip_does_not_acknowledge_the_fault() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(&setup.handle, &[Command::ResetFault]).await;
+        assert!(reset_refused_for_timeout(&replies[0]), "{:?}", replies[0]);
+        run_for(200).await;
+        assert_eq!(setup.handle.status().state, State::Fault.into());
+        assert_eq!(fault_resets(&setup.handle.log().snapshot()), 0);
+        // A later batch, in a step without a safety event, may reset; nothing arms.
+        let replies = send_batch(&setup.handle, &[Command::ResetFault]).await;
+        assert_eq!(replies[0].response.result, Ok(()));
+        assert_eq!(replies[0].state, State::Disabled);
+        run_for(400).await;
+        assert_eq!(setup.handle.status().state, State::Disabled.into());
+        stop(setup, feeder).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reset_before_the_trip_batch_stays_and_one_after_it_needs_a_new_batch() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        // An ordinary fault, reset in its own batch.
+        stall(&stall_ms, 150).await;
+        run_for(500).await;
+        assert_eq!(setup.handle.status().state, State::Fault.into());
+        let replies = send_batch(&setup.handle, &[Command::ResetFault]).await;
+        assert_eq!(replies[0].state, State::Disabled);
+        // A second trip finds Disabled; a reset and an arm queued with it are refused.
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(&setup.handle, &[Command::ResetFault, Command::Arm]).await;
+        assert!(replies.iter().all(timed_out), "{replies:?}");
+        assert!(replies.iter().all(|r| r.state == State::Disabled));
+        let log = setup.handle.log().snapshot();
+        assert_eq!(fault_resets(&log), 1);
+        assert_eq!(
+            transitions_to(&log, 0, State::Active),
+            1,
+            "only the initial one"
+        );
+        stop(setup, feeder).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_trip_on_an_existing_fault_blocks_the_reset_of_its_batch() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        stall(&stall_ms, 150).await;
+        run_for(500).await;
+        assert_eq!(setup.handle.status().state, State::Fault.into());
+        // Still in Fault, the loop stalls again; the reset queued meanwhile is refused.
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(&setup.handle, &[Command::ResetFault]).await;
+        assert!(reset_refused_for_timeout(&replies[0]), "{:?}", replies[0]);
+        assert_eq!(setup.handle.status().watchdog.trips, 2);
+        assert_eq!(fault_resets(&setup.handle.log().snapshot()), 0);
+        stop(setup, feeder).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_disarm_and_a_reset_in_the_batch_of_a_trip_keep_the_fault() {
+        let (setup, feeder, stall_ms) = stallable_in(State::Active).await;
+        stall(&stall_ms, 150).await;
+        let replies = queue_during_stall(
+            &setup.handle,
+            &[
+                Command::ResetFault,
+                Command::Arm,
+                Command::Disarm,
+                Command::Activate,
+            ],
+        )
+        .await;
+        // F-01: the disarm is processed first, arm and activation are superseded by it.
+        assert_eq!(replies[2].response.result, Ok(()));
+        assert!(superseded(&replies[1]), "{:?}", replies[1]);
+        assert!(superseded(&replies[3]), "{:?}", replies[3]);
+        // 4.6.4c: the reset does not acknowledge the fault of the trip.
+        assert!(reset_refused_for_timeout(&replies[0]), "{:?}", replies[0]);
+        assert!(replies.iter().all(|r| r.state == State::Fault));
+        let log = setup.handle.log().snapshot();
+        assert_eq!(count_messages(&log, MessageKind::Disarm), 1);
+        assert_eq!(fault_resets(&log), 0);
+        stop(setup, feeder).await;
     }
 
     #[tokio::test(start_paused = true)]

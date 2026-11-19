@@ -1180,16 +1180,15 @@ mod tests {
                 )
         };
         assert!(refused(run(&rig.slot, Command::Arm)));
-        assert_eq!(
-            run(&rig.slot, Command::ResetFault).outcome,
-            OutcomeCode::Accepted
-        );
+        // 4.6.4c: while the watchdog stays silent every step has a safety event, so the fault
+        // cannot be reset either.
         for _ in 0..3 {
+            assert!(refused(run(&rig.slot, Command::ResetFault)));
             assert!(refused(run(&rig.slot, Command::Arm)));
             assert!(refused(run(&rig.slot, Command::Activate)));
             std::thread::sleep(ms(100));
         }
-        assert_eq!(rig.slot.status().state, StateCode::Disabled);
+        assert_eq!(rig.slot.status().state, StateCode::Fault);
     }
 
     #[test]

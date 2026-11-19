@@ -8,10 +8,11 @@
 //!
 //! # What a tick does, in this order
 //!
-//! 1. Handles the safety signals from outside the loop ([`ControlCore::check_watchdog`]): the
-//!    watchdog's trip flag (a silent supervisor loop) and the watchdog's own liveness (a
-//!    silent watchdog). The runtime calls the same check before it processes queued commands,
-//!    and refuses arm and activation in a tick that handled such an event.
+//! 1. Handles the safety signals from outside the loop ([`ControlCore::check_external_safety`]):
+//!    the watchdog's trip flag (a silent supervisor loop), the watchdog's own liveness (a
+//!    silent watchdog) and a tick gap over the limit. The runtime calls the same check before
+//!    it processes queued commands, and refuses arm, activation and fault reset in a
+//!    processing step that handled such an event (see "Safety events win over a fault reset").
 //! 2. Measures timing against the scheduler: a gap over the limit is a safety event.
 //! 3. Assesses the vehicle state at `now` and updates the supervisor.
 //! 4. Records the heartbeat the independent watchdog observes.
@@ -30,6 +31,20 @@
 //! * **Disarm is reliable.** It is encoded immediately on a manual disarm, on any fault, on
 //!   shutdown, and, as a last resort, when the core is dropped (for example when its task is
 //!   aborted).
+//!
+//! # Safety events win over a fault reset (4.6.4c)
+//!
+//! A processing step is what the runtime does at one deadline: the external safety check,
+//! the queued commands, the tick. A safety event handled in a step is remembered for the rest
+//! of that step's commands ([`ControlCore::on_command`]): an external event (watchdog trip,
+//! silent watchdog, tick gap) from the check at the start of the step, and every safety
+//! transition caused while the step's commands are processed. While one is remembered,
+//! [`Command::Arm`], [`Command::Activate`] **and** [`Command::ResetFault`] are refused with
+//! [`Rejection::Safety`]. A fault caused or confirmed in a step can therefore never be
+//! acknowledged by a reset of the same step, whatever the order of the batch; a reset is
+//! accepted only in a later step without a safety event. [`Command::Disarm`] is never
+//! refused, and the F-01 rule (a disarm supersedes every arm and activation of its batch) is
+//! applied by the runtime before any of this.
 
 use super::command::{Adjustments, CommandGenerator, ControlLimits, ControlRequest, Withheld};
 use super::freshness::{
@@ -42,7 +57,7 @@ use super::log::{
     MessageRecord, TimingEvent,
 };
 use super::protocol::{WireMessage, encode};
-use super::schedule::{Scheduler, Timing, Verdict};
+use super::schedule::{MAX_TICK_GAP, Scheduler, Timing, Verdict};
 use super::sink::{Delivery, DryRunSink, MessageSink, OperatingMode};
 use super::status::{ControlStatus, RECENT_DECISIONS, StatusInput};
 use super::supervisor::{
@@ -135,9 +150,11 @@ pub struct ControlCore<S: MessageSink> {
     source: Box<dyn RequestSource>,
     log: ControlLog,
     watchdog: WatchdogLink,
-    /// A safety event from outside the loop handled in the current tick (watchdog trip, silent
-    /// watchdog): arm and activation are refused until a tick without one.
-    arming_blocked: Option<SafetyEvent>,
+    /// A safety event handled in the current processing step: an external one from
+    /// [`ControlCore::check_external_safety`], or a safety transition caused by a command of
+    /// this step. Arm, activation and fault reset are refused while it is set; the external
+    /// check at the start of the next step replaces it.
+    step_safety: Option<SafetyEvent>,
     /// A command has been encoded since the last disarm, so a disarm is still owed.
     wire_armed: bool,
     last_withheld: Option<Withheld>,
@@ -196,7 +213,7 @@ impl<S: MessageSink> ControlCore<S> {
             source,
             log,
             watchdog,
-            arming_blocked: None,
+            step_safety: None,
             wire_armed: false,
             last_withheld: None,
             last_frame_invalid: false,
@@ -484,19 +501,28 @@ impl<S: MessageSink> ControlCore<S> {
 
     /// Processes one operator command against the vehicle state at `now`. A disarm that
     /// results is encoded immediately, not at the next tick.
+    ///
+    /// Arm, activation and fault reset are refused while a safety event of the current step
+    /// is remembered (see the module documentation); a disarm is always processed.
     pub fn on_command(&mut self, command: Command, now: Instant) -> Response {
         self.last_now = now;
-        if matches!(command, Command::Arm | Command::Activate)
-            && let Some(event) = self.arming_blocked
+        if matches!(
+            command,
+            Command::Arm | Command::Activate | Command::ResetFault
+        ) && let Some(event) = self.step_safety
         {
-            // A safety event from outside the loop was handled in this tick before the
-            // command: an arm or activation queued meanwhile must not undo its effect.
+            // A safety event was handled in this step before the command: an arm, activation
+            // or reset queued meanwhile must not undo or acknowledge its effect.
             return self.refuse(command, Rejection::Safety(event), now);
         }
         let assessment = self.monitor.assess(now);
         let response = self.supervisor.command(command, &assessment);
         if let Some(transition) = response.transition {
             self.log_transition(now, transition);
+            if let Reason::Safety(event) = transition.reason {
+                // The rest of this step's commands must not act on or reset this fault.
+                self.step_safety = self.step_safety.or(Some(event));
+            }
         }
         if let Err(rejection) = response.result {
             self.log
@@ -527,12 +553,16 @@ impl<S: MessageSink> ControlCore<S> {
         }
     }
 
-    /// Handles the safety signals from outside the loop: a trip of the independent watchdog
-    /// and a silent watchdog. The runtime calls this at the start of every tick, before it
-    /// processes queued commands; [`ControlCore::tick`] calls it again (step 1). Returns the
-    /// transition it caused, if any. While it reports an event, arm and activation are
-    /// refused (see [`ControlCore::on_command`]).
-    pub fn check_watchdog(&mut self, now: Instant) -> Option<Transition> {
+    /// Handles the safety signals from outside the loop: a trip of the independent watchdog,
+    /// a silent watchdog and a tick gap over the limit. The runtime calls this at the start of
+    /// every processing step, before it processes queued commands; [`ControlCore::tick`]
+    /// calls it again (step 1). Returns the transition it caused, if any. It starts a new
+    /// step: the remembered safety event of the previous step is replaced by the event found
+    /// now, if any, and while one is remembered arm, activation and fault reset are refused
+    /// (see [`ControlCore::on_command`]). The event is remembered even when the supervisor
+    /// does not change (Disabled, or already in Fault): a reset must not acknowledge a fault
+    /// in a step in which a new safety event arrived.
+    pub fn check_external_safety(&mut self, now: Instant) -> Option<Transition> {
         self.last_now = now;
         let mut transition = None;
         let mut blocked = None;
@@ -553,7 +583,16 @@ impl<S: MessageSink> ControlCore<S> {
             transition = transition.or(self.report(now, event));
             blocked = blocked.or(Some(event));
         }
-        self.arming_blocked = blocked;
+        // The loop itself was late: the same gap the tick's timing check will find. Reported
+        // here as well so that it takes effect before the step's commands.
+        if let Some(gap) = self.scheduler.gap_at(now)
+            && gap > MAX_TICK_GAP
+        {
+            let event = SafetyEvent::SenderTiming { gap };
+            transition = transition.or(self.report(now, event));
+            blocked = blocked.or(Some(event));
+        }
+        self.step_safety = blocked;
         transition
     }
 
@@ -565,7 +604,7 @@ impl<S: MessageSink> ControlCore<S> {
 
         // 1. Safety signals from outside the loop (watchdog trip, silent watchdog). Usually
         //    already handled by the runtime before the commands; then nothing is left here.
-        if let Some(t) = self.check_watchdog(now) {
+        if let Some(t) = self.check_external_safety(now) {
             transition = Some(t);
         }
 
@@ -1769,7 +1808,7 @@ mod tests {
         }
         assert!(rig.trip.is_tripped());
         // As the runtime does: the watchdog signals first, then the queued commands.
-        let t = rig.core.check_watchdog(rig.at(360)).unwrap();
+        let t = rig.core.check_external_safety(rig.at(360)).unwrap();
         assert_eq!((t.from, t.to), (State::Armed, State::Disabled));
         for command in [Command::Activate, Command::Arm] {
             let r = rig.command(command);
@@ -1785,9 +1824,16 @@ mod tests {
         assert_eq!(rig.core.state(), State::Disabled);
         // Disarm and reset are never refused.
         assert!(rig.command(Command::Disarm).result.is_ok());
-        // The next tick has no safety event from outside: arming works again.
+        // The first tick after the stall still has a safety event (its gap is over the limit),
+        // so arming stays refused for that step.
         rig.ticks_on = true;
         rig.run_to(400);
+        assert!(matches!(
+            rig.command(Command::Arm).result,
+            Err(Rejection::Safety(SafetyEvent::SenderTiming { .. }))
+        ));
+        // The next tick has no safety event from outside: arming works again.
+        rig.run_to(440);
         assert!(rig.command(Command::Arm).result.is_ok());
         assert_eq!(rig.core.state(), State::Armed);
     }
@@ -1814,8 +1860,17 @@ mod tests {
         assert_eq!(rig.disarms(), 1);
         let commands = rig.commands().len();
         assert!(commands >= before);
-        // Reset leaves the fault; arming stays refused while the watchdog is silent.
-        assert!(rig.command(Command::ResetFault).result.is_ok());
+        // While the watchdog stays silent every step has a safety event: the fault cannot be
+        // reset (4.6.4c), and arming stays refused.
+        let r = rig.command(Command::ResetFault);
+        assert!(
+            matches!(
+                r.result,
+                Err(Rejection::Safety(SafetyEvent::WatchdogSilent { .. }))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(rig.core.state(), State::Fault);
         rig.run_to(800);
         let r = rig.command(Command::Arm);
         assert!(
@@ -1825,9 +1880,48 @@ mod tests {
             ),
             "{r:?}"
         );
-        assert_eq!(rig.core.state(), State::Disabled);
+        assert_eq!(rig.core.state(), State::Fault);
         rig.run_to(2_000);
         assert_eq!(rig.commands().len(), commands, "no output after the fault");
+        // A watchdog that runs again allows the reset in a later, safe step; the reset does
+        // not arm, and only a new manual arm does.
+        rig.watchdog_on = true;
+        rig.run_to(2_100);
+        assert_eq!(rig.core.state(), State::Fault, "nothing resets by itself");
+        assert!(rig.command(Command::ResetFault).result.is_ok());
+        assert_eq!(
+            rig.core.state(),
+            State::Disabled,
+            "nothing re-arms by itself"
+        );
+        assert!(rig.command(Command::Arm).result.is_ok());
+    }
+
+    #[test]
+    fn a_silent_watchdog_refuses_arming_after_a_reset_from_a_safe_step() {
+        // The previous behaviour of 4.6.4b, kept: a fault reset from before the watchdog went
+        // silent leaves Disabled, and arming is refused while the watchdog stays silent.
+        let mut rig = Rig::active_running();
+        rig.frames_on = false;
+        rig.run_to(800);
+        assert_eq!(rig.core.state(), State::Fault);
+        rig.frames_on = true;
+        rig.run_to(1_200);
+        assert!(rig.command(Command::ResetFault).result.is_ok());
+        rig.watchdog_on = false;
+        rig.run_to(1_600);
+        let r = rig.command(Command::Arm);
+        assert!(
+            matches!(
+                r.result,
+                Err(Rejection::Safety(SafetyEvent::WatchdogSilent { .. }))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(rig.core.state(), State::Disabled);
+        let commands = rig.commands().len();
+        rig.run_to(2_000);
+        assert_eq!(rig.commands().len(), commands, "no output");
         // A watchdog that runs again lifts the refusal only for a new manual arm.
         rig.watchdog_on = true;
         rig.run_to(2_100);
@@ -1837,6 +1931,255 @@ mod tests {
             "nothing re-arms by itself"
         );
         assert!(rig.command(Command::Arm).result.is_ok());
+    }
+
+    // ---- 4.6.4c: a safety event of a step wins over a fault reset of the same step ----
+
+    /// Stops the loop's ticks and lets the watchdog check until it has tripped. Returns the
+    /// time (ms) at which the loop comes back.
+    fn stall_until_tripped(rig: &mut Rig) -> u64 {
+        rig.ticks_on = false;
+        let start = rig.now_ms;
+        let mut at = start;
+        while !rig.trip.is_tripped() {
+            at += 20;
+            rig.run_to(at);
+            rig.watchdog.check(rig.at(at));
+            assert!(at < start + 1_000, "the watchdog must trip");
+        }
+        rig.ticks_on = true;
+        at
+    }
+
+    /// The safety check at the start of a step, then `commands` in order, as the runtime does
+    /// for a batch without a disarm.
+    fn step(rig: &mut Rig, commands: &[Command]) -> Vec<Response> {
+        rig.core.check_external_safety(rig.at(rig.now_ms));
+        commands.iter().map(|c| rig.command(*c)).collect()
+    }
+
+    fn refused_for_safety(r: &Response) -> bool {
+        matches!(r.result, Err(Rejection::Safety(_)))
+    }
+
+    fn fault_resets(rig: &Rig) -> usize {
+        rig.decisions()
+            .iter()
+            .filter(|d| matches!(d, DecisionEvent::Transition(t) if t.reason == Reason::FaultReset))
+            .count()
+    }
+
+    /// Ticks until the first step after a stall is over (its gap is a safety event too).
+    fn settle_after_stall(rig: &mut Rig) {
+        let next = (rig.now_ms / 40 + 2) * 40;
+        rig.run_to(next);
+    }
+
+    #[test]
+    fn a_reset_cannot_acknowledge_a_trip_of_the_same_step() {
+        let mut rig = Rig::active_running();
+        stall_until_tripped(&mut rig);
+        let replies = step(&mut rig, &[Command::ResetFault]);
+        assert!(
+            matches!(
+                replies[0].result,
+                Err(Rejection::Safety(SafetyEvent::SupervisorTimeout { .. }))
+            ),
+            "{replies:?}"
+        );
+        assert_eq!(replies[0].transition, None);
+        assert_eq!(rig.core.state(), State::Fault);
+        assert_eq!(fault_resets(&rig), 0);
+        // A later, safe step may reset; the reset does not arm.
+        settle_after_stall(&mut rig);
+        assert_eq!(rig.core.state(), State::Fault);
+        let replies = step(&mut rig, &[Command::ResetFault]);
+        assert_eq!(replies[0].result, Ok(()));
+        assert_eq!(rig.core.state(), State::Disabled);
+        assert!(!rig.core.permits_output());
+    }
+
+    #[test]
+    fn a_reset_cannot_acknowledge_a_fault_caused_by_an_earlier_command_of_its_batch() {
+        let mut rig = Rig::active_running();
+        // A paused frame arrives between two ticks: the next command sees it first.
+        rig.ticks_on = false;
+        rig.paused = true;
+        let at = rig.now_ms + 20;
+        rig.run_to(at);
+        assert_eq!(rig.core.state(), State::Active);
+        let replies = step(
+            &mut rig,
+            &[Command::ResetFault, Command::ResetFault, Command::Arm],
+        );
+        // The first command finds the safety event and faults; the reset is not processed.
+        assert_eq!(
+            replies[0].result,
+            Err(Rejection::Safety(SafetyEvent::Paused))
+        );
+        assert_eq!(replies[0].transition.map(|t| t.to), Some(State::Fault));
+        // The second reset of the same batch must not acknowledge that fault.
+        assert_eq!(
+            replies[1].result,
+            Err(Rejection::Safety(SafetyEvent::Paused))
+        );
+        assert_eq!(replies[1].transition, None);
+        assert!(refused_for_safety(&replies[2]));
+        assert_eq!(rig.core.state(), State::Fault);
+        assert_eq!(fault_resets(&rig), 0);
+        assert_eq!(rig.disarms(), 1, "exactly one disarm for the fault");
+    }
+
+    #[test]
+    fn an_activation_that_faults_blocks_a_reset_queued_after_it() {
+        let mut rig = Rig::new();
+        rig.run_to(200);
+        assert!(rig.command(Command::Arm).result.is_ok());
+        assert!(rig.command(Command::Activate).result.is_ok());
+        rig.run_to(320);
+        rig.ticks_on = false;
+        rig.speed = 9.0; // over the cap
+        rig.run_to(rig.now_ms + 20);
+        let replies = step(&mut rig, &[Command::Activate, Command::ResetFault]);
+        assert!(matches!(
+            replies[0].result,
+            Err(Rejection::Safety(SafetyEvent::SpeedCapExceeded { .. }))
+        ));
+        assert!(matches!(
+            replies[1].result,
+            Err(Rejection::Safety(SafetyEvent::SpeedCapExceeded { .. }))
+        ));
+        assert_eq!(rig.core.state(), State::Fault);
+    }
+
+    #[test]
+    fn a_new_trip_while_already_faulted_blocks_the_reset_of_that_step() {
+        let mut rig = Rig::active_running();
+        rig.frames_on = false;
+        rig.run_to(800);
+        assert_eq!(rig.core.state(), State::Fault);
+        rig.frames_on = true;
+        rig.run_to(1_200);
+        // The existing fault could be reset now, but the loop stalls first.
+        stall_until_tripped(&mut rig);
+        let t = rig.core.check_external_safety(rig.at(rig.now_ms));
+        assert_eq!(t, None, "already in Fault: no new transition");
+        let r = rig.command(Command::ResetFault);
+        assert!(
+            matches!(
+                r.result,
+                Err(Rejection::Safety(SafetyEvent::SupervisorTimeout { .. }))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(rig.core.state(), State::Fault);
+        settle_after_stall(&mut rig);
+        assert!(step(&mut rig, &[Command::ResetFault])[0].result.is_ok());
+        assert_eq!(rig.core.state(), State::Disabled);
+    }
+
+    #[test]
+    fn a_reset_in_a_step_before_the_trip_stays_and_a_reset_after_it_needs_a_safe_step() {
+        let mut rig = Rig::active_running();
+        rig.frames_on = false;
+        rig.run_to(800);
+        assert_eq!(rig.core.state(), State::Fault);
+        rig.frames_on = true;
+        rig.run_to(1_200);
+        // Step 1: a safe reset.
+        assert!(step(&mut rig, &[Command::ResetFault])[0].result.is_ok());
+        assert_eq!(rig.core.state(), State::Disabled);
+        // Step 2: the trip finds Disabled and changes nothing; nothing re-arms.
+        stall_until_tripped(&mut rig);
+        let replies = step(&mut rig, &[Command::ResetFault, Command::Arm]);
+        assert!(refused_for_safety(&replies[0]), "{replies:?}");
+        assert!(refused_for_safety(&replies[1]), "{replies:?}");
+        assert_eq!(rig.core.state(), State::Disabled);
+        // A later step: a reset outside a fault is simply refused as before.
+        settle_after_stall(&mut rig);
+        let replies = step(&mut rig, &[Command::ResetFault]);
+        assert_eq!(replies[0].result, Err(Rejection::NotInFault));
+        assert_eq!(rig.core.state(), State::Disabled);
+        assert_eq!(fault_resets(&rig), 1);
+    }
+
+    #[test]
+    fn several_simultaneous_safety_events_report_the_first_and_block_the_reset() {
+        let mut rig = Rig::active_running();
+        // The loop and the watchdog both stall: the trip, a silent watchdog and the tick gap
+        // are all found by the same check.
+        rig.ticks_on = false;
+        rig.watchdog_on = false;
+        let start = rig.now_ms;
+        rig.run_to(start + 400);
+        rig.watchdog.check(rig.at(start + 400));
+        assert!(rig.trip.is_tripped());
+        rig.ticks_on = true;
+        let t = rig
+            .core
+            .check_external_safety(rig.at(rig.now_ms))
+            .expect("a fault");
+        assert_eq!(t.to, State::Fault);
+        assert!(matches!(
+            t.reason,
+            Reason::Safety(SafetyEvent::SupervisorTimeout { .. })
+        ));
+        for command in [Command::ResetFault, Command::Arm, Command::Activate] {
+            let r = rig.command(command);
+            assert!(
+                matches!(
+                    r.result,
+                    Err(Rejection::Safety(SafetyEvent::SupervisorTimeout { .. }))
+                ),
+                "{command:?}: {r:?}"
+            );
+        }
+        assert_eq!(rig.core.state(), State::Fault);
+        let transitions = rig
+            .decisions()
+            .iter()
+            .filter(|d| matches!(d, DecisionEvent::Transition(_)))
+            .count();
+        // Arm, activate, the one fault: the later events of the same check change nothing.
+        assert_eq!(transitions, 3);
+        // The tick of the step encodes the owed disarm, once.
+        let next = (rig.now_ms / 40 + 1) * 40;
+        rig.run_to(next);
+        assert_eq!(rig.disarms(), 1);
+        assert_eq!(rig.core.state(), State::Fault);
+    }
+
+    #[test]
+    fn a_disarm_in_the_step_of_a_trip_is_processed_and_the_reset_is_refused() {
+        let mut rig = Rig::active_running();
+        stall_until_tripped(&mut rig);
+        let replies = step(&mut rig, &[Command::Disarm, Command::ResetFault]);
+        assert_eq!(replies[0].result, Ok(()), "a disarm is never refused");
+        assert_eq!(replies[0].transition, None, "the fault stays");
+        assert!(refused_for_safety(&replies[1]), "{replies:?}");
+        assert_eq!(rig.core.state(), State::Fault);
+        assert_eq!(rig.disarms(), 1);
+    }
+
+    #[test]
+    fn a_tick_gap_is_handled_before_the_commands_of_its_step() {
+        let mut rig = Rig::active_running();
+        // The loop is late by more than the gap limit, but not long enough for the watchdog
+        // (which is not checked here).
+        rig.ticks_on = false;
+        let start = rig.now_ms;
+        rig.run_to(start + 120);
+        rig.ticks_on = true;
+        let t = rig
+            .core
+            .check_external_safety(rig.at(rig.now_ms))
+            .expect("a fault");
+        assert!(matches!(
+            t.reason,
+            Reason::Safety(SafetyEvent::SenderTiming { .. })
+        ));
+        assert!(refused_for_safety(&rig.command(Command::ResetFault)));
+        assert_eq!(rig.core.state(), State::Fault);
     }
 
     // ---- feed notes and bookkeeping ----

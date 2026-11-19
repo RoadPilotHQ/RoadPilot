@@ -26,6 +26,9 @@
 //! Sender (Step 5):
 //!
 //! * [`sink`]: the sealed destination of encoded messages; dry-run is the only one.
+//! * [`gate`]: the output gate (4.6.4c), not integrated yet: its own thread, a cut latch with
+//!   epochs, and the non-blocking command hand-off from the control loop. Dry-run port and
+//!   test fakes only.
 //! * [`schedule`]: the monotonic 40 ms tick schedule and its timing monitoring.
 //! * [`watchdog`]: independent detection of a stalled supervisor loop.
 //! * [`log`]: the bounded log of decisions, timing and encoded messages.
@@ -44,6 +47,7 @@
 
 pub mod command;
 pub mod freshness;
+pub mod gate;
 pub mod latency;
 pub mod log;
 pub mod mailbox;
@@ -67,6 +71,7 @@ mod dry_run_proof {
     const SOURCES: &[(&str, &str)] = &[
         ("command", include_str!("command.rs")),
         ("freshness", include_str!("freshness.rs")),
+        ("gate", include_str!("gate.rs")),
         ("latency", include_str!("latency.rs")),
         ("log", include_str!("log.rs")),
         ("mailbox", include_str!("mailbox.rs")),

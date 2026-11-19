@@ -48,8 +48,18 @@ telemetry plugin --pipe--> telemetry engine (one pipe server)
 - **Simulation-time shadow diagnosis** (the former R7). A simulation clock more than 100 ms ahead of the local clock within one second is still computed at the same point and counted, but starts no epoch: ATS advances it in fixed steps and delivers frames in clusters, so it fired without any delay (33 times in the calibration drive, 13 times in ten shutdown cycles, while no frame in these recordings was older than 40 ms on arrival). The hits appear in the status (`counters.simAheadHits`) and in the recording (`control` lines of category `simAhead`, with the total).
 
 - The sender ticks every 40 ms on the monotonic clock. Missed deadlines are skipped, never replayed; a gap over 100 ms between ticks is a safety event.
-- An independent watchdog task checks every 20 ms that the control loop updated the supervisor within the last 100 ms. The loop handles a trip at the start of its next tick, before any command queued meanwhile: an arm or activation in that tick is refused.
-- Every watchdog check also records the watchdog's own liveness. A watchdog without a check for over 250 ms is a safety event (`watchdogSilent`) and arming and activation are refused while it lasts. This makes a failed watchdog visible and keeps control off; it does not enforce a disarm while the loop itself is stuck (that needs the planned independent output gate).
+- An independent watchdog task checks every 20 ms that the control loop updated the supervisor within the last 100 ms. The loop handles a trip, and a tick gap over 100 ms, at the start of its next tick, before any command queued meanwhile: an arm, activation or fault reset in that tick is refused.
+- Every watchdog check also records the watchdog's own liveness. A watchdog without a check for over 250 ms is a safety event (`watchdogSilent`) and arming, activation and fault reset are refused while it lasts. This makes a failed watchdog visible and keeps control off; it does not enforce a disarm while the loop itself is stuck (that needs the independent output gate, see below).
+- **A fault reset never acknowledges a fault of its own tick** (Phase 4.6.4c). A safety event handled in a tick (from outside the loop, or caused by an earlier command of the same batch) is remembered for the rest of that tick's commands; Arm, Activate and Reset Fault are then refused with that event. A reset is accepted only in a later tick without a safety event. Disarm is never refused.
+
+### Output gate (Phase 4.6.4c, not integrated)
+
+`src-tauri/src/control/gate.rs` is the future sole owner and writer of the output port. It is built and tested in isolation; nothing in the application creates one yet, and the only ports are a dry-run port and test fakes. It runs on its own thread (no tokio, no control log, no status lock) and checks every 10 ms (at least; on Windows the real period depends on the timer resolution, and no reaction time is guaranteed):
+
+- **Cut latch.** One atomic word holds the generation and either "open" or the reason it was cut. A cut is possible from any thread at any time, never waits, and always advances the generation. Opening needs a ticket that only a manual Armed → Active transition can obtain and that is valid only for the exact closed generation it was issued for, so a cut between authorization and open makes the open fail. Nothing in the gate opens the latch; a loop timeout, a gate failure, a fault or a fault reset can only cut it.
+- **Command hand-off.** A single-entry slot (`Mutex` used only with `try_lock` on both sides, no `unsafe`): the control loop never waits; a newer command replaces an unread one; if the gate holds the slot at that instant, the command is dropped and counted. The gate takes each command out once and releases the slot before it writes, so a blocked port never holds it.
+- **Checks per period.** Latch; control loop heartbeat (over 100 ms silent cuts an open latch); command epoch equal to the open epoch; command age at most 50 ms; the latch unchanged immediately before the write. After a cut the gate writes exactly one disarm and empties the slot; nothing older can follow.
+- **Gate liveness.** The control loop can check that the gate thread runs and stepped within the last 100 ms; a failure cuts the latch.
 
 Source: `src-tauri/src/control/` (core, no Tauri dependency) and `src-tauri/src/control_app.rs` (application lifecycle and commands).
 
@@ -71,7 +81,7 @@ Supervisor states: **Disabled** (initial), **Armed**, **Active** (the only state
 
 - Arming needs fresh, settled telemetry within the speed cap, and binds to that vehicle epoch, session and game. Any later discontinuity (pause, gap or reconnect, session or game change, latency backlog, invalid frame, hand-off loss) is a safety event.
 - A safety event disarms Armed to Disabled and puts Active into Fault. Nothing re-arms automatically; a reconnect never restores Armed or Active.
-- A fault is left only by an explicit **Reset Fault**, which leads to Disabled; control then needs a new **Arm** and **Activate**.
+- A fault is left only by an explicit **Reset Fault**, which leads to Disabled; control then needs a new **Arm** and **Activate**. A reset in the same tick as a safety event is refused.
 - **Disarm** is accepted in every state and processed before any other command queued with it.
 - After any fault, the only message that can follow is a single disarm. Commands are never stored, queued or repeated.
 
@@ -111,6 +121,7 @@ Four levels, from weakest to strongest evidence. Nothing in the control pipeline
 - Every Tauri command invoked through Tauri's mock runtime, and the absence of any command that changes the mode or transmits.
 - The Control section and its data source (React tests), including Disarm availability in every state.
 - A test scans all control source files for the input pipe name and for file, pipe, process and network APIs.
+- The output gate in isolation (deterministic steps and real threads): starts closed, opens only with a manual activation ticket, a late open cannot override a cut, loop silence cuts with one disarm, stale and old-epoch commands are discarded, a concurrent writer and reader never see a torn or reordered command, a blocked port never blocks the writer and is detected as a silent gate, the gate thread stops within a bounded wait.
 
 **2. Verified in the running desktop application** (Windows 11, display scaling 150 %, no game running):
 
@@ -122,7 +133,7 @@ Four levels, from weakest to strongest evidence. Nothing in the control pipeline
 
 **3. Verified in ATS or ETS2 gameplay:** nothing in the control pipeline. Only the schema 1 telemetry plugin (speed, RPM, gear) was live-tested, in ATS.
 
-**4. Not implemented:** live transmission to the input plugin, any steering or speed controller, autonomous driving, single-instance protection across application processes.
+**4. Not implemented:** integration of the output gate into the control core, a pipe port, live transmission to the input plugin, any steering or speed controller, autonomous driving, single-instance protection across application processes.
 
 On Windows, test executables need the same application manifest as the app (Common Controls v6). `src-tauri/build.rs` therefore embeds `windows-app-manifest.xml`, an unchanged copy of tauri-build's default, through the linker for every artifact; the application's embedded manifest is identical to before.
 

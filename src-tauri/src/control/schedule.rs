@@ -79,6 +79,13 @@ impl Scheduler {
         self.next_deadline
     }
 
+    /// The gap a tick at `now` would have since the previous tick, without recording a tick.
+    /// `None` before the first tick.
+    pub fn gap_at(&self, now: Instant) -> Option<Duration> {
+        self.last_tick
+            .map(|last| now.saturating_duration_since(last))
+    }
+
     /// Records a tick that ran at `now` and schedules the next deadline strictly after `now`
     /// (or one period after the answered deadline, if the tick ran early).
     pub fn on_tick(&mut self, now: Instant) -> Timing {
