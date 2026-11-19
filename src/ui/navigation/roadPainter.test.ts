@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { decodeTile } from '@/domain/mapTile'
 import { encodeTile, GOLDEN_REQUEST, type SyntheticRoad } from '@/test/tileFixtures'
-import { drawRoads, ROAD_STYLES, type RoadCtx } from './roadPainter'
+import { drawRoads, MAX_PATH_POINTS, ROAD_STYLES, type RoadCtx } from './roadPainter'
 
 function fakeCtx() {
   const calls: string[] = []
@@ -129,6 +129,54 @@ describe('drawRoads', () => {
     )
     expect(calls).toContain('globalAlpha=0.6')
     expect(calls.at(-2)).toBe('globalAlpha=1')
+  })
+
+  it('strokes all roads of one class and opacity together', () => {
+    const { ctx, calls } = fakeCtx()
+    const line = (index: number, z: number, flags = 0): SyntheticRoad => ({
+      index,
+      flags,
+      roadClass: 'local',
+      points: [
+        [1100, z],
+        [1200, z],
+        [1300, z],
+      ],
+    })
+    const stats = drawRoads(
+      ctx,
+      [tile([line(1, -900), line(2, -950)], 1), tile([line(3, -980), line(4, -990, 2)], 1)],
+      vp,
+      size,
+    )
+    expect(stats.roads).toBe(4)
+    // One path for the three solid roads, one for the chord.
+    expect(calls.filter((c) => c === 'stroke()')).toHaveLength(2)
+    expect(calls.filter((c) => c === 'beginPath()')).toHaveLength(2)
+    expect(calls.filter((c) => c.startsWith('moveTo('))).toHaveLength(4)
+    expect(calls.filter((c) => c.startsWith('lineTo('))).toHaveLength(8)
+    expect(calls).toContain('moveTo(100,100)')
+    expect(calls).toContain('lineTo(200,100)')
+    const solidStroke = calls.indexOf('stroke()')
+    expect(calls.indexOf('globalAlpha=0.6')).toBeGreaterThan(solidStroke)
+  })
+
+  it('splits a class into several paths when it has very many points', () => {
+    const { ctx, calls } = fakeCtx()
+    const perRoad = 100
+    const count = Math.ceil((MAX_PATH_POINTS * 2.5) / perRoad)
+    const roads: SyntheticRoad[] = Array.from({ length: count }, (_, i) => ({
+      index: i + 1,
+      points: Array.from(
+        { length: perRoad },
+        (_, j) => [1100 + j, -900 - (i % 50)] as [number, number],
+      ),
+    }))
+    const stats = drawRoads(ctx, [tile(roads)], vp, size)
+    expect(stats.roads).toBe(count)
+    const strokes = calls.filter((c) => c === 'stroke()').length
+    expect(strokes).toBe(Math.ceil((count * perRoad) / MAX_PATH_POINTS))
+    expect(calls.filter((c) => c.startsWith('moveTo('))).toHaveLength(count)
   })
 
   it('clears the canvas, also without roads', () => {

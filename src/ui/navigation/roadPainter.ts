@@ -4,7 +4,7 @@
  */
 import type { MapTile, RoadClass } from '@/domain/mapTile'
 import { ROAD_FLAG_CHORD } from '@/domain/mapTile'
-import { toScreen, type Size, type Viewport } from '@/domain/mapViewport'
+import type { Size, Viewport } from '@/domain/mapViewport'
 
 export interface RoadStyle {
   color: string
@@ -21,6 +21,13 @@ export const ROAD_STYLES: Record<RoadClass, RoadStyle> = {
   minor: { color: '#dccfbf', width: 1 },
   rail: { color: '#b5aca1', width: 1, dash: [4, 3] },
 }
+
+/**
+ * Points per stroked path, a measured compromise (docs/map.md, M0). Roads of one class are
+ * stroked together: the memory of the WebView2 GPU process grows with the number of paths
+ * drawn, while a single path with tens of thousands of points rasterises slowly.
+ */
+export const MAX_PATH_POINTS = 4096
 
 /** Most important on top. */
 const DRAW_ORDER: readonly RoadClass[] = ['rail', 'minor', 'local', 'primary', 'motorway']
@@ -42,9 +49,17 @@ export interface DrawStats {
   offscreen: number
 }
 
+interface Visible {
+  tile: MapTile
+  road: MapTile['roads'][number]
+}
+
 /**
  * Draws every road once (a road crossing several tiles is listed in each). Roads entirely
  * outside the canvas are skipped. Chords (no estimated curve) are drawn fainter.
+ *
+ * All roads of one class and opacity form one path with one stroke, at most ten per frame,
+ * instead of one stroke per road. Points are transformed inline, without an object per point.
  */
 export function drawRoads(
   ctx: RoadCtx,
@@ -58,52 +73,76 @@ export function drawRoads(
   const stats: DrawStats = { roads: 0, offscreen: 0 }
   const zoomBonus = vp.scale >= 0.4 ? 1.5 : vp.scale >= 0.05 ? 0.5 : 0
   const margin = 8
+  const k = vp.scale
+  const left = -margin
+  const top = -margin
+  const right = size.width + margin
+  const bottom = size.height + margin
+
+  // Visible roads per class, solid and chord apart; each road once.
+  const groups = new Map<RoadClass, [Visible[], Visible[]]>()
+  for (const c of DRAW_ORDER) groups.set(c, [[], []])
+  const seen = new Set<number>()
+  for (const tile of tiles) {
+    const ax = size.width / 2 + (tile.originX - vp.cx) * k
+    const ay = size.height / 2 + (tile.originZ - vp.cz) * k
+    const pts = tile.points
+    for (const road of tile.roads) {
+      if (seen.has(road.index)) continue
+      seen.add(road.index)
+      let minX = Infinity
+      let maxX = -Infinity
+      let minY = Infinity
+      let maxY = -Infinity
+      const end = (road.first + road.count) * 2
+      for (let i = road.first * 2; i < end; i += 2) {
+        const x = ax + pts[i]! * k
+        const y = ay + pts[i + 1]! * k
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+      if (maxX < left || minX > right || maxY < top || minY > bottom) {
+        stats.offscreen++
+        continue
+      }
+      groups.get(road.roadClass)![road.flags & ROAD_FLAG_CHORD ? 1 : 0].push({ tile, road })
+      stats.roads++
+    }
+  }
+
   for (const roadClass of DRAW_ORDER) {
     const style = ROAD_STYLES[roadClass]
+    const [solid, chords] = groups.get(roadClass)!
+    if (solid.length === 0 && chords.length === 0) continue
     ctx.strokeStyle = style.color
     ctx.lineWidth = style.width + zoomBonus
     ctx.setLineDash(style.dash ?? [])
-    const drawn = new Set<number>()
-    for (const tile of tiles) {
-      for (const road of tile.roads) {
-        if (road.roadClass !== roadClass || drawn.has(road.index)) continue
-        drawn.add(road.index)
-        const xs: number[] = []
-        const ys: number[] = []
-        let minX = Infinity
-        let maxX = -Infinity
-        let minY = Infinity
-        let maxY = -Infinity
-        for (let i = road.first; i < road.first + road.count; i++) {
-          const p = toScreen(
-            vp,
-            size,
-            tile.originX + tile.points[i * 2]!,
-            tile.originZ + tile.points[i * 2 + 1]!,
-          )
-          xs.push(p.x)
-          ys.push(p.y)
-          minX = Math.min(minX, p.x)
-          maxX = Math.max(maxX, p.x)
-          minY = Math.min(minY, p.y)
-          maxY = Math.max(maxY, p.y)
+    for (const [list, alpha] of [
+      [solid, 1],
+      [chords, 0.6],
+    ] as const) {
+      if (list.length === 0) continue
+      ctx.globalAlpha = alpha
+      let points = 0
+      ctx.beginPath()
+      for (const { tile, road } of list) {
+        if (points > 0 && points + road.count > MAX_PATH_POINTS) {
+          ctx.stroke()
+          ctx.beginPath()
+          points = 0
         }
-        if (
-          maxX < -margin ||
-          minX > size.width + margin ||
-          maxY < -margin ||
-          minY > size.height + margin
-        ) {
-          stats.offscreen++
-          continue
-        }
-        ctx.globalAlpha = road.flags & ROAD_FLAG_CHORD ? 0.6 : 1
-        ctx.beginPath()
-        ctx.moveTo(xs[0]!, ys[0]!)
-        for (let i = 1; i < xs.length; i++) ctx.lineTo(xs[i]!, ys[i]!)
-        ctx.stroke()
-        stats.roads++
+        points += road.count
+        const ax = size.width / 2 + (tile.originX - vp.cx) * k
+        const ay = size.height / 2 + (tile.originZ - vp.cz) * k
+        const pts = tile.points
+        const first = road.first * 2
+        ctx.moveTo(ax + pts[first]! * k, ay + pts[first + 1]! * k)
+        const end = (road.first + road.count) * 2
+        for (let i = first + 2; i < end; i += 2) ctx.lineTo(ax + pts[i]! * k, ay + pts[i + 1]! * k)
       }
+      ctx.stroke()
     }
   }
   ctx.globalAlpha = 1

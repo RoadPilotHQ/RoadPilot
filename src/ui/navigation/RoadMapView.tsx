@@ -12,6 +12,7 @@ import {
 } from '@/domain/mapViewport'
 import type { GameId } from '@/domain/types'
 import { useVehicleFormat } from '../vehicle/format'
+import { fitCanvas, useDevicePixelRatio } from './canvasSize'
 import { useElementSize } from './PathCanvas'
 import { drawRoads, type RoadCtx } from './roadPainter'
 import { useMapTiles } from '@/state/mapTiles'
@@ -47,6 +48,7 @@ export function RoadMapView({
   const box = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const size = useElementSize(box)
+  const ratio = useDevicePixelRatio()
   const [free, setFree] = useState<Viewport | null>(null)
   const [followScale, setFollowScale] = useState(DEFAULT_FOLLOW_SCALE)
   const bounds = status.bounds!
@@ -77,9 +79,10 @@ export function RoadMapView({
   // Distinct roads of the loaded tiles (a road crossing tiles is listed in each).
   const roads = new Set(view.tiles.flatMap((t) => t.roads.map((r) => r.index))).size
 
-  // Draw at most once per frame, and only when the tiles, the view or the size changed.
+  // Draw at most once per frame, and only when the tiles, the view, the size or the pixel
+  // ratio changed.
   const drawKey = viewport
-    ? `${viewport.cx}|${viewport.cz}|${viewport.scale}|${size.width}x${size.height}|` +
+    ? `${viewport.cx}|${viewport.cz}|${viewport.scale}|${size.width}x${size.height}@${ratio}|` +
       view.tiles.map((t) => `${t.contentId}/${t.level}/${t.x}/${t.z}`).join(',')
     : ''
   const lastDraw = useRef('')
@@ -92,9 +95,9 @@ export function RoadMapView({
     if (pending.current !== null) cancelAnimationFrame(pending.current)
     pending.current = requestAnimationFrame(() => {
       pending.current = null
-      const ratio = window.devicePixelRatio || 1
-      el.width = Math.max(1, Math.round(size.width * ratio))
-      el.height = Math.max(1, Math.round(size.height * ratio))
+      // The backing store is reallocated only when its pixel size changes, never for a
+      // zoom or a pan.
+      fitCanvas(el, size.width, size.height, ratio)
       const ctx = el.getContext?.('2d') as (CanvasRenderingContext2D & RoadCtx) | null
       if (!ctx) return
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0)

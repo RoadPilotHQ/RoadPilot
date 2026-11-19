@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createMapSource } from '@/backend/mapSource'
 import { fakeMapBridge } from '@/test/fakeMap'
 import { encodeTile, GOLDEN_REQUEST } from '@/test/tileFixtures'
-import { TileStore, type TileTarget } from './mapTiles'
+import { TILE_BATCH_MAX_WAIT_MS, TileStore, type TileTarget } from './mapTiles'
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
 
@@ -88,6 +88,73 @@ describe('TileStore', () => {
     release(null)
     await flush()
     expect(store.view(target([{ x: 0, z: 0 }])).tiles).toHaveLength(0)
+  })
+
+  it('reports a round of tiles once, when every tile has arrived', async () => {
+    const releases = new Map<number, () => void>()
+    const { source } = setup(
+      (x, z, contentId) =>
+        new Promise((r) =>
+          releases.set(x, () =>
+            r(
+              encodeTile({ ...GOLDEN_REQUEST, contentId, x, z }, [
+                {
+                  points: [
+                    [x * 1024, 0],
+                    [x * 1024 + 5, 0],
+                  ],
+                },
+              ]),
+            ),
+          ),
+        ),
+    )
+    const store = new TileStore(source)
+    let notified = 0
+    store.subscribe(() => notified++)
+    const t = target([0, 1, 2].map((x) => ({ x, z: 0 })))
+    store.request(t)
+    await flush()
+    releases.get(2)!()
+    await flush()
+    releases.get(0)!()
+    await flush()
+    expect(notified).toBe(0)
+    releases.get(1)!()
+    await flush()
+    expect(notified).toBe(1)
+    expect(store.view(t).tiles).toHaveLength(3)
+  })
+
+  it('shows the arrived part of a round when one tile is slow', async () => {
+    let releaseSlow: () => void = () => {}
+    const { source } = setup((x, z, contentId) => {
+      const tile = encodeTile({ ...GOLDEN_REQUEST, contentId, x, z }, [
+        {
+          points: [
+            [x * 1024, 0],
+            [x * 1024 + 5, 0],
+          ],
+        },
+      ])
+      if (x === 0) return Promise.resolve(tile)
+      return new Promise((r) => (releaseSlow = () => r(tile)))
+    })
+    const store = new TileStore(source)
+    let notified = 0
+    store.subscribe(() => notified++)
+    const t = target([0, 1].map((x) => ({ x, z: 0 })))
+    store.request(t)
+    await flush()
+    expect(notified).toBe(0)
+    await new Promise((r) => setTimeout(r, TILE_BATCH_MAX_WAIT_MS + 20))
+    expect(notified).toBe(1)
+    expect(store.view(t)).toMatchObject({ loading: 1 })
+    expect(store.view(t).tiles).toHaveLength(1)
+    releaseSlow()
+    await flush()
+    expect(notified).toBe(2)
+    expect(store.view(t).tiles).toHaveLength(2)
   })
 
   it('counts failed and malformed tiles without drawing them', async () => {

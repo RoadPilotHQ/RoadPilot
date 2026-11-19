@@ -9,6 +9,8 @@ import { useMap } from './MapProvider'
 export const TILE_CACHE_BYTES = 48 * 1024 * 1024
 /** Requests are bundled: view changes within this time join one request round. */
 export const TILE_REQUEST_DELAY_MS = 40
+/** Responses are bundled too; a partly answered round is shown after this time at the latest. */
+export const TILE_BATCH_MAX_WAIT_MS = 100
 
 type Entry =
   | { state: 'loading' }
@@ -63,6 +65,27 @@ export class TileStore {
     this.listeners.forEach((l) => l())
   }
 
+  // Tile responses are bundled: one notification (and so one redraw) when every request of a
+  // round is answered, or after `TILE_BATCH_MAX_WAIT_MS` if some are slow, so that loading
+  // never leaves the map waiting long for its first tiles.
+  private inFlight = 0
+  private dirty = false
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
+
+  private arrived() {
+    this.dirty = true
+    if (this.inFlight === 0) this.flush()
+    else this.flushTimer ??= setTimeout(() => this.flush(), TILE_BATCH_MAX_WAIT_MS)
+  }
+
+  private flush() {
+    if (this.flushTimer !== null) clearTimeout(this.flushTimer)
+    this.flushTimer = null
+    if (!this.dirty) return
+    this.dirty = false
+    this.notify()
+  }
+
   /** Drops everything, for example when the map is released. */
   reset() {
     if (this.contentId === null && this.cache.size === 0) return
@@ -90,9 +113,14 @@ export class TileStore {
         continue
       }
       this.cache.set(key, { state: 'loading' })
+      this.inFlight++
       void this.source.fetchTile(game, { contentId, level, x: t.x, z: t.z, tileSize }).then((r) => {
+        this.inFlight--
         // Obsolete: the package changed while this tile was on its way.
-        if (this.contentId !== contentId || !this.cache.has(key)) return
+        if (this.contentId !== contentId || !this.cache.has(key)) {
+          if (this.inFlight === 0) this.flush()
+          return
+        }
         if ('tile' in r) {
           this.cache.set(key, { state: 'ready', tile: r.tile })
           this.bytes += r.tile.byteLength
@@ -100,7 +128,7 @@ export class TileStore {
         } else {
           this.cache.set(key, { state: 'failed', failure: r.failure })
         }
-        this.notify()
+        this.arrived()
       })
     }
   }

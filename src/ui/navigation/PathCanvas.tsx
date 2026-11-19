@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PathTrace } from '@/domain/path'
+import { fitCanvas, useDevicePixelRatio } from './canvasSize'
 import { computeView, drawTrace, type Palette, type View, type ViewMode } from './pathView'
 
 /** Theme colours; canvas drawing cannot read CSS variables cheaply on every frame. */
@@ -60,14 +61,14 @@ export function PathCanvas({
   const box = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const size = useElementSize(box)
+  const ratio = useDevicePixelRatio()
   const view = useMemo(() => computeView(trace, size.width, size.height, mode), [trace, size, mode])
 
   useEffect(() => {
     const el = canvas.current
     if (!el) return
-    const ratio = window.devicePixelRatio || 1
-    el.width = Math.max(1, Math.round(size.width * ratio))
-    el.height = Math.max(1, Math.round(size.height * ratio))
+    // The backing store is reallocated only when its pixel size changes.
+    fitCanvas(el, size.width, size.height, ratio)
     const ctx = el.getContext?.('2d')
     if (!ctx) return
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
@@ -76,7 +77,7 @@ export function PathCanvas({
       return
     }
     drawTrace(ctx, trace, view, size, PATH_PALETTE, stale)
-  }, [trace, size, view, stale])
+  }, [trace, size, view, stale, ratio])
 
   return (
     <div ref={box} className="path-canvas-box">
