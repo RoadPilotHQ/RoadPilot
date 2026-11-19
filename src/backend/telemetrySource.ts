@@ -37,7 +37,7 @@ export function createTelemetrySource(bridge: TelemetryBridge = tauriBridge): Te
 
   const apply = (update: TelemetryUpdate) => {
     if (disposed) return
-    snapshot = snapshotFromTelemetry(update)
+    snapshot = snapshotFromTelemetry(update, snapshot)
     listeners.forEach((listener) => listener())
   }
 

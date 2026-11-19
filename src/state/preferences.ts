@@ -2,6 +2,7 @@ import {
   ASSISTANCE_SYSTEMS,
   AUTOPILOT_FEATURES,
   DEFAULT_PREFERENCES,
+  UNIT_PREFERENCES,
   type DrivingDistance,
   type Preferences,
 } from '@/domain/types'
@@ -30,10 +31,12 @@ function pickBooleans<K extends string>(
 export function parsePreferences(raw: unknown): Preferences {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const distance = DISTANCES.find((d) => d === obj.drivingDistance)
+  const units = UNIT_PREFERENCES.find((u) => u === obj.units)
   return {
     autopilot: pickBooleans(AUTOPILOT_FEATURES, obj.autopilot, DEFAULT_PREFERENCES.autopilot),
     assistance: pickBooleans(ASSISTANCE_SYSTEMS, obj.assistance, DEFAULT_PREFERENCES.assistance),
     drivingDistance: distance ?? DEFAULT_PREFERENCES.drivingDistance,
+    units: units ?? DEFAULT_PREFERENCES.units,
   }
 }
 

@@ -14,6 +14,7 @@ import type {
   DashboardSnapshot,
   DrivingDistance,
   Preferences,
+  UnitPreference,
 } from '@/domain/types'
 import { loadPreferences, savePreferences } from './preferences'
 
@@ -23,6 +24,7 @@ interface DashboardContextValue {
   setAutopilotFeature: (feature: AutopilotFeature, enabled: boolean) => void
   setAssistanceSystem: (system: AssistanceSystem, enabled: boolean) => void
   setDrivingDistance: (distance: DrivingDistance) => void
+  setUnits: (units: UnitPreference) => void
 }
 
 const DashboardContext = createContext<DashboardContextValue | null>(null)
@@ -54,6 +56,7 @@ export function DashboardProvider({
       setAssistanceSystem: (system, enabled) =>
         update((p) => ({ ...p, assistance: { ...p.assistance, [system]: enabled } })),
       setDrivingDistance: (drivingDistance) => update((p) => ({ ...p, drivingDistance })),
+      setUnits: (units) => update((p) => ({ ...p, units })),
     }),
     [snapshot, preferences, update],
   )

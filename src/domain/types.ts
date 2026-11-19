@@ -25,28 +25,69 @@ export type AssistanceSystem = (typeof ASSISTANCE_SYSTEMS)[number]
 /** Whether the backend actually implements a feature. */
 export type Availability = 'available' | 'unavailable'
 
-/** `null` means the value is not available from the current data source. */
+/**
+ * Vehicle values of the current frame. `null` means the value is not available from the
+ * current data source; `TelemetryMeta.invalidVehicleFields` says whether it was removed as
+ * invalid. Units are part of every name and never change; conversion happens only for display.
+ */
 export interface VehicleData {
+  brand: string | null
+  model: string | null
   /** Signed; negative while reversing. */
   speedKmh: number | null
   /** Cruise control set speed. */
   targetSpeedKmh: number | null
   engineRpm: number | null
-  /** Positive forward, zero neutral, negative reverse. */
+  /** Engine speed limit from the truck configuration. */
+  rpmLimit: number | null
+  /** Engine gear: positive forward, zero neutral, negative reverse. */
   gear: number | null
+  /** Gear shown on the in-game dashboard. */
+  displayedGear: number | null
+  forwardGears: number | null
+  reverseGears: number | null
   cruiseControl: boolean | null
   engineRunning: boolean | null
+  electricOn: boolean | null
   fuelL: number | null
-  fuelRangeKm: number | null
+  fuelCapacityL: number | null
   /** Calculated from fuel and tank capacity. */
   fuelPercent: number | null
+  /** Game estimate. */
+  fuelRangeKm: number | null
+  /** Game average. */
+  fuelConsumptionLPer100km: number | null
+  fuelWarning: boolean | null
+  adblueL: number | null
+  adblueCapacityL: number | null
   /** Approximated by the game, not simulated. */
   waterTemperatureC: number | null
-  adblueL: number | null
   oilTemperatureC: number | null
+  oilPressurePsi: number | null
   batteryVoltageV: number | null
+  odometerKm: number | null
   parkingBrake: boolean | null
+  engineBrake: boolean | null
   retarderLevel: number | null
+  retarderSteps: number | null
+  brakeAirPressurePsi: number | null
+  brakeTemperatureC: number | null
+}
+
+export type VehicleField = keyof VehicleData
+
+/** Where the current values come from and how old they are. */
+export interface TelemetryMeta {
+  /** 1 = speed, RPM and gear only. */
+  schemaVersion: number
+  gameVersion: string | null
+  sequence: number
+  /** When RoadPilot received the frame (Unix epoch milliseconds). */
+  receivedAtUnixMs: number
+  /** Vehicle values removed as invalid in this frame. */
+  invalidVehicleFields: VehicleField[]
+  /** Wire paths of all values removed as invalid, as reported by the telemetry reader. */
+  invalidFields: string[]
 }
 
 /** Driver inputs and longitudinal dynamics. */
@@ -126,6 +167,12 @@ export interface DashboardSnapshot {
   game: GameId | null
   /** The game reported its simulation as paused. */
   paused: boolean
+  /** Present with live values only. */
+  telemetry: TelemetryMeta | null
+  /** Receive time of the newest frame of this game session, kept while it is interrupted. */
+  lastFrameAtUnixMs: number | null
+  /** Technical detail of a telemetry error. */
+  error: string | null
   autopilotActive: boolean
   vehicle: VehicleData | null
   job: JobData | null
@@ -139,11 +186,17 @@ export interface DashboardSnapshot {
   }
 }
 
+/** `auto` follows the game: metric for ETS2, US customary for ATS. */
+export const UNIT_PREFERENCES = ['auto', 'metric', 'imperial'] as const
+export type UnitPreference = (typeof UNIT_PREFERENCES)[number]
+
 /** User choices. Persisted locally; not yet applied by any driving backend. */
 export interface Preferences {
   autopilot: Record<AutopilotFeature, boolean>
   assistance: Record<AssistanceSystem, boolean>
   drivingDistance: DrivingDistance
+  /** Display units of the vehicle data. */
+  units: UnitPreference
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -157,4 +210,5 @@ export const DEFAULT_PREFERENCES: Preferences = {
     autoBraking: true,
   },
   drivingDistance: 'medium',
+  units: 'auto',
 }

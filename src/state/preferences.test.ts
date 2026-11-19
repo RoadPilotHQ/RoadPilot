@@ -24,4 +24,15 @@ describe('preferences', () => {
     localStorage.setItem(PREFERENCES_KEY, '{not json')
     expect(loadPreferences()).toEqual(DEFAULT_PREFERENCES)
   })
+
+  it('stores the unit choice and defaults to following the game', () => {
+    expect(DEFAULT_PREFERENCES.units).toBe('auto')
+    expect(parsePreferences({ units: 'imperial' }).units).toBe('imperial')
+    expect(parsePreferences({ units: 'parsecs' }).units).toBe('auto')
+    // Preferences saved before the unit choice existed still load.
+    expect(parsePreferences({ drivingDistance: 'long' })).toEqual({
+      ...DEFAULT_PREFERENCES,
+      drivingDistance: 'long',
+    })
+  })
 })

@@ -1,14 +1,19 @@
 import type { TelemetryData, TelemetryUpdate } from '@/domain/telemetry'
 
+/*
+ * Synthetic telemetry for tests only; the application never shows it. Frames are stamped as
+ * received now, so they count as fresh unless a test says otherwise.
+ */
+
 /** Telemetry data with every value absent, as from a game that provides nothing. */
-export function emptyData(): TelemetryData {
+export function emptyData(receivedAtUnixMs: number = Date.now()): TelemetryData {
   return {
     source: {
       schemaVersion: 2,
       gameVersion: '1.21',
       sequence: 1,
       simulationTimeUs: 1,
-      receivedAtUnixMs: 1,
+      receivedAtUnixMs,
       invalidFields: [],
     },
     vehicle: {
@@ -89,8 +94,8 @@ export function emptyData(): TelemetryData {
 }
 
 /** A realistic connected ETS2 frame with an active job. */
-export function fullData(): TelemetryData {
-  const d = emptyData()
+export function fullData(receivedAtUnixMs: number = Date.now()): TelemetryData {
+  const d = emptyData(receivedAtUnixMs)
   Object.assign(d.vehicle, {
     speedKmh: 83.4,
     engineRpm: 1350.4,

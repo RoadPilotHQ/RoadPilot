@@ -20,22 +20,46 @@ describe('snapshotFromTelemetry', () => {
     expect(s.connection).toBe('connected')
     expect(s.game).toBe('ets2')
     expect(s.vehicle).toEqual({
+      brand: null,
+      model: null,
       speedKmh: 83.4,
       targetSpeedKmh: 80,
       engineRpm: 1350.4,
+      rpmLimit: null,
       gear: 11,
+      displayedGear: null,
+      forwardGears: null,
+      reverseGears: null,
       cruiseControl: true,
       engineRunning: true,
+      electricOn: null,
       fuelL: 412.5,
-      fuelRangeKm: 1240,
+      fuelCapacityL: 800,
       fuelPercent: 51.6,
-      waterTemperatureC: 88,
+      fuelRangeKm: 1240,
+      fuelConsumptionLPer100km: null,
+      fuelWarning: null,
       adblueL: 60,
+      adblueCapacityL: null,
+      waterTemperatureC: 88,
       oilTemperatureC: 102,
+      oilPressurePsi: null,
       batteryVoltageV: 24.1,
+      odometerKm: null,
       parkingBrake: false,
+      engineBrake: null,
       retarderLevel: 2,
+      retarderSteps: null,
+      brakeAirPressurePsi: null,
+      brakeTemperatureC: null,
     })
+    expect(s.telemetry).toMatchObject({
+      schemaVersion: 2,
+      gameVersion: '1.21',
+      sequence: 1,
+      invalidVehicleFields: [],
+    })
+    expect(s.lastFrameAtUnixMs).toBe(s.telemetry?.receivedAtUnixMs)
     expect(s.dynamics).toEqual({
       accelerationMs2: -1.26,
       throttle: 0.4,
@@ -127,6 +151,72 @@ describe('snapshotFromTelemetry', () => {
 
   it('treats a connected update without data as demo, never as live zeros', () => {
     expect(snapshotFromTelemetry({ ...connected, data: null }).mode).toBe('demo')
+  })
+
+  it('marks values the telemetry reader removed as invalid, including calculated ones', () => {
+    const data = fullData()
+    data.vehicle.fuelL = null
+    data.vehicle.fuelPercent = null
+    data.source.invalidFields = ['truck.fuelL', 'truck.odometerKm', 'job.income']
+    const s = snapshotFromTelemetry(update({ status: 'connected', game: 'ets2', data }))
+    expect(s.telemetry?.invalidVehicleFields).toEqual(['fuelL', 'fuelPercent', 'odometerKm'])
+    expect(s.telemetry?.invalidFields).toEqual(['truck.fuelL', 'truck.odometerKm', 'job.income'])
+  })
+
+  it('rejects values of the wrong type or outside their range at the UI boundary', () => {
+    const data = fullData()
+    // Values the Rust backend can never send; a defect must not reach the screen as a number.
+    Object.assign(data.vehicle, {
+      speedKmh: Number.NaN,
+      engineRpm: Number.POSITIVE_INFINITY,
+      gear: 2.5,
+      fuelPercent: 140,
+      fuelL: -3,
+      parkingBrake: 'yes',
+      brand: 7,
+      retarderLevel: -1,
+    })
+    const s = snapshotFromTelemetry(update({ status: 'connected', game: 'ets2', data }))
+    expect(s.vehicle).toMatchObject({
+      speedKmh: null,
+      engineRpm: null,
+      gear: null,
+      fuelPercent: null,
+      fuelL: null,
+      parkingBrake: null,
+      brand: null,
+      retarderLevel: null,
+      waterTemperatureC: 88,
+    })
+    expect([...(s.telemetry?.invalidVehicleFields ?? [])].sort()).toEqual(
+      [
+        'brand',
+        'engineRpm',
+        'fuelL',
+        'fuelPercent',
+        'gear',
+        'parkingBrake',
+        'retarderLevel',
+        'speedKmh',
+      ].sort(),
+    )
+  })
+
+  it('keeps the age of the last frame while interrupted, but not across games or exits', () => {
+    const live = snapshotFromTelemetry(
+      update({ status: 'connected', game: 'ats', data: fullData(5_000) }),
+    )
+    const stale = snapshotFromTelemetry(status('reconnecting', 'ats'), live)
+    expect(stale.lastFrameAtUnixMs).toBe(5_000)
+    expect(stale.telemetry).toBeNull()
+    expect(snapshotFromTelemetry(status('reconnecting', 'ets2'), live).lastFrameAtUnixMs).toBeNull()
+    expect(snapshotFromTelemetry(status('disconnected', null), stale).lastFrameAtUnixMs).toBeNull()
+  })
+
+  it('passes the error detail through', () => {
+    const s = snapshotFromTelemetry(update({ status: 'error', error: 'pipe busy' }))
+    expect(s.error).toBe('pipe busy')
+    expect(s.mode).toBe('demo')
   })
 })
 
