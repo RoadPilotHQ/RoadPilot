@@ -119,7 +119,7 @@ For checks in a plain browser there is a **synthetic test map** (`src/dev/synthe
 
 ## Coordinates
 
-Map positions are drawn in the package's own coordinates (X east, Z south, ÷256 world units; the physical unit is unconfirmed, RoadPilot-Map T3). Telemetry positions are **not** drawn on the map. An offline comparison in the Phase 2.4 audit found ATS telemetry and the ATS package consistent without transformation in one region of about 2 × 3 km; ETS2 is unverified. Placing the truck or its path on the map needs a separate verification and decision (Phase 2.4D).
+Map positions are drawn in the package's own coordinates (X east, Z south, ÷256 world units; the physical unit is unconfirmed, RoadPilot-Map T3). Telemetry positions are **not** drawn on the map. An offline comparison in the Phase 2.4 audit found ATS telemetry and the ATS package consistent without transformation in one region of about 2 × 3 km; ETS2 is unverified. Placing the truck or its path on the map needs a separate verification and decision (Phase 2.4D). The Phase 2.4D B0 audit (rechecked figures, verification matrix, recommendation) is [ADR-002](architecture/ADR-002-coordinate-system.md); rendering and data formats are [ADR-003](architecture/ADR-003-map-rendering.md) and [ADR-004](architecture/ADR-004-map-data-formats.md).
 
 ## Measured
 
