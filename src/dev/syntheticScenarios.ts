@@ -1,5 +1,5 @@
 /**
- * DEVELOPMENT ONLY (M2 render lab): reproducible synthetic road networks and their tiles.
+ * DEVELOPMENT ONLY (M2 render lab, M3 additions): reproducible synthetic road networks and their tiles.
  * Generated from simple formulas and a seeded random generator; no game data, nothing derived
  * from map packages. Tiles are complete `MapTile` objects built like the backend lists roads:
  * a road appears, with all its points, in every tile its segments touch.
@@ -28,6 +28,7 @@ export type ScenarioId =
   | 'rail'
   | 'chords'
   | 'tileBorders'
+  | 'thin'
   | 'large'
   | 'stress'
 
@@ -45,6 +46,7 @@ export const SCENARIOS: readonly {
   { id: 'rail', label: 'Rail' },
   { id: 'chords', label: 'Chords' },
   { id: 'tileBorders', label: 'Roads across tile borders' },
+  { id: 'thin', label: 'Thin roads (M3)' },
   { id: 'large', label: 'Large map', defaultSegments: 100_000 },
   { id: 'stress', label: 'Stress test', defaultSegments: 1_000_000 },
 ]
@@ -331,6 +333,71 @@ function tileBorders(b: Builder): void {
   b.add('rail', sampled([100, 3000], [4000, 2700], 50))
 }
 
+/**
+ * M3: shapes that thin lines get wrong, once per road class (one band each), sized to be seen
+ * at overview zoom (scale about 0.03 to 0.05, i.e. 20 to 33 units per CSS pixel), where the
+ * production widths are 1 to 3 CSS pixels: straight and shallow lines, densely sampled curves
+ * and a circle (a joint every 1 to 2 pixels), zig-zags with joint angles from 20 to 160
+ * degrees, a grid of same-class crossings, a chord over a solid road, roads exactly on tile
+ * borders and a pair 2 units apart (less than a pixel). Classes cross each other at the end.
+ */
+function thin(b: Builder): void {
+  const rnd = seededRandom(SEED + 20)
+  const classes: RoadClass[] = ['motorway', 'primary', 'local', 'minor', 'rail']
+  classes.forEach((c, ci) => {
+    const z0 = 600 + ci * 3200
+    b.add(c, sampled([500, z0], [4000, z0], 60))
+    b.add(c, sampled([500, z0 + 400], [4000, z0 + 645], 60))
+    const phase = rnd() * Math.PI * 2
+    b.add(
+      c,
+      sampled([500, z0 + 1300], [4000, z0 + 1300], 40, (t) => Math.sin(phase + t * 14) * 300),
+    )
+    b.add(c, arc(5200, z0 + 900, 700, 0, Math.PI * 2, 30))
+    // Zig-zags: interior joint angle 20, 45, 90, 135 and 160 degrees.
+    ;[20, 45, 90, 135, 160].forEach((alpha, k) => {
+      const beta = ((180 - alpha) / 2) * (Math.PI / 180)
+      const zig: Pt[] = []
+      let x = 6400 + k * 900
+      let z = z0 + 900
+      zig.push([x, z])
+      for (let i = 0; i < 8; i++) {
+        const sgn = i % 2 ? -1 : 1
+        x += Math.cos(beta) * 180
+        z += Math.sin(beta) * 180 * sgn
+        zig.push([x, z])
+      }
+      b.add(c, zig)
+    })
+    // A grid of same-class crossings.
+    for (let i = 0; i < 5; i++) {
+      b.add(c, sampled([11000, z0 + i * 300], [12200, z0 + i * 300], 60))
+      b.add(c, sampled([11000 + i * 300, z0], [11000 + i * 300, z0 + 1200], 60))
+    }
+    // A chord across a solid road of the same class.
+    b.chord(c, [500, z0 + 2000], [4000, z0 + 2300])
+    b.add(c, sampled([500, z0 + 2300], [4000, z0 + 2000], 60))
+    // Exactly on tile borders (level 0: 1024 units) and a pair 2 units apart.
+    b.add(c, sampled([13312, z0], [13312, z0 + 2400], 60))
+    b.add(
+      c,
+      sampled(
+        [13400, 1024 * Math.round((z0 + 1500) / 1024)],
+        [16000, 1024 * Math.round((z0 + 1500) / 1024)],
+        60,
+      ),
+    )
+    b.add(c, sampled([5000, z0 + 2200], [9800, z0 + 2200], 80))
+    b.add(c, sampled([5000, z0 + 2202], [9800, z0 + 2202], 80))
+  })
+  // Classes crossing each other: diagonals over every band.
+  b.add('motorway', sampled([300, 300], [16000, 16000], 60))
+  b.add('primary', sampled([16000, 300], [300, 16000], 60))
+  b.add('local', sampled([4600, 200], [4600, 16200], 60))
+  b.add('minor', sampled([10500, 200], [10500, 16200], 60))
+  b.add('rail', sampled([200, 8100], [16200, 8300], 60))
+}
+
 /** A mixed network of exactly `target` segments. */
 function mixed(b: Builder, target: number, seed: number, width: number, height: number): void {
   const rnd = seededRandom(seed)
@@ -471,6 +538,10 @@ export function buildScenario(id: ScenarioId, requestedSegments?: number): Scena
     case 'tileBorders':
       tileBorders(b)
       bounds = [-4000, 0, 8000, 4096]
+      break
+    case 'thin':
+      thin(b)
+      bounds = [0, 0, 16384, 16400]
       break
     case 'large':
     case 'stress': {

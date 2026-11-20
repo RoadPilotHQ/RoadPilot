@@ -2,6 +2,8 @@
  * A fake WebGL 2 context for the renderer tests (jsdom has no WebGL). It records objects,
  * uploads and draws, and can fail shader compilation, linking or allocation, and lose and
  * restore the context through `WEBGL_lose_context` (events are dispatched synchronously).
+ * M3: framebuffers, textures and blend equations for the coverage mode, and configurable
+ * renderer strings for the GPU classification.
  */
 
 export interface FakeGlOptions {
@@ -12,11 +14,25 @@ export interface FakeGlOptions {
   outOfMemoryAfter?: number
   /** Shader compilation fails after the next restore. */
   failCompileAfterRestore?: boolean
+  /** Fragment shaders whose source contains this text fail to compile. */
+  failCompileMatching?: string
+  /**
+   * `loseContext` loses the context at once but holds the event back until
+   * `dispatchPendingLoss`, as browsers do (WebView2 dispatches it a few milliseconds later).
+   */
+  deferLossEvent?: boolean
+  /** `checkFramebufferStatus` reports an incomplete framebuffer. */
+  incompleteFramebuffer?: boolean
+  /** Strings of `WEBGL_debug_renderer_info`; null: the extension is missing. */
+  unmasked?: { renderer: string; vendor: string } | null
+  /** Plain `RENDERER` / `VENDOR` (masked in most browsers). */
+  renderer?: string
+  vendor?: string
 }
 
 interface Obj {
   id: number
-  kind: 'buffer' | 'vao' | 'shader' | 'program'
+  kind: 'buffer' | 'vao' | 'shader' | 'program' | 'framebuffer' | 'texture'
 }
 
 export class FakeWebGL2 {
@@ -43,6 +59,30 @@ export class FakeWebGL2 {
   readonly NO_ERROR = 0
   readonly OUT_OF_MEMORY = 0x0505
   readonly RENDERER = 0x1f01
+  readonly VENDOR = 0x1f00
+  readonly FRAMEBUFFER = 0x8d40
+  readonly DRAW_FRAMEBUFFER = 0x8ca9
+  readonly COLOR_ATTACHMENT0 = 0x8ce0
+  readonly COLOR_ATTACHMENT1 = 0x8ce1
+  readonly FRAMEBUFFER_COMPLETE = 0x8cd5
+  readonly FRAMEBUFFER_INCOMPLETE_ATTACHMENT = 0x8cd6
+  readonly TEXTURE_2D = 0x0de1
+  readonly TEXTURE0 = 0x84c0
+  readonly TEXTURE1 = 0x84c1
+  readonly RGBA8 = 0x8058
+  readonly R8 = 0x8229
+  readonly TEXTURE_MIN_FILTER = 0x2801
+  readonly TEXTURE_MAG_FILTER = 0x2800
+  readonly TEXTURE_WRAP_S = 0x2802
+  readonly TEXTURE_WRAP_T = 0x2803
+  readonly NEAREST = 0x2600
+  readonly CLAMP_TO_EDGE = 0x812f
+  readonly COLOR = 0x1800
+  readonly FUNC_ADD = 0x8006
+  readonly MAX = 0x8008
+  readonly TRIANGLES = 0x0004
+  static readonly UNMASKED_VENDOR_WEBGL = 0x9245
+  static readonly UNMASKED_RENDERER_WEBGL = 0x9246
 
   private nextId = 1
   private lost = false
@@ -55,9 +95,23 @@ export class FakeWebGL2 {
   deletedBuffers = 0
   deletedVaos = 0
   deletedPrograms = 0
-  draws: { count: number; vao: unknown; pass: number; stencilRef: number }[] = []
+  draws: {
+    count: number
+    vao: unknown
+    pass: number
+    stencilRef: number
+    framebuffer: unknown
+    blendEquation: number
+  }[] = []
+  /** Non-instanced draws (the composite pass). */
+  fullScreenDraws: { framebuffer: unknown; blend: boolean }[] = []
+  textureStorage: { format: number; width: number; height: number }[] = []
   private pass = -1
   private stencilRef = 0
+  private boundFramebuffer: unknown = null
+  private blendEq = 0x8006
+  private blend = false
+  private shaderSources = new Map<number, string>()
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -105,11 +159,22 @@ export class FakeWebGL2 {
   getExtension(name: string) {
     if (name === 'WEBGL_lose_context')
       return { loseContext: () => this.loseContext(), restoreContext: () => this.restoreContext() }
+    if (name === 'WEBGL_debug_renderer_info' && this.options.unmasked)
+      return {
+        UNMASKED_VENDOR_WEBGL: FakeWebGL2.UNMASKED_VENDOR_WEBGL,
+        UNMASKED_RENDERER_WEBGL: FakeWebGL2.UNMASKED_RENDERER_WEBGL,
+      }
     return null
   }
 
   getParameter(p: number) {
-    return p === this.RENDERER ? 'Fake GPU' : null
+    if (this.lost) return null
+    const u = this.options.unmasked
+    if (p === FakeWebGL2.UNMASKED_RENDERER_WEBGL) return u?.renderer ?? null
+    if (p === FakeWebGL2.UNMASKED_VENDOR_WEBGL) return u?.vendor ?? null
+    if (p === this.RENDERER) return this.options.renderer ?? 'Fake GPU'
+    if (p === this.VENDOR) return this.options.vendor ?? 'Fake'
+    return null
   }
 
   getError() {
@@ -121,8 +186,19 @@ export class FakeWebGL2 {
     if (this.lost) return
     this.lost = true
     this.live.clear()
-    this.canvas.dispatchEvent(new Event('webglcontextlost', { cancelable: true }))
+    const fire = () =>
+      this.canvas.dispatchEvent(new Event('webglcontextlost', { cancelable: true }))
+    if (this.options.deferLossEvent) this.pendingLossEvent = fire
+    else fire()
   }
+
+  /** With `deferLossEvent`: dispatches the loss event that `loseContext` held back. */
+  dispatchPendingLoss() {
+    const fire = this.pendingLossEvent
+    this.pendingLossEvent = null
+    fire?.()
+  }
+  private pendingLossEvent: (() => void) | null = null
 
   restoreContext() {
     if (!this.lost) return
@@ -137,12 +213,17 @@ export class FakeWebGL2 {
     if (s) this.shaderTypes.set(s.id, type)
     return s
   }
-  shaderSource() {}
+  shaderSource(s: Obj, source: string) {
+    if (s) this.shaderSources.set(s.id, source)
+  }
   compileShader() {}
   getShaderParameter(s: Obj) {
     if (this.lost) return null
     if (this.options.failCompileAfterRestore && this.restored > 0) return false
     const type = this.shaderTypes.get(s.id)
+    const match = this.options.failCompileMatching
+    if (match && type === this.FRAGMENT_SHADER && this.shaderSources.get(s.id)?.includes(match))
+      return false
     if (this.options.failCompile === 'vertex' && type === this.VERTEX_SHADER) return false
     if (this.options.failCompile === 'fragment' && type === this.FRAGMENT_SHADER) return false
     return true
@@ -179,6 +260,9 @@ export class FakeWebGL2 {
   uniform2f() {}
   uniform3f() {}
   uniform1fv() {}
+  uniform1iv() {}
+  uniform2fv() {}
+  uniform3fv() {}
 
   // Buffers and vertex arrays.
   createBuffer() {
@@ -221,9 +305,47 @@ export class FakeWebGL2 {
   clear() {}
   clearColor() {}
   clearStencil() {}
-  enable() {}
-  disable() {}
+  enable(cap: number) {
+    if (cap === this.BLEND) this.blend = true
+  }
+  disable(cap: number) {
+    if (cap === this.BLEND) this.blend = false
+  }
   blendFunc() {}
+  blendEquation(mode: number) {
+    this.blendEq = mode
+  }
+
+  // Framebuffers and textures (coverage mode).
+  createFramebuffer() {
+    return this.create('framebuffer')
+  }
+  deleteFramebuffer(f: unknown) {
+    this.remove(f, 'framebuffer')
+  }
+  bindFramebuffer(_target: number, f: unknown) {
+    this.boundFramebuffer = f
+  }
+  framebufferTexture2D() {}
+  drawBuffers() {}
+  checkFramebufferStatus() {
+    return this.options.incompleteFramebuffer
+      ? this.FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+      : this.FRAMEBUFFER_COMPLETE
+  }
+  clearBufferfv() {}
+  createTexture() {
+    return this.create('texture')
+  }
+  deleteTexture(t: unknown) {
+    this.remove(t, 'texture')
+  }
+  bindTexture() {}
+  activeTexture() {}
+  texParameteri() {}
+  texStorage2D(_t: number, _levels: number, format: number, width: number, height: number) {
+    if (!this.lost) this.textureStorage.push({ format, width, height })
+  }
   stencilMask() {}
   stencilOp() {}
   stencilFunc(_f: number, ref: number) {
@@ -231,7 +353,18 @@ export class FakeWebGL2 {
   }
   drawArraysInstanced(_mode: number, _first: number, _n: number, count: number) {
     if (this.lost) return
-    this.draws.push({ count, vao: this.boundVao, pass: this.pass, stencilRef: this.stencilRef })
+    this.draws.push({
+      count,
+      vao: this.boundVao,
+      pass: this.pass,
+      stencilRef: this.stencilRef,
+      framebuffer: this.boundFramebuffer,
+      blendEquation: this.blendEq,
+    })
+  }
+  drawArrays() {
+    if (this.lost) return
+    this.fullScreenDraws.push({ framebuffer: this.boundFramebuffer, blend: this.blend })
   }
 }
 

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { ROAD_CLASSES, ROAD_FLAG_CHORD, ROAD_FLAG_ESTIMATED } from '@/domain/mapTile'
+import { buildScenario, ScenarioTiles } from '@/dev/syntheticScenarios'
+import {
+  ROAD_CLASSES,
+  ROAD_FLAG_CHORD,
+  ROAD_FLAG_ESTIMATED,
+  type MapTile,
+  type RoadClass,
+} from '@/domain/mapTile'
+import { fitBounds } from '@/domain/mapViewport'
 import { tileOf } from '@/test/renderTiles'
 import {
   buildTileGeometry,
@@ -143,4 +151,146 @@ describe('buildTileGeometry', () => {
     ;(t.roads[0] as { roadClass: string }).roadClass = 'river'
     expect(buildTileGeometry(t).instances).toBe(0)
   })
+
+  it('matches the straightforward M2 builder on synthetic tiles and malformed input (M3)', () => {
+    const tiles: MapTile[] = []
+    for (const id of ['city', 'crossings', 'rail', 'chords', 'thin'] as const) {
+      const s = buildScenario(id)
+      const tiler = new ScenarioTiles(s)
+      tiles.push(
+        ...tiler.visible('full', fitBounds(s.bounds, { width: 900, height: 900 })!, {
+          width: 900,
+          height: 900,
+        }).tiles,
+      )
+    }
+    tiles.push(
+      tileOf([
+        { points: [0, 0, NaN, 1, 2, 2, 3, 3] },
+        { points: [5, 5, 5, 5, 5, 5] },
+        { points: [1, 1, 1, 1, 4, 5] },
+        { points: [0, 0, 1, 1], count: 9 },
+        { points: [0, 0, 1, 1], first: -1 },
+        { points: [0, 0], count: 1 },
+        { roadClass: 'rail', flags: ROAD_FLAG_CHORD, points: [0, 0, 3, 4, 3, 4, 6, 8] },
+      ]),
+    )
+    for (const t of tiles) {
+      const a = buildTileGeometry(t)
+      const b = referenceBuild(t)
+      expect({ ...a, data: undefined }).toEqual({ ...b, data: undefined })
+      const fa = new Float32Array(a.data)
+      const fb = new Float32Array(b.data)
+      const ua = new Uint8Array(a.data)
+      const ub = new Uint8Array(b.data)
+      // Counted in plain loops (one expect per instance would take seconds).
+      let mismatches = 0
+      for (let k = 0; k < a.instances; k++) {
+        for (let f = 0; f < 4; f++) if (fa[k * 6 + f] !== fb[k * 6 + f]) mismatches++
+        if (Math.abs(fa[k * 6 + 4]! - fb[k * 6 + 4]!) > Math.abs(fb[k * 6 + 4]!) * 1e-6)
+          mismatches++
+        if (ua[k * 24 + 20] !== ub[k * 24 + 20] || ua[k * 24 + 21] !== ub[k * 24 + 21]) mismatches++
+      }
+      expect(mismatches).toBe(0)
+    }
+  })
 })
+
+/** The M2 builder as first written (closure per segment, `hypot`), kept as the reference. */
+function referenceBuild(tile: MapTile) {
+  const pts = tile.points
+  const pointPairs = Math.floor(pts.length / 2)
+  const slot = (c: RoadClass, chord: boolean) => DRAW_ORDER.indexOf(c) * 2 + (chord ? 1 : 0)
+  const each = (first: number, count: number, emit: (i: number, d: number) => void) => {
+    let dist = 0
+    let emitted = 0
+    let skipped = 0
+    let zero = -1
+    for (let s = 0; s < count - 1; s++) {
+      const i = (first + s) * 2
+      const [x0, z0, x1, z1] = [pts[i]!, pts[i + 1]!, pts[i + 2]!, pts[i + 3]!]
+      if (![x0, z0, x1, z1].every(Number.isFinite)) {
+        skipped++
+        continue
+      }
+      const len = Math.hypot(x1 - x0, z1 - z0)
+      if (len === 0) {
+        if (zero < 0) zero = i
+        continue
+      }
+      emit(i, dist)
+      dist += len
+      emitted++
+    }
+    if (emitted === 0 && zero >= 0) {
+      emit(zero, 0)
+      emitted = 1
+    }
+    return { emitted, skipped }
+  }
+  const valid = (r: MapTile['roads'][number]) =>
+    r.count >= 2 &&
+    r.first >= 0 &&
+    r.first + r.count <= pointPairs &&
+    ROAD_CLASSES.includes(r.roadClass) &&
+    Number.isInteger(r.first) &&
+    Number.isInteger(r.count)
+  const perSlot = new Array<number>(10).fill(0)
+  const slots: number[] = []
+  let skippedRoads = 0
+  for (const r of tile.roads) {
+    const emitted = valid(r) ? each(r.first, r.count, () => {}).emitted : 0
+    if (emitted === 0) {
+      skippedRoads++
+      slots.push(-1)
+      continue
+    }
+    const s = slot(r.roadClass, (r.flags & ROAD_FLAG_CHORD) !== 0)
+    slots.push(s)
+    perSlot[s]! += emitted
+  }
+  const offsets: number[] = []
+  let total = 0
+  for (const c of perSlot) {
+    offsets.push(total)
+    total += c
+  }
+  const groups = DRAW_ORDER.map((roadClass, k) => ({
+    roadClass,
+    first: offsets[k * 2]!,
+    count: perSlot[k * 2]! + perSlot[k * 2 + 1]!,
+    chords: perSlot[k * 2 + 1]!,
+  }))
+  const data = new ArrayBuffer(total * 24)
+  const f32 = new Float32Array(data)
+  const u8 = new Uint8Array(data)
+  const cursor = offsets.slice()
+  const b = [Infinity, Infinity, -Infinity, -Infinity]
+  let skippedSegments = 0
+  let roads = 0
+  tile.roads.forEach((r, k) => {
+    const s = slots[k]!
+    if (s < 0) return
+    roads++
+    skippedSegments += each(r.first, r.count, (i, dist0) => {
+      const m = cursor[s]!++
+      for (let j = 0; j < 4; j++) f32[m * 6 + j] = pts[i + j]!
+      f32[m * 6 + 4] = dist0
+      u8[m * 24 + 20] = ROAD_CLASSES.indexOf(r.roadClass)
+      u8[m * 24 + 21] = r.flags & 0xff
+      b[0] = Math.min(b[0]!, pts[i]!, pts[i + 2]!)
+      b[1] = Math.min(b[1]!, pts[i + 1]!, pts[i + 3]!)
+      b[2] = Math.max(b[2]!, pts[i]!, pts[i + 2]!)
+      b[3] = Math.max(b[3]!, pts[i + 1]!, pts[i + 3]!)
+    }).skipped
+  })
+  return {
+    data,
+    instances: total,
+    groups,
+    roads,
+    skippedRoads,
+    skippedSegments,
+    bounds: total > 0 ? (b as [number, number, number, number]) : null,
+  }
+}

@@ -1,8 +1,9 @@
 /**
- * DEVELOPMENT ONLY: the M2 render lab. Compares the WebGL 2 prototype with the Canvas 2D
+ * DEVELOPMENT ONLY: the M2/M3 render lab. Compares the WebGL 2 prototype with the Canvas 2D
  * painter on synthetic road networks. It reads no package, no telemetry, calls no backend
  * command and changes no preference. `window.renderLab` is the interface of the desktop
- * measurement harness (docs/webgl-prototype.md).
+ * measurement harness (docs/webgl-prototype.md); in M3 it runs inside RoadPilot's own
+ * WebView2 as well as in a browser.
  */
 import './lab.css'
 import {
@@ -26,8 +27,12 @@ import type {
   RoadRenderer,
   SyntheticTile,
 } from '@/ui/navigation/render/types'
+import { readGpuInfo } from '@/ui/navigation/render/gpuInfo'
 import {
   createWebGL2RoadRenderer,
+  DEFAULT_CONTEXT_ATTRIBUTES,
+  DEFAULT_STENCIL_MODE,
+  DEFAULT_UPLOAD_BUDGET_MS,
   WebGL2RoadRenderer,
   type StencilMode,
 } from '@/ui/navigation/render/WebGL2RoadRenderer'
@@ -47,20 +52,29 @@ interface Config {
   segments: number
   lod: LodMode
   budgetMiB: number
+  /** M3: build-and-upload time per frame, ms; Infinity uploads everything at once (M2). */
+  uploadBudgetMs: number
   /** Test switch: the WebGL canvas refuses a context, as without WebGL 2. */
   simulateNoWebGL2: boolean
+  /** M3 test switch: no `WEBGL_debug_renderer_info`, masked `RENDERER` / `VENDOR`. */
+  simulateMaskedRenderer: boolean
+  /** M3: draw with a software renderer instead of falling back (comparisons only). */
+  allowSoftwareRenderer: boolean
 }
 
 const BACKGROUND: [number, number, number] = [0xf8, 0xf1, 0xe6]
 
 const config: Config = {
   renderer: 'webgl2',
-  stencilMode: 'coreFringe',
+  stencilMode: DEFAULT_STENCIL_MODE,
   scenario: 'small',
   segments: 100_000,
   lod: 'auto',
   budgetMiB: 64,
+  uploadBudgetMs: DEFAULT_UPLOAD_BUDGET_MS,
   simulateNoWebGL2: false,
+  simulateMaskedRenderer: false,
+  allowSoftwareRenderer: false,
 }
 
 // ---------------------------------------------------------------- DOM
@@ -69,15 +83,18 @@ const root = document.getElementById('lab')!
 root.className = 'lab'
 root.innerHTML = `
   <aside class="lab-panel">
-    <h1>Render lab (M2 prototype)</h1>
+    <h1>Render lab (M3 prototype)</h1>
     <p class="note">Synthetic data only. Not part of the dashboard.</p>
     <label>Renderer <select id="renderer"><option value="webgl2">WebGL 2</option><option value="canvas2d">Canvas 2D</option></select></label>
-    <label>Stencil <select id="stencil"><option value="coreFringe">core + fringe</option><option value="single">single pass (M1)</option><option value="off">off (comparison)</option></select></label>
+    <label>Overlaps <select id="stencil"><option value="coverage">coverage, MAX (M3)</option><option value="coreFringe">stencil core + fringe (M2)</option><option value="single">stencil single pass (M1)</option><option value="off">off (comparison)</option></select></label>
     <label>Scenario <select id="scenario">${SCENARIOS.map((s) => `<option value="${s.id}">${s.label}</option>`).join('')}</select></label>
     <label>Segments <input id="segments" type="number" min="10" step="1000" /></label>
     <label>Detail <select id="lod"><option value="auto">auto (as dashboard)</option><option value="full">full (level 0)</option></select></label>
     <label>GPU budget <input id="budget" type="number" min="0" step="8" /> </label>
+    <label>Upload ms/frame <input id="uploadBudget" type="number" min="0" step="1" placeholder="all at once" /></label>
     <label>No WebGL 2 <input id="nowebgl" type="checkbox" /></label>
+    <label>Masked renderer <input id="masked" type="checkbox" /></label>
+    <label>Allow software <input id="allowsw" type="checkbox" /></label>
     <div class="buttons">
       <button id="apply">Apply</button>
       <button id="zoomIn">+</button><button id="zoomOut">−</button>
@@ -133,10 +150,17 @@ let fallback: Fallback | null = null
 let lastSetTilesMs = 0
 let lastTileGenMs = 0
 const frameLog: FrameInfo[] = []
+/** Frames ever logged; `collect` counts on it, since the log drops its oldest entries. */
+let framesLogged = 0
 
 const host = new RoadRendererHost(stage, {
   get webgl() {
-    return { stencilMode: config.stencilMode, budgetBytes: config.budgetMiB * 1024 * 1024 }
+    return {
+      stencilMode: config.stencilMode,
+      budgetBytes: config.budgetMiB * 1024 * 1024,
+      uploadBudgetMs: config.uploadBudgetMs,
+      allowSoftwareRenderer: config.allowSoftwareRenderer,
+    }
   },
   createCanvas: () => {
     const c = document.createElement('canvas')
@@ -144,7 +168,7 @@ const host = new RoadRendererHost(stage, {
       const original = c.getContext.bind(c)
       c.getContext = ((type: string, attrs?: unknown) =>
         type === 'webgl2' ? null : original(type as '2d', attrs as never)) as never
-    }
+    } else if (config.simulateMaskedRenderer) maskRenderer(c)
     return c
   },
   schedule: (cb) => {
@@ -158,7 +182,9 @@ const host = new RoadRendererHost(stage, {
   onFrame: (info) => {
     lastFrame = info
     frameLog.push(info)
+    framesLogged++
     if (frameLog.length > 4000) frameLog.splice(0, 1000)
+    checkDpr()
     showStats()
   },
   onStatus: (_kind, s) => {
@@ -171,6 +197,26 @@ const host = new RoadRendererHost(stage, {
     showStats()
   },
 })
+
+/**
+ * Test switch: the canvas's WebGL 2 context hides the diagnostic extension and reports the
+ * masked strings some browsers use, as a browser without `WEBGL_debug_renderer_info` would.
+ */
+function maskRenderer(c: HTMLCanvasElement) {
+  const original = c.getContext.bind(c)
+  c.getContext = ((type: string, attrs?: unknown) => {
+    const ctx = original(type as 'webgl2', attrs as never) as WebGL2RenderingContext | null
+    if (type !== 'webgl2' || !ctx || (ctx as unknown as { masked?: boolean }).masked) return ctx
+    const getExtension = ctx.getExtension.bind(ctx)
+    const getParameter = ctx.getParameter.bind(ctx)
+    ctx.getExtension = ((name: string) =>
+      name === 'WEBGL_debug_renderer_info' ? null : getExtension(name)) as never
+    ctx.getParameter = ((p: number) =>
+      p === ctx.RENDERER ? 'WebKit WebGL' : p === ctx.VENDOR ? 'WebKit' : getParameter(p)) as never
+    ;(ctx as unknown as { masked: boolean }).masked = true
+    return ctx
+  }) as never
+}
 
 function updateTiles() {
   const t0 = performance.now()
@@ -198,6 +244,33 @@ function measureStage() {
   dpr = window.devicePixelRatio || 1
   host.resize(size.width, size.height, dpr)
 }
+
+/**
+ * M3: a DPR change (browser zoom, other monitor, emulation) resizes the backing store. The
+ * resolution media query reports real changes; WebView2 does not fire it for a DevTools
+ * emulation change, so the ratio is also compared after every frame and twice a second.
+ */
+let dprChanges = 0
+function checkDpr() {
+  if ((window.devicePixelRatio || 1) === dpr) return
+  dprChanges++
+  measureStage()
+  updateTiles()
+  host.invalidate()
+}
+function watchDpr() {
+  const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+  query.addEventListener(
+    'change',
+    () => {
+      checkDpr()
+      watchDpr()
+    },
+    { once: true },
+  )
+}
+watchDpr()
+setInterval(checkDpr, 500)
 
 function wholeMap() {
   setView(fitBounds(scenario.bounds, size) ?? view)
@@ -247,8 +320,9 @@ function showStats() {
       'Fallback',
       fallback ? `${fallback.reason}${fallback.detail ? ` (${fallback.detail})` : ''}` : '–',
     ],
-    ['GPU', d?.gpu ?? '–'],
-    ['Stencil', d ? `${d.stencilMode}${d.stencil ? '' : ' (no stencil buffer)'}` : '–'],
+    ['GPU', d?.gpu ?? fallback?.gpu?.renderer ?? '–'],
+    ['GPU class', gpuClassText()],
+    ['Overlaps', overlapText()],
     ['DPR', String(dpr)],
     ['Canvas', `${size.width} × ${size.height}`],
     ['Scenario segments', scenario ? scenario.segments.toLocaleString('en') : '–'],
@@ -262,6 +336,8 @@ function showStats() {
     ['Vertex arrays', String(s?.vertexArrays ?? 0)],
     ['GPU bytes (MiB)', `${mib(s?.gpuBytes ?? 0)} / ${mib(s?.budgetBytes ?? 0)}`],
     ['Over budget', s?.overBudget ? 'yes' : 'no'],
+    ['Loading', s?.pending ? `${s.pending} tiles pending` : 'complete'],
+    ['Target (MiB)', d ? mib(d.targetBytes) : '–'],
     ['render() ms', lastFrame ? lastFrame.renderMs.toFixed(2) : '–'],
     ['setTiles ms', lastSetTilesMs.toFixed(2)],
     ['Build / upload ms', d ? `${d.lastBuildMs.toFixed(2)} / ${d.lastUploadMs.toFixed(2)}` : '–'],
@@ -279,6 +355,19 @@ function showStats() {
         `<tr><td>${k}</td><td class="${k === 'Status' && status.state === 'failed' ? 'status-failed' : ''}">${v}</td></tr>`,
     )
     .join('')
+}
+
+function gpuClassText(): string {
+  const g = webglDiag()?.gpuInfo ?? fallback?.gpu
+  return g ? `${g.gpuClass} (${g.evidence}${g.unmasked ? '' : ', masked'})` : '–'
+}
+
+function overlapText(): string {
+  const d = webglDiag()
+  if (!d) return '–'
+  const fb = d.coverageFallback ? ` (fallback: ${d.coverageFallback})` : ''
+  const noStencil = d.stencilMode !== 'coverage' && !d.stencil ? ' (no stencil buffer)' : ''
+  return `${d.stencilMode}${fb}${noStencil}`
 }
 
 /** Gaps between consecutive rendered frames (only frames rendered back to back count). */
@@ -303,7 +392,11 @@ function readControls() {
   config.segments = Number(($('segments') as HTMLInputElement).value) || 100_000
   config.lod = ($('lod') as HTMLSelectElement).value as LodMode
   config.budgetMiB = Math.max(0, Number(($('budget') as HTMLInputElement).value) || 0)
+  const ub = ($('uploadBudget') as HTMLInputElement).value
+  config.uploadBudgetMs = ub === '' ? Infinity : Math.max(0, Number(ub) || 0)
   config.simulateNoWebGL2 = ($('nowebgl') as HTMLInputElement).checked
+  config.simulateMaskedRenderer = ($('masked') as HTMLInputElement).checked
+  config.allowSoftwareRenderer = ($('allowsw') as HTMLInputElement).checked
 }
 function writeControls() {
   ;($('renderer') as HTMLSelectElement).value = config.renderer
@@ -312,7 +405,12 @@ function writeControls() {
   ;($('segments') as HTMLInputElement).value = String(config.segments)
   ;($('lod') as HTMLSelectElement).value = config.lod
   ;($('budget') as HTMLInputElement).value = String(config.budgetMiB)
+  ;($('uploadBudget') as HTMLInputElement).value = Number.isFinite(config.uploadBudgetMs)
+    ? String(config.uploadBudgetMs)
+    : ''
   ;($('nowebgl') as HTMLInputElement).checked = config.simulateNoWebGL2
+  ;($('masked') as HTMLInputElement).checked = config.simulateMaskedRenderer
+  ;($('allowsw') as HTMLInputElement).checked = config.allowSoftwareRenderer
 }
 
 $('scenario').addEventListener('change', () => {
@@ -475,8 +573,11 @@ function run(phase: 'pan' | 'zoom', opts: { ms?: number; cycles?: number } = {})
 }
 
 function collect(into: FrameInfo[]) {
-  const start = frameLog.length
-  return () => into.push(...frameLog.slice(start))
+  const start = framesLogged
+  return () => {
+    const n = Math.min(framesLogged - start, frameLog.length)
+    if (n > 0) into.push(...frameLog.slice(-n))
+  }
 }
 
 function summarize(
@@ -512,7 +613,12 @@ function summarize(
   }
 }
 
-/** Time from handing the tiles to the renderer to the first frame on screen, with readback. */
+/**
+ * Time from handing the tiles to a new, empty renderer to the first frame with geometry on
+ * screen (`ms`, with a one-pixel read-back to wait for the GPU) and, with incremental uploads
+ * (M3), to the frame where nothing is pending (`fullMs`). Every frame of the load runs in its
+ * own animation frame; `maxBlockMs` is the longest `render()` call (main-thread blocking).
+ */
 async function firstFrame() {
   // The new renderer must start empty, so that building and uploading are measured below.
   host.setTiles([])
@@ -529,12 +635,102 @@ async function firstFrame() {
   const t1 = performance.now()
   r.setView(view)
   const t2 = performance.now()
-  r.render()
+  let stats = r.render()
   readOnePixel()
   const t3 = performance.now()
+  const first = { ms: t3 - t0, segments: stats.segments, pending: stats.pending }
+  const blocks = [t3 - t2]
+  const times = [t3]
+  // The rest of the load, one render per animation frame, as the host would drive it.
+  while (stats.pending > 0 && host.renderer === r) {
+    await nextFrames(1)
+    const a = performance.now()
+    stats = r.render()
+    const b = performance.now()
+    blocks.push(b - a)
+    times.push(b)
+  }
+  readOnePixel()
+  const t4 = performance.now()
+  const gaps: number[] = []
+  for (let i = 1; i < times.length; i++) gaps.push(times[i]! - times[i - 1]!)
   const diag = webglDiag()
   host.setTiles(currentTiles)
-  return { ms: t3 - t0, setTilesMs: t1 - t0, renderMs: t3 - t2, tiles: currentTiles.length, diag }
+  return {
+    ms: first.ms,
+    firstSegments: first.segments,
+    firstPending: first.pending,
+    fullMs: t4 - t0,
+    fullSegments: stats.segments,
+    loadFrames: blocks.length,
+    maxBlockMs: Math.max(...blocks),
+    loadGapMax: gaps.length ? Math.max(...gaps) : 0,
+    setTilesMs: t1 - t0,
+    renderMs: t3 - t2,
+    tiles: currentTiles.length,
+    diag,
+  }
+}
+
+/**
+ * CPU + GPU time per frame of the mounted renderer: `n` frames back to back, each followed by
+ * a one-pixel read-back, so each sample includes the GPU's work. Median and p95, ms.
+ */
+async function gpuTime(n = 60) {
+  const r = host.renderer
+  if (!r) return null
+  await nextFrames(2)
+  const samples: number[] = []
+  for (let i = 0; i < n; i++) {
+    const t = performance.now()
+    r.render()
+    readOnePixel()
+    samples.push(performance.now() - t)
+  }
+  return { median: quantile(samples, 0.5), p95: quantile(samples, 0.95), max: Math.max(...samples) }
+}
+
+/**
+ * What the browser reports about WebGL 2 on throw-away canvases, per power preference:
+ * renderer strings (plain and unmasked), class, limits, extensions, and whether a context
+ * exists with and without `failIfMajorPerformanceCaveat`.
+ */
+function gpuReport() {
+  const probe = (attrs: WebGLContextAttributes) => {
+    const c = document.createElement('canvas')
+    let gl: WebGL2RenderingContext | null
+    try {
+      gl = c.getContext('webgl2', attrs) as WebGL2RenderingContext | null
+    } catch (e) {
+      return { context: false, error: String(e) }
+    }
+    if (!gl) return { context: false }
+    const info = readGpuInfo(gl)
+    const out = {
+      context: true,
+      ...info,
+      plainRenderer: gl.getParameter(gl.RENDERER) as string,
+      plainVendor: gl.getParameter(gl.VENDOR) as string,
+      version: gl.getParameter(gl.VERSION) as string,
+      glsl: gl.getParameter(gl.SHADING_LANGUAGE_VERSION) as string,
+      maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+      maxDrawBuffers: gl.getParameter(gl.MAX_DRAW_BUFFERS) as number,
+      maxSamples: gl.getParameter(gl.MAX_SAMPLES) as number,
+      attributes: gl.getContextAttributes(),
+      extensions: gl.getSupportedExtensions(),
+    }
+    gl.getExtension('WEBGL_lose_context')?.loseContext()
+    return out
+  }
+  return {
+    userAgent: navigator.userAgent,
+    devicePixelRatio: window.devicePixelRatio,
+    screen: { width: screen.width, height: screen.height },
+    default: probe(DEFAULT_CONTEXT_ATTRIBUTES),
+    withoutCaveat: probe({ ...DEFAULT_CONTEXT_ATTRIBUTES, failIfMajorPerformanceCaveat: false }),
+    highPerformance: probe({ ...DEFAULT_CONTEXT_ATTRIBUTES, powerPreference: 'high-performance' }),
+    lowPower: probe({ ...DEFAULT_CONTEXT_ATTRIBUTES, powerPreference: 'low-power' }),
+  }
 }
 
 /** Waits for the GPU: reads one pixel back. */
@@ -576,29 +772,61 @@ function readComposited(renderer: RoadRenderer, canvas: HTMLCanvasElement): Uint
  * Renders the current view once per renderer on detached canvases, one renderer at a time
  * (the live renderer is released first), and compares each WebGL mode with Canvas 2D.
  */
-async function compare(opts: { modes?: StencilMode[]; images?: boolean } = {}) {
-  const modes = opts.modes ?? ['coreFringe', 'single', 'off']
+async function compare(
+  opts: { modes?: StencilMode[]; images?: boolean; dpr?: number; timeFrames?: number } = {},
+) {
+  const modes = opts.modes ?? ['coverage', 'coreFringe', 'single', 'off']
+  const ratio = opts.dpr ?? dpr
+  const timeFrames = opts.timeFrames ?? 0
   host.release()
   await nextFrames(2)
   const shot = (kind: RendererKind, mode?: StencilMode) => {
     const canvas = document.createElement('canvas')
     const created =
       kind === 'webgl2'
-        ? createWebGL2RoadRenderer(canvas, { stencilMode: mode })
+        ? createWebGL2RoadRenderer(canvas, {
+            stencilMode: mode,
+            // One complete frame: everything uploaded before it.
+            uploadBudgetMs: Infinity,
+            allowSoftwareRenderer: config.allowSoftwareRenderer,
+          })
         : createCanvas2DRoadRenderer(canvas)
     if (!created.ok) return null
     const r = created.renderer
-    r.resize(size.width, size.height, dpr)
+    r.resize(size.width, size.height, ratio)
     r.setView(view)
     r.setTiles(currentTiles)
-    r.render()
+    const stats = r.render()
     const px = readComposited(r, canvas)
+    // CPU + GPU time of one frame of this mode (render and a one-pixel read-back).
+    const samples: number[] = []
+    for (let i = 0; i < timeFrames; i++) {
+      const t = performance.now()
+      r.render()
+      readOne(r, canvas)
+      samples.push(performance.now() - t)
+    }
     const image = opts.images ? toDataUrl(px, canvas.width, canvas.height) : undefined
+    const mode2 = r instanceof WebGL2RoadRenderer ? r.diagnostics().stencilMode : null
     r.dispose()
-    return { px, w: canvas.width, h: canvas.height, image }
+    return {
+      px,
+      w: canvas.width,
+      h: canvas.height,
+      image,
+      drawCalls: stats.drawCalls,
+      usedMode: mode2,
+      frameMedian: samples.length ? quantile(samples, 0.5) : null,
+      frameP95: samples.length ? quantile(samples, 0.95) : null,
+    }
   }
   const ref = shot('canvas2d')!
-  const results: Record<string, unknown> = { canvas2dImage: ref.image }
+  const results: Record<string, unknown> = {
+    canvas2dImage: ref.image,
+    canvas2d: { frameMedian: ref.frameMedian, frameP95: ref.frameP95, drawCalls: ref.drawCalls },
+    dpr: ratio,
+    size: [ref.w, ref.h],
+  }
   for (const mode of modes) {
     const s = shot('webgl2', mode)
     if (!s) {
@@ -610,15 +838,23 @@ async function compare(opts: { modes?: StencilMode[]; images?: boolean } = {}) {
     let darker = 0
     let sum = 0
     let roadPx = 0
+    let roadSum = 0
+    let missing = 0
+    let extra = 0
     const diff = new Uint8ClampedArray(s.px.length)
     for (let i = 0; i < s.px.length; i += 3) {
       const lum = (p: Uint8ClampedArray) => p[i]! * 0.3 + p[i + 1]! * 0.59 + p[i + 2]! * 0.11
-      const road = (p: Uint8ClampedArray) =>
+      const fromBg = (p: Uint8ClampedArray) =>
         Math.abs(p[i]! - BACKGROUND[0]) +
-          Math.abs(p[i + 1]! - BACKGROUND[1]) +
-          Math.abs(p[i + 2]! - BACKGROUND[2]) >
-        6
-      if (road(ref.px) || road(s.px)) roadPx++
+        Math.abs(p[i + 1]! - BACKGROUND[1]) +
+        Math.abs(p[i + 2]! - BACKGROUND[2])
+      const road = (p: Uint8ClampedArray) => fromBg(p) > 6
+      const isRoad = road(ref.px) || road(s.px)
+      if (isRoad) roadPx++
+      // Continuity: a clear road pixel in Canvas 2D that WebGL leaves (almost) empty, or the
+      // reverse. A gap or a cut-off cap shows here, a slightly lighter edge does not.
+      if (fromBg(ref.px) > 48 && fromBg(s.px) <= 6) missing++
+      if (fromBg(s.px) > 48 && fromBg(ref.px) <= 6) extra++
       const dl = lum(s.px) - lum(ref.px)
       const m = Math.max(
         Math.abs(s.px[i]! - ref.px[i]!),
@@ -626,6 +862,7 @@ async function compare(opts: { modes?: StencilMode[]; images?: boolean } = {}) {
         Math.abs(s.px[i + 2]! - ref.px[i + 2]!),
       )
       sum += m
+      if (isRoad) roadSum += m
       if (m > 24) {
         differs++
         if (dl > 0) lighter++
@@ -642,7 +879,15 @@ async function compare(opts: { modes?: StencilMode[]; images?: boolean } = {}) {
       differShareOfRoad: roadPx ? differs / roadPx : 0,
       lighterThanCanvas: lighter,
       darkerThanCanvas: darker,
+      lighterShareOfRoad: roadPx ? lighter / roadPx : 0,
+      missing,
+      extra,
       meanAbs: sum / (s.px.length / 3),
+      meanAbsRoad: roadPx ? roadSum / roadPx : 0,
+      usedMode: s.usedMode,
+      drawCalls: s.drawCalls,
+      frameMedian: s.frameMedian,
+      frameP95: s.frameP95,
       image: s.image,
       diffImage: opts.images ? toDataUrl(diff, s.w, s.h) : undefined,
     }
@@ -651,6 +896,14 @@ async function compare(opts: { modes?: StencilMode[]; images?: boolean } = {}) {
   host.setTiles(currentTiles)
   host.setView(view)
   return results
+}
+
+/** Waits for the GPU of one renderer: reads one pixel back. */
+function readOne(renderer: RoadRenderer, canvas: HTMLCanvasElement) {
+  if (renderer.kind === 'webgl2') {
+    const gl = canvas.getContext('webgl2') as WebGL2RenderingContext
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4))
+  } else canvas.getContext('2d')?.getImageData(0, 0, 1, 1)
 }
 
 function toDataUrl(rgb: Uint8ClampedArray, w: number, h: number): string {
@@ -688,6 +941,8 @@ window.renderLab = {
   run,
   firstFrame,
   compare,
+  gpuTime,
+  gpuReport,
   loseContext,
   restoreContext,
   release: () => host.release(),
@@ -703,6 +958,7 @@ function state() {
     status,
     fallback,
     dpr,
+    dprChanges,
     size,
     view,
     level,

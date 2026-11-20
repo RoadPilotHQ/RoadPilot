@@ -1,6 +1,10 @@
 /**
- * PROTOTYPE (M2): renderer selection with Canvas 2D fallback, and the host that owns the
+ * PROTOTYPE (M2, M3): renderer selection with Canvas 2D fallback, and the host that owns the
  * canvas element and drives rendering through `requestAnimationFrame`.
+ *
+ * M3: WebGL 2 on a software renderer falls back like a missing WebGL 2 (`software_renderer`);
+ * an unknown renderer keeps WebGL 2. While the renderer reports pending tiles (incremental
+ * uploads), the host keeps requesting frames until everything is drawn.
  *
  * A canvas keeps the first context type it was given, so every renderer gets a new canvas
  * element; the previous renderer is disposed and its canvas removed first, so two renderers
@@ -8,6 +12,7 @@
  */
 import type { Viewport } from '@/domain/mapViewport'
 import { createCanvas2DRoadRenderer } from './Canvas2DRoadRenderer'
+import type { GpuInfo } from './gpuInfo'
 import type {
   RendererFailure,
   RendererKind,
@@ -22,6 +27,8 @@ export interface Fallback {
   from: RendererKind
   reason: RendererFailure
   detail?: string
+  /** M3: what the failed WebGL 2 attempt found out about the GPU, when it got that far. */
+  gpu?: GpuInfo
 }
 
 export interface CreatedRenderer {
@@ -46,7 +53,7 @@ export function createRoadRenderer(
     const canvas = createCanvas()
     const result = createWebGL2RoadRenderer(canvas, webgl)
     if (result.ok) return { renderer: result.renderer, canvas, fallback: null }
-    fallback = { from: 'webgl2', reason: result.reason }
+    fallback = { from: 'webgl2', reason: result.reason, gpu: result.gpu }
     if (result.detail !== undefined) fallback.detail = result.detail
   }
   const canvas = createCanvas()
@@ -191,6 +198,8 @@ export class RoadRendererHost {
     const stats = current.renderer.render()
     const renderMs = performance.now() - t0
     this.options.onFrame?.({ kind: current.renderer.kind, stats, renderMs, time })
+    // Incremental uploads: the next frame continues until nothing is pending.
+    if (stats.pending > 0 && this.current === current) this.invalidate()
   }
 
   dispose(): void {

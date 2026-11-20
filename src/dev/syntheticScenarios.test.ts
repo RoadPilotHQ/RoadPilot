@@ -101,4 +101,25 @@ describe('synthetic scenarios', () => {
     const drawn = new Set(full.tiles.flatMap((t) => t.roads.map((r) => r.index)))
     expect(drawn.size).toBe(s.roads.length)
   })
+
+  it('build the thin-road set (M3) for every class, with chords and roads on tile borders', () => {
+    const s = buildScenario('thin')
+    expect(new Set(s.roads.map((r) => r.roadClass))).toEqual(
+      new Set(['motorway', 'primary', 'local', 'minor', 'rail']),
+    )
+    expect(s.roads.filter((r) => r.flags & ROAD_FLAG_CHORD)).toHaveLength(5)
+    // A vertical road exactly on the level-0 tile border x = 13 × 1024, once per class.
+    const onBorder = s.roads.filter((r) => {
+      for (let i = 0; i < r.points.length; i += 2) if (r.points[i] !== 13312) return false
+      return true
+    })
+    expect(onBorder).toHaveLength(5)
+    for (const r of s.roads)
+      for (let i = 0; i < r.points.length; i += 2) {
+        expect(r.points[i]).toBeGreaterThanOrEqual(s.bounds[0])
+        expect(r.points[i]).toBeLessThanOrEqual(s.bounds[2])
+        expect(r.points[i + 1]).toBeGreaterThanOrEqual(s.bounds[1])
+        expect(r.points[i + 1]).toBeLessThanOrEqual(s.bounds[3])
+      }
+  })
 })

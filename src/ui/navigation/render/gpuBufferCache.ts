@@ -59,6 +59,11 @@ export class GpuBufferCache<E extends CacheEntry> {
     return e
   }
 
+  /** Returns the entry without changing the LRU order. */
+  peek(key: string): E | undefined {
+    return this.entries.get(key)
+  }
+
   /** Adds an entry (replacing and releasing one with the same key). Does not evict. */
   put(entry: E): void {
     const old = this.entries.get(entry.key)

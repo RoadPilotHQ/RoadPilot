@@ -1,7 +1,8 @@
 #version 300 es
-// PROTOTYPE (M2): one road segment per instance, four vertices (triangle strip).
+// PROTOTYPE (M2, M3): one road segment per instance, four vertices (triangle strip).
 // The quad covers the segment's capsule (half width + 1 px for the smoothed edge) and hands
-// the fragment shader its position in segment space, in device pixels.
+// the fragment shader its position in segment space, in device pixels. Shared by the stencil
+// programs (road.frag) and the coverage program (roadCoverage.frag, M3).
 precision highp float;
 precision highp int;
 
@@ -14,12 +15,14 @@ uniform vec2 u_offset;      // tile origin on screen, device px
 uniform float u_scale;      // device px per world unit
 uniform vec2 u_viewport;    // drawing buffer size, device px
 uniform float u_halfWidth[5]; // per road class, device px
+uniform int u_slot[5];      // M3, coverage program: draw-order slot per road class
 
 out vec2 v_local;           // x: along the segment from p0, y: across, device px
 flat out float v_len;
 flat out float v_halfWidth;
 flat out float v_dist0;     // road length before p0, device px
 flat out uint v_flags;
+flat out int v_slot;        // M3: draw-order slot of the road class
 
 void main() {
   vec2 p0 = u_offset + a_p0 * u_scale;
@@ -40,5 +43,6 @@ void main() {
   v_halfWidth = hw;
   v_dist0 = a_dist0 * u_scale;
   v_flags = a_meta.y;
+  v_slot = u_slot[min(a_meta.x, 4u)];
   gl_Position = vec4(pos.x / u_viewport.x * 2.0 - 1.0, 1.0 - pos.y / u_viewport.y * 2.0, 0.0, 1.0);
 }

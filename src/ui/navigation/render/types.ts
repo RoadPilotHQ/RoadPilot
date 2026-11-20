@@ -1,5 +1,5 @@
 /**
- * PROTOTYPE (Phase 2.4C.5, M2): the shared interface of the experimental road renderers.
+ * PROTOTYPE (Phase 2.4C.5, M2; M3 additions marked): the shared interface of the experimental road renderers.
  * Used only by the developer render lab (`src/dev/renderLab`), never by the dashboard's
  * `RoadMapView`. See docs/webgl-prototype.md.
  */
@@ -17,6 +17,8 @@ export type RendererFailure =
   /** Addition to M1: the context was lost and not restored within the time limit. */
   | 'context_restore_failed'
   | 'out_of_memory'
+  /** Addition in M3: the context renders in software (SwiftShader, WARP, llvmpipe). */
+  | 'software_renderer'
 
 export type RendererStatus =
   | { state: 'ready' }
@@ -46,6 +48,11 @@ export interface RenderStats {
   /** The visible tiles alone need more than the budget; nothing visible was dropped. */
   overBudget: boolean
   budgetBytes: number
+  /**
+   * Addition in M3: tiles handed over but not uploaded yet (incremental uploads). While above
+   * zero the frame is incomplete and the host requests another one; never silently dropped.
+   */
+  pending: number
 }
 
 export interface RoadRenderer {
@@ -70,4 +77,5 @@ export const EMPTY_STATS: Readonly<RenderStats> = Object.freeze({
   vertexArrays: 0,
   overBudget: false,
   budgetBytes: 0,
+  pending: 0,
 })

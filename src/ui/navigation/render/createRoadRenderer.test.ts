@@ -99,7 +99,8 @@ describe('createRoadRenderer', () => {
     const f = canvasFactory()
     const created = createRoadRenderer('webgl2', f.create)!
     expect(created.renderer).toBeInstanceOf(Canvas2DRoadRenderer)
-    expect(created.fallback).toEqual({ from: 'webgl2', reason: 'webgl2_unavailable' })
+    expect(created.fallback).toMatchObject({ from: 'webgl2', reason: 'webgl2_unavailable' })
+    expect(created.fallback?.gpu?.gpuClass).toBe('UNAVAILABLE')
     expect(f.made).toHaveLength(2)
     expect(created.canvas).toBe(f.made[1])
   })
@@ -173,8 +174,49 @@ describe('RoadRendererHost', () => {
     h.setTiles(tiles)
     h.mount('webgl2')
     expect(f.made[0]!.width).toBe(960)
-    expect(f.gls[0]!.bufferDataCalls).toBe(1)
+    // Uploads are incremental (M3): the first frame builds and uploads the tile.
+    expect(f.gls[0]!.bufferDataCalls).toBe(0)
     frames.run()
+    expect(f.gls[0]!.bufferDataCalls).toBe(1)
+  })
+
+  it('keeps requesting frames while tiles are pending, and stops when all are drawn', () => {
+    const container = document.createElement('div')
+    const f = canvasFactory()
+    const frames = manualFrames()
+    const pending: number[] = []
+    const h = new RoadRendererHost(container, {
+      createCanvas: f.create,
+      schedule: frames.schedule,
+      cancel: frames.cancel,
+      // Budget 0: exactly one tile per frame.
+      webgl: { uploadBudgetMs: 0 },
+      onFrame: (info) => pending.push(info.stats.pending),
+    })
+    h.resize(800, 600, 1)
+    h.setView({ cx: 1024, cz: 0, scale: 0.25 })
+    h.mount('webgl2')
+    h.setTiles(
+      [0, 1, 2].map((x) => ({
+        ...tileOf([{ points: [0, 0, 10, 0] }], { x, originX: x * 1024 }),
+        contentId: '0123456789abcdef',
+      })),
+    )
+    for (let i = 0; i < 6 && frames.pending() > 0; i++) frames.run()
+    expect(pending).toEqual([2, 1, 0])
+    expect(frames.pending()).toBe(0)
+  })
+
+  it('falls back to Canvas 2D when WebGL 2 renders in software', () => {
+    const { h, fallbacks } = host({
+      unmasked: {
+        renderer: 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))',
+        vendor: 'Google Inc.',
+      },
+    })
+    h.mount('webgl2')
+    expect(h.renderer!.kind).toBe('canvas2d')
+    expect(fallbacks).toMatchObject([{ from: 'webgl2', reason: 'software_renderer' }])
   })
 
   it('switches to Canvas 2D on a new canvas when WebGL fails at run time', async () => {
@@ -199,7 +241,7 @@ describe('RoadRendererHost', () => {
     const { h, fallbacks } = host(null)
     h.mount('webgl2')
     expect(h.renderer!.kind).toBe('canvas2d')
-    expect(fallbacks).toEqual([{ from: 'webgl2', reason: 'context_creation_failed' }])
+    expect(fallbacks).toMatchObject([{ from: 'webgl2', reason: 'context_creation_failed' }])
   })
 
   it('release and dispose free the renderer and remove the canvas; dispose is idempotent', () => {
