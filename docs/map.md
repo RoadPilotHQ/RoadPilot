@@ -113,6 +113,8 @@ Limits: at most 30,000 roads and 120,000 points per tile (about 1.3 MB); a fulle
 - **Scale bar:** in **map units**. The physical size of a map unit is unconfirmed, so the road map never shows metres.
 - **States:** no package (with how to get one), checking and loading, error, wrong game, unsupported version, tiles still loading or failed, truncated tiles, and an empty part of the map. A missing or failed map never affects the rest of the dashboard.
 
+A WebGL 2 prototype of the road renderer, compared with this Canvas 2D painter on synthetic data, is described in [webgl-prototype.md](webgl-prototype.md) (Phase 2.4C.5, M2). The dashboard does not use it.
+
 For checks in a plain browser there is a **synthetic test map** (`src/dev/syntheticMap.ts`): generated roads, no game data, labelled "Synthetic test map" in the dashboard. It is used only by the Vite dev server with `?syntheticMap` and is not part of the production build.
 
 ## Coordinates

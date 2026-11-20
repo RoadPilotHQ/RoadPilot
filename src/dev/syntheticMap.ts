@@ -11,23 +11,24 @@ import { decodeTile, ROAD_CLASSES, type RoadClass } from '@/domain/mapTile'
 import type { GameId } from '@/domain/types'
 
 const CONTENT_ID = '5e17e7105e17e710'
-const TILE_SIZES = [1024, 4096, 16384, 65536]
-const BOUNDS: [number, number, number, number] = [-20000, -15000, 20000, 15000]
-const LEVEL_CLASSES: readonly RoadClass[][] = [
+export const TILE_SIZES = [1024, 4096, 16384, 65536]
+export const BOUNDS: [number, number, number, number] = [-20000, -15000, 20000, 15000]
+export const LEVEL_CLASSES: readonly RoadClass[][] = [
   ['motorway', 'primary', 'local', 'minor', 'rail'],
   ['motorway', 'primary', 'local'],
   ['motorway', 'primary'],
   ['motorway'],
 ]
 
-interface Road {
+export interface Road {
   index: number
   roadClass: RoadClass
   points: [number, number][]
   box: [number, number, number, number]
 }
 
-function generate(): Road[] {
+/** The generated network (also the small scenario of the render lab, `syntheticScenarios.ts`). */
+export function generate(): Road[] {
   const roads: Road[] = []
   const add = (roadClass: RoadClass, points: [number, number][]) => {
     const xs = points.map((p) => p[0])
