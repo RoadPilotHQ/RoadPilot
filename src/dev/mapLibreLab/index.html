@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      The production CSP of src-tauri/tauri.conf.json, copied verbatim (a unit test keeps both
+      equal), so the lab runs under the same policy as the app. It is not loosened here.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RoadPilot MapLibre lab (B1 prototype)</title>
+    <!--
+      DEVELOPMENT ONLY (Phase 2.4D B1). Served by the Vite dev server at
+      /src/dev/mapLibreLab/index.html; it is not an input of the production build and not part of
+      the dashboard. Synthetic data only.
+    -->
+  </head>
+  <body>
+    <div id="lab"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

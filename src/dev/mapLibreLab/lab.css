@@ -1,0 +1,126 @@
+/* DEVELOPMENT ONLY: the B1 MapLibre lab. Colours from the app's theme (theme.css). */
+:root {
+  color-scheme: light;
+  font:
+    13px/1.4 'Segoe UI',
+    system-ui,
+    sans-serif;
+  color: #292724;
+  background: #f2e8d8;
+}
+
+body {
+  margin: 0;
+}
+
+.lab {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  height: 100vh;
+}
+
+.lab-panel {
+  overflow: auto;
+  padding: 10px 12px;
+  border-right: 1px solid #e7daca;
+  background: #fff9ef;
+}
+
+.lab-panel h1 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.lab-panel .note {
+  margin: 0 0 10px;
+  color: #77716a;
+}
+
+.lab-panel label {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.lab-panel .buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.lab-panel button {
+  border: 1px solid #e7daca;
+  border-radius: 8px;
+  padding: 4px 10px;
+  background: #f6ede0;
+}
+
+.lab-panel button.primary {
+  border-color: #e8792e;
+  background: #e8792e;
+  color: #fff;
+}
+
+.lab-panel table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.lab-panel td {
+  padding: 1px 0;
+  vertical-align: top;
+}
+
+.lab-panel td:first-child {
+  width: 46%;
+  color: #77716a;
+}
+
+.lab-stage {
+  position: relative;
+  overflow: hidden;
+  background: #f2e8d8;
+}
+
+.lab-map {
+  position: absolute;
+  inset: 0;
+}
+
+.lab-map > canvas.m3 {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.lab-overlay {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 6px 14px;
+  border-radius: 10px;
+  background: #fff9ef;
+  box-shadow: 0 6px 18px rgb(80 55 20 / 12%);
+  pointer-events: none;
+}
+
+.lab-overlay.error {
+  border: 1px solid #c95348;
+  color: #c95348;
+}
+
+.lab-overlay[hidden] {
+  display: none;
+}
+
+.lab-whole {
+  font-size: 15px;
+  line-height: 1;
+}
