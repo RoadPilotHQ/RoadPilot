@@ -37,6 +37,8 @@ export declare function evaluateNetwork(input?: {
 }): Evaluation
 export declare function evaluateContextLoss(result: unknown): Evaluation
 export declare function evaluateRelease(result: unknown): Evaluation
+export declare const NO_HANDLER_WARNING: RegExp
+export declare function evaluateWorkerProjection(wp: unknown, consoleEntries?: unknown): Evaluation
 export declare function evaluatePerfRun(run: unknown, scenario: string): Evaluation
 export declare function aggregatePerf(runs: unknown, scenario: string): Evaluation
 export declare function evaluateMemoryCycles(result: unknown): Evaluation

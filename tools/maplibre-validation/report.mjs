@@ -205,6 +205,38 @@ export function evaluateRelease(r) {
   return verdict(ok ? 'PASS' : 'FAIL', ok ? 'clean' : 'leftovers', { metrics })
 }
 
+// ---------------------------------------------------------------- worker projection (B1.5.1)
+
+/** MapLibre's own warning when a worker tiles GeoJSON without the projection handler. */
+export const NO_HANDLER_WARNING = /no projection handler is set in the workers/i
+
+const hasNoHandlerWarning = (entries) =>
+  Array.isArray(entries) && entries.some((c) => NO_HANDLER_WARNING.test(String(c?.text ?? '')))
+
+/**
+ * B1.5.1 (defect A): the lab's worker projection state (`state().workerProjection`) and the
+ * console of the same run. MapLibre's warning is a FAIL (geometry was tiled without the
+ * handler); a missing or unfinished registration, or workers recreated during the run, is
+ * INVALID (the run cannot show where the geometry was drawn).
+ */
+export function evaluateWorkerProjection(wp, consoleEntries) {
+  if (hasNoHandlerWarning(consoleEntries)) return verdict('FAIL', 'worker_warned_no_handler')
+  if (!isObj(wp)) return verdict('INVALID', 'no_worker_projection_state')
+  const metrics = {
+    state: wp.state,
+    generation: wp.generation,
+    recreations: wp.recreations,
+    keepAlive: wp.keepAlive,
+    failedAttempts: Array.isArray(wp.attempts) ? wp.attempts.length : null,
+  }
+  if (wp.state === 'failed') return verdict('FAIL', 'registration_failed', { metrics })
+  if (wp.state !== 'ready') return verdict('INVALID', `not_ready:${wp.state}`, { metrics })
+  if (wp.keepAlive !== true) return verdict('INVALID', 'worker_pool_not_kept', { metrics })
+  if (!Number.isInteger(wp.recreations)) return verdict('INVALID', 'malformed_result', { metrics })
+  if (wp.recreations > 0) return verdict('INVALID', 'workers_recreated', { metrics })
+  return verdict('PASS', 'verified', { metrics })
+}
+
 // ---------------------------------------------------------------- performance
 
 /**
@@ -228,6 +260,17 @@ export function evaluatePerfRun(run, scenario) {
   if (!isObj(cold) || !finite(cold.firstMs)) return verdict('INVALID', 'no_first_visible')
   if (run.kind === 'm3' ? !(cold.firstSegments > 0) : !(cold.firstRoadPixels > 0))
     return verdict('INVALID', run.kind === 'm3' ? 'no_segments_drawn' : 'no_road_pixels_detected')
+  // B1.5.1 (defect A): MapLibre numbers count only for geometry tiled with the projection handler.
+  if (run.kind !== 'm3') {
+    if (hasNoHandlerWarning(run.warnings)) return verdict('INVALID', 'worker_projection_warning')
+    const wp = cold.workerProjection
+    if (!isObj(wp) || wp.verified !== true)
+      return verdict('INVALID', 'worker_projection_unverified')
+    if (wp.recreatedDuringLoad !== false) return verdict('INVALID', 'workers_recreated_during_load')
+    const recreations = run.state?.workerProjection?.recreations
+    if (recreations !== undefined && recreations !== 0)
+      return verdict('INVALID', 'workers_recreated')
+  }
   const phases = [run.pan, ...(Array.isArray(run.zoom) ? run.zoom : [])]
   if (!isObj(run.pan) || !Array.isArray(run.zoom) || run.zoom.length !== 3)
     return verdict('INVALID', 'incomplete_phases')
@@ -344,6 +387,9 @@ export function buildReport({ functional, perf, cycles } = {}) {
       : verdict('NOT_TESTED', 'no_functional_run'),
     releaseRemount: functional
       ? evaluateRelease(steps.releaseRemount)
+      : verdict('NOT_TESTED', 'no_functional_run'),
+    workerProjection: functional
+      ? evaluateWorkerProjection(steps.finalState?.workerProjection, f.console)
       : verdict('NOT_TESTED', 'no_functional_run'),
     // Labels, styling and thin roads need a visual review of the screenshots.
     labels: verdict('NOT_TESTED', 'visual_review_required', {

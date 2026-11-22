@@ -1,4 +1,4 @@
-/* global process, fetch, WebSocket, setTimeout */
+/* global process, fetch, WebSocket, setTimeout, AbortSignal */
 /**
  * B1 runtime validation harness: starts RoadPilot's debug build (its own WebView2) with
  * per-process WebView2 arguments and talks to its page over the DevTools protocol. No input
@@ -139,14 +139,37 @@ export async function closeApp(app) {
   return { graceful, exitCode: app.exited(), closeMs: Date.now() - t0, webviewGoneMs: gone }
 }
 
-export async function connectPage(port) {
-  for (let i = 0; i < 50; i++) {
-    const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
-    const page = list.find((t) => t.type === 'page')
-    if (page) return { ...(await connect(page.webSocketDebuggerUrl)), url: page.url }
-    await sleep(200)
+/** DevTools targets of the app's WebView2 (`/json/list`), bounded. */
+export async function listTargets(port, timeoutMs = 3000) {
+  const r = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!r.ok) throw new Error(`/json/list answered ${r.status}`)
+  return r.json()
+}
+
+/** Whether the dev server serves `url` (status and time), bounded; never throws. */
+export async function devServerStatus(url, timeoutMs = 3000) {
+  const t0 = Date.now()
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    return { url, ok: r.ok, status: r.status, ms: Date.now() - t0 }
+  } catch (e) {
+    return { url, ok: false, status: null, ms: Date.now() - t0, error: String(e) }
   }
-  throw new Error('no page target')
+}
+
+/** RoadPilot's own processes: the app and the WebView2 processes of its user data folder. */
+export function processInfo() {
+  return { app: appPids(), webview: appWebViewPids() }
+}
+
+/** Raised for every pending and later command once the DevTools connection is gone. */
+export class TargetClosedError extends Error {
+  constructor(detail = '') {
+    super(`DevTools connection closed${detail ? ` (${detail})` : ''}`)
+    this.name = 'TargetClosedError'
+  }
 }
 
 export async function connect(url) {
@@ -158,6 +181,15 @@ export async function connect(url) {
   let id = 0
   const pending = new Map()
   const listeners = []
+  const closeListeners = []
+  let closed = null
+  // B1.5.1: a target that disappears must not leave commands waiting forever.
+  ws.onclose = (e) => {
+    closed = new TargetClosedError(`code ${e?.code ?? '?'}`)
+    for (const { reject } of pending.values()) reject(closed)
+    pending.clear()
+    for (const l of closeListeners) l(closed)
+  }
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data)
     if (msg.id && pending.has(msg.id)) {
@@ -169,6 +201,7 @@ export async function connect(url) {
   }
   const send = (method, params = {}, sessionId) =>
     new Promise((ok, reject) => {
+      if (closed) return reject(closed)
       const i = ++id
       pending.set(i, { resolve: ok, reject })
       const m = { id: i, method, params }
@@ -188,7 +221,13 @@ export async function connect(url) {
       )
     return r.result.value
   }
-  return { send, evaluate, on: (l) => listeners.push(l), close: () => ws.close() }
+  return {
+    send,
+    evaluate,
+    on: (l) => listeners.push(l),
+    onClose: (l) => closeListeners.push(l),
+    close: () => ws.close(),
+  }
 }
 
 /**

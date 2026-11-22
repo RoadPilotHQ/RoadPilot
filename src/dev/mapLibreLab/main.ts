@@ -11,10 +11,12 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import './lab.css'
 import {
   addProjection,
+  getGlobalDispatcher,
   getVersion,
   importScriptInWorkers,
   Map as MapLibreMap,
   NavigationControl,
+  prewarm,
   setWorkerUrl,
   type GeoJSONSource,
   type IControl,
@@ -58,6 +60,7 @@ import {
   ReleasedError,
   type Emitter,
 } from './lifecycle'
+import { createWorkerProjection } from './workerProjection'
 import { panCamera, summarizePhase, zoomCamera, type Camera, type PhaseSummary } from './benchmark'
 import { buildStyle, COLORS, DRAW_ORDER } from './mapStyle'
 import { countRoadPixels, detectableRoadColours } from './roadPixels'
@@ -216,21 +219,71 @@ const waitOptions = (label: string) => ({
 // ---------------------------------------------------------------- MapLibre setup
 
 /**
- * Once per page: same-origin module workers from the package's own worker file (no `blob:`),
- * the registered CRS, and the workers' projection handler (imported as a same-origin module).
- * B1.2 (F4): concurrent callers share one attempt; a failure is not cached, and a retry repeats
- * only the steps that did not succeed, so the CRS is registered once (MapLibre throws on a second
- * registration) and the worker handler is imported once. MapLibre's worker pool itself is global
- * and lives as long as the page.
+ * Once per page: same-origin module workers from the package's own worker file (no `blob:`) and
+ * the registered CRS. B1.2 (F4): concurrent callers share one attempt; a failure is not cached,
+ * and a retry repeats only the steps that did not succeed, so the CRS is registered once
+ * (MapLibre throws on a second registration).
+ *
+ * B1.5.1 (defect A): the workers' projection handler is no longer a one-time step. B1.5 showed
+ * that MapLibre's worker pool does not live as long as the page: removing the last map terminates
+ * the workers, and new workers can tile GeoJSON before the replayed handler import has finished.
+ * `workerProjection` keeps the pool (`prewarm()`), verifies the handler in every current worker,
+ * and registers again whenever MapLibre creates workers. Every map mount and data load waits for
+ * it; a failure is an error of that load, never a silent fallback.
  */
 const ensureMapLibreGlobals = createRetryableInit([
   { name: 'workerUrl', run: () => setWorkerUrl(new URL(maplibreWorkerUrl, location.href).href) },
   { name: 'projection', run: () => addProjection(scsCrs) },
-  {
-    name: 'projectionHandler',
-    run: () => importScriptInWorkers(new URL(projectionWorkerUrl, location.href).href),
-  },
 ])
+
+const workerProjection = createWorkerProjection(
+  {
+    keepWorkersAlive: () => prewarm(),
+    importScript: (url) => importScriptInWorkers(url),
+    broadcast: (type) => getGlobalDispatcher().broadcast<null, unknown>(type, null),
+    onWorkersCreated: (listener) => {
+      const dispatcher = getGlobalDispatcher()
+      dispatcher.on('workerscreate', listener)
+      return () => void dispatcher.off('workerscreate', listener)
+    },
+  },
+  new URL(projectionWorkerUrl, location.href).href,
+)
+
+/** Worker projection events since page load (recreations, re-registrations, failures). */
+const projectionEvents: { t: number; event: string; generation: number; detail?: string }[] = []
+
+/**
+ * Workers recreated after a registration (only `WorkerPool.restart` can do that while `prewarm()`
+ * holds the pool): register again, then reload the mounted map's road and city data, so tiles
+ * built in the new workers before the handler arrived are replaced. A load that saw a recreation
+ * is marked in its result (`workerProjection.recreatedDuringLoad`); the harness treats such runs
+ * as invalid. A failed re-registration becomes the lab's error.
+ */
+workerProjection.onRecreated((generation) => {
+  projectionEvents.push({ t: now(), event: 'workers-recreated', generation })
+  void (async () => {
+    try {
+      const ready = await workerProjection.ensureReady()
+      projectionEvents.push({ t: now(), event: 're-registered', generation: ready.generation })
+      const m = map
+      if (!m || !dataset || busy) return // a running configure waits for the handler itself
+      ;(m.getSource('roads') as GeoJSONSource | undefined)?.setData(
+        roadsGeoJSON(dataset) as unknown as Json,
+      )
+      ;(m.getSource('cities') as GeoJSONSource | undefined)?.setData(
+        citiesGeoJSON(dataset) as unknown as Json,
+      )
+      projectionEvents.push({ t: now(), event: 'data-reloaded', generation: ready.generation })
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e))
+      projectionEvents.push({ t: now(), event: 'failed', generation, detail: err.message })
+      mapErrors.push(err.message)
+      lastError = { name: err.name, message: err.message }
+      setOverlay(`Error: ${err.message}`, true)
+    }
+  })()
+})
 
 class WholeMapControl implements IControl {
   private el: HTMLElement | null = null
@@ -250,6 +303,9 @@ class WholeMapControl implements IControl {
 
 async function mountMapLibre(s: LoadSession): Promise<{ initMs: number }> {
   await s.guard(ensureMapLibreGlobals(), waitOptions('MapLibre worker setup'))
+  s.throwIfReleased('MapLibre mount')
+  // B1.5.1 (defect A): no map before every worker has the projection handler.
+  await s.guard(workerProjection.ensureReady(), waitOptions('MapLibre worker projection'))
   s.throwIfReleased('MapLibre mount')
   const t0 = now()
   const m = new MapLibreMap({
@@ -357,6 +413,15 @@ async function loadMapLibreData(s: LoadSession, ds: LabDataset) {
   const probes = probesGeoJSON(ds.probes)
   const prepMs = now() - p0
 
+  // B1.5.1 (defect A): the GeoJSON goes to the workers only once each has the handler (normally
+  // already verified by the mount; this catches workers recreated in between). Outside the timing.
+  const projectionReady = await s.guard(
+    workerProjection.ensureReady(),
+    waitOptions('MapLibre worker projection'),
+  )
+  s.throwIfReleased('MapLibre data load')
+  const projectionGeneration = projectionReady.generation
+
   const roadColours = detectableRoadColours({ labels: config.labels, probes: config.probes })
   let tileArrived = false
   let firstMs = NaN
@@ -420,7 +485,18 @@ async function loadMapLibreData(s: LoadSession, ds: LabDataset) {
   }
   s.throwIfReleased('MapLibre data load')
   const idleMs = now() - t0
+  const projectionAfter = workerProjection.status()
   return {
+    /**
+     * B1.5.1: the handler was verified in every worker before `setData`; `recreatedDuringLoad`
+     * is true when MapLibre created workers while this load ran (its tiles may lack the handler).
+     */
+    workerProjection: {
+      verified: true,
+      generation: projectionGeneration,
+      workers: projectionReady.workers,
+      recreatedDuringLoad: projectionAfter.generation !== projectionGeneration,
+    },
     prepMs,
     setDataMs,
     firstMs,
@@ -529,8 +605,9 @@ function m3Render() {
 /**
  * Releases the mounted renderer. B1.2 (F3): first the session, which removes every listener the
  * lab attached and rejects every pending wait with `ReleasedError` (so a pending `configure()`
- * settles), then the map or the M3 renderer. Safe to call more than once. MapLibre's worker pool
- * is global and is not stopped here.
+ * settles), then the map or the M3 renderer. Safe to call more than once. B1.5.1: MapLibre's
+ * global worker pool is held by `prewarm()` (see `workerProjection`), so removing the map here
+ * does not terminate the workers.
  */
 function release() {
   const s = session
@@ -1048,6 +1125,8 @@ function state() {
       cspViolations: cspViolations.slice(),
     },
     mapErrors: mapErrors.slice(),
+    /** B1.5.1 (defect A): registration state per worker generation, attempts and events. */
+    workerProjection: { ...workerProjection.status(), events: projectionEvents.slice() },
   }
 }
 
@@ -1056,7 +1135,14 @@ function state() {
 function renderStats() {
   const s = state()
   const load = s.load ?? {}
-  const fmt = (v: unknown) => (typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(1)) : v)
+  const fmt = (v: unknown) =>
+    typeof v === 'number'
+      ? Number.isInteger(v)
+        ? v
+        : v.toFixed(1)
+      : v !== null && typeof v === 'object' && !Array.isArray(v)
+        ? JSON.stringify(v)
+        : v
   const rows: [string, unknown][] = [
     ['MapLibre', s.maplibre],
     ['Renderer', s.config.renderer],

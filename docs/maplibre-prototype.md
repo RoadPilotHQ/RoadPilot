@@ -4,20 +4,20 @@ An isolated, development-only experiment: can MapLibre GL JS draw RoadPilot's ro
 
 > **Scope:** prototype only. `RoadMapView.tsx`, `roadPainter.ts`, the Canvas 2D renderer, the M3 WebGL 2 prototype, the Rust MapService, RPMT, IPC, telemetry, SDK and Input Plugin are unchanged. Synthetic data only; no SCS geometry. Nothing in the app imports the lab, and the production build output is byte-identical to the build before B1.
 
-## Status: B1 IMPLEMENTED – STATIC RELIABILITY FIXES COMPLETE – RUNTIME VALIDATION PENDING
+## Status: B1 IMPLEMENTED – B1.5 RUNTIME VALIDATION STOPPED (NO-GO) – B1.5.1 DEFECT CORRECTIONS STATIC ONLY, RE-VALIDATION PENDING
 
-| Area                     | State                                                                                                                                                                                                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Implemented              | Dev-only lab (`src/dev/mapLibreLab/`): registered planar CRS `roadpilot:scs`, worker projection handler, scenarios A–D, inline offline style, MapLibre / M3 side-by-side mounting, timing, accuracy, context-loss and request instrumentation |
-| Static checks passed     | `tsc -b`, ESLint, Prettier; static audit of the lab and of the MapLibre 6.19.0 sources (see [Static audit (B1.1)](#static-audit-b11)); the seven audit findings were addressed in [B1.2](#b12--reliability-fixes)                             |
-| Tests passed             | `npm run check`: 43 test files, 482 tests, including 109 lab and harness tests in 8 files (coordinates, synthetic data, style, isolation, lifecycle, accuracy evaluation, road-pixel detection, validation report); all CPU-only              |
-| Validation harness       | B1.4: prepared in `tools/maplibre-validation/`, documented in [maplibre-validation.md](maplibre-validation.md); **never run**                                                                                                                 |
-| Production isolation     | `maplibre-gl` 6.19.0 exact, dev-only (all 24 lockfile entries `dev: true`); no production import (test); production `dist` byte-identical to the build of `e1d2fe9`                                                                           |
-| Runtime criteria         | **All NOT TESTED:** zero external requests, CSP at runtime, rendered positional accuracy, picking, labels, interaction, context loss, first display, frame times, memory, comparison with M3                                                  |
-| Why validation is paused | The harness's busy-GPU guard refused to start RoadPilot because a game was using the RTX 3080, and runtime measurements were then stopped by decision. The lab has never run in a browser or in WebView2                                      |
-| Why no GO is possible    | B1's mandatory criteria (zero external requests, ≤ 0.5 px accuracy, frame-time targets) have no evidence at all. A plausible design is not proof (the brief's own rule)                                                                       |
+| Area                      | State                                                                                                                                                                                                                                                           |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Implemented               | Dev-only lab (`src/dev/mapLibreLab/`): registered planar CRS `roadpilot:scs`, worker projection handler, scenarios A–D, inline offline style, MapLibre / M3 side-by-side mounting, timing, accuracy, context-loss and request instrumentation                   |
+| Static checks passed      | `tsc -b`, ESLint, Prettier; static audit of the lab and of the MapLibre 6.19.0 sources (see [Static audit (B1.1)](#static-audit-b11)); the seven audit findings were addressed in [B1.2](#b12--reliability-fixes)                                               |
+| Tests passed              | `npm run check` (B1.5.1): 45 test files, 515 tests, including 142 lab and harness tests in 10 files (adds worker projection registration and staged lab opening); all CPU-only, fakes only                                                                      |
+| Validation harness        | B1.4: prepared in `tools/maplibre-validation/`, documented in [maplibre-validation.md](maplibre-validation.md); B1.5: run once on AMD and stopped; B1.5.1: two defects corrected statically                                                                     |
+| Production isolation      | `maplibre-gl` 6.19.0 exact, dev-only (all 24 lockfile entries `dev: true`); no production import (test); production `dist` byte-identical to the build of `e1d2fe9`                                                                                             |
+| Runtime criteria          | B1.5 (AMD only, stopped): every run that loaded was offline with no CSP violation; context loss and release/remount passed; rendered accuracy FAIL at zoom 1/3 and MapLibre perf numbers untrustworthy (defect A). See [B1.5](#b15--runtime-validation-stopped) |
+| Why validation is stopped | B1.5 found two defects: MapLibre workers without the projection handler, and lab pages that did not open after app start. B1.5.1 corrected both statically; nothing has been re-run                                                                             |
+| Why no GO is possible     | B1's mandatory criteria (≤ 0.5 px accuracy, frame-time targets, three valid runs per scenario) have no valid evidence. A plausible design is not proof (the brief's own rule)                                                                                   |
 
-> **Status of the evidence (read first):** B1 was stopped before any in-app measurement. **The lab has not been run in a browser or in RoadPilot's WebView2.** Every runtime criterion (requests, rendered positions, labels, context loss, frame times, memory) is **NOT TESTED**. What is reported as PASS below rests on unit tests, static inspection of the MapLibre 6.19.0 sources, dev-server responses, and the production build.
+> **Status of the evidence (read first):** B1.5 ran the lab in RoadPilot's WebView2 on the AMD GPU and was stopped; its evidence is kept in `tools/maplibre-validation/out/` (not in Git). The B1.5.1 corrections rest on MapLibre 6.19.0 and wry 0.57.1 source inspection and unit tests against fakes only. No runtime criterion is PASS for B1; a new runtime run needs separate approval.
 
 Statements are marked **FACT** (follows from code, source or a test that ran), **MEASUREMENT** (measured here), **HYPOTHESIS** (plausible, not verified) and **RECOMMENDATION**.
 
@@ -313,9 +313,31 @@ Static preparation for the B1 runtime validation, following the B1.3 readiness a
 - **New tests:** `roadPixels.test.ts` (9) and `validationReport.test.ts` (33), CPU-only.
 - **B1.4.1 review corrections:** the 5 % memory growth limit is a provisional diagnostic threshold. It is reported as `diagnostic` and never decides PASS or FAIL. The memory criterion stays NOT TESTED until a threshold is approved. The MapLibre and M3 first-visible measurements were reviewed statically and found not equivalent; any comparison between them requires runtime verification. Thresholds unchanged.
 
+## B1.5 – Runtime validation (stopped)
+
+2026-11-22, RoadPilot debug build in WebView2 158.0.4370.33, AMD Radeon iGPU (default GPU), Windows 11 build 26300, idle desktop; the RTX 3080 was not used. **MEASUREMENT** unless marked otherwise.
+
+- Functional run (second start): network offline (0 external requests, 0 CSP violations), context loss PASS, release/remount PASS, API projection exact (error ≤ 7 × 10⁻¹⁰ px), `fitBounds` and rotation exact. Rendered accuracy FAIL: within 0.08 px at zoom 5–13, up to 8.3 px at zoom 1 and 3.
+- MapLibre perf (one run per kind at 100k before the stop): first visible 387 ms (labels) and 257 ms (no labels), frame gaps within limits. Not valid: see defect A.
+- M3 100k (one valid run): first visible 41 ms, p95 16.9 ms, max 33.3 ms.
+- **Defect A (lab):** 5 of 8 MapLibre workers warned that no projection handler was set; one handler import was aborted by worker termination. MapLibre geometry, accuracy and timing of B1.5 are therefore not trustworthy.
+- **Defect B (harness):** 6 of 10 app starts ended in "lab page did not load"; the failed starts kept no diagnostics.
+- Verdict: **NO-GO**; the run was stopped under its failure rules.
+
+## B1.5.1 – Runtime defect corrections (static)
+
+Details, sources and limits: [maplibre-validation.md, B1.5.1 corrections](maplibre-validation.md#b151-corrections).
+
+- **Defect A, mechanism (FACT, source):** removing the last map terminates MapLibre's workers; replacement workers do get the handler script again, but GeoJSON can be tiled before that asynchronous import has finished. **Correction:** `prewarm()` holds the worker pool; `workerProjection.ts` imports the handler, verifies it in every worker through a status message answered only after `setProjectionHandler` ran, registers again whenever MapLibre creates workers, and blocks every map mount and data load until then. A failure fails the load; there is no fallback. Load results and `state()` record the verification.
+- **Defect B, mechanism (source, not proven as the B1.5 cause):** wry creates the WebView2 page target before it navigates to the dev server, so a lab navigation sent too early can be replaced. **Correction:** `openlab.mjs` opens the lab in six bounded stages (startup, target, app navigation, lab navigation, lab ready, initial configuration), saves diagnostics for every failed attempt (URL, events, console, exceptions, screenshot, dev server, processes, stage), and retries only after verified cleanup.
+- **Evaluation:** a MapLibre perf run without verified worker projection, with a worker recreation, or with MapLibre's missing-handler warning is INVALID; the functional run has a new `workerProjection` criterion.
+- **Evidence preservation:** runs write into session folders, refuse to start if their result files exist, and never overwrite; the B1.5 evidence is unchanged. The results folder is excluded from Prettier (raw evidence).
+- **New tests:** `workerProjection.test.ts` (15), `openLab.test.ts` (13); `validationReport.test.ts` now 37. They test the logic against fakes and do not verify real worker or WebView2 behaviour.
+- **Unchanged:** thresholds, SCS transform and `/2048` carrier, production renderer, CSP, telemetry and control code; `maplibre-gl` stays a dev dependency; the production build contains no lab code.
+
 ### Remaining runtime validation
 
-Unchanged by B1.2 and B1.4. Everything in the [acceptance matrix](#acceptance-matrix) that is NOT TESTED remains NOT TESTED, including whether the new timeouts, release handling and infrastructure checks behave in a real browser as they do against the fakes.
+Everything in the [acceptance matrix](#acceptance-matrix) needs a new run with the corrected lab and harness, including whether `prewarm()` keeps the workers across `map.remove()` in WebView2, whether the status check passes in real workers, and whether the staged opening removes the B1.5 start failures. B1.5 MapLibre results cannot be reused.
 
 ## Known limitations
 

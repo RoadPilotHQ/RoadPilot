@@ -1,4 +1,4 @@
-/* global process, console, Buffer, URL */
+/* global process, console, Buffer, URL, setTimeout, clearTimeout */
 /**
  * B1 runtime validation driver (MapLibre lab). See docs/maplibre-validation.md.
  *
@@ -6,11 +6,18 @@
  *
  * Modes that start RoadPilot (need --confirm-runtime, an idle desktop, `npm run dev` and the debug
  * build): functional, perf, cycles. Without --confirm-runtime they only print what they would do.
- * Mode `report` reads saved results from --out and writes report-<tag>.json; it starts nothing.
+ * Mode `report` reads saved results from --out (or --session) and writes report-<tag>.json; it
+ * starts nothing.
  *
- * Options: --out=<dir> (default tools/maplibre-validation/out), --nv (RTX via
- * --force_high_performance_gpu), --only=urban|stress, --kinds=maplibre,m3, --runs=3,
- * --kind=maplibre (cycles), --busy=<process,process> (extra processes that block a start).
+ * Options: --session=<name> (results go to out/<name>/; default: a new timestamped folder),
+ * --out=<dir> (instead of a session folder), --nv (RTX via --force_high_performance_gpu),
+ * --only=urban|stress, --kinds=maplibre,m3, --runs=3, --kind=maplibre (cycles),
+ * --busy=<process,process> (extra processes that block a start), --attempts=2 (app starts per
+ * lab opening, see openlab.mjs).
+ *
+ * B1.5.1: results never overwrite earlier results. Runtime modes write into a session folder and
+ * refuse to start when a result file they would write already exists there; every failed lab
+ * opening saves its own `openlab-failure-*` diagnostics.
  *
  * This script only collects data; every verdict comes from report.mjs.
  */
@@ -21,14 +28,18 @@ import { fileURLToPath } from 'node:url'
 import {
   appIdentifier,
   closeApp,
-  connectPage,
+  connect,
   cspLogEntries,
+  devServerStatus,
   heaps,
   instrument,
   launchApp,
+  listTargets,
+  processInfo,
   REPO,
   sleep,
 } from './cdp.mjs'
+import { openLab as openLabStaged } from './openlab.mjs'
 import { buildReport, MIN_RUNS, THRESHOLDS, worstProbe } from './report.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -38,7 +49,11 @@ const opt = (name, fallback) =>
   args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
 const flag = (name) => args.includes(`--${name}`)
 
-const OUT = resolve(opt('out', join(HERE, 'out')))
+const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
+const SESSION = opt('session', mode === 'report' ? null : `run-${stamp}`)
+if (SESSION !== null && !/^[\w.-]+$/.test(SESSION)) throw new Error(`invalid --session ${SESSION}`)
+const OUT = resolve(opt('out', SESSION ? join(HERE, 'out', SESSION) : join(HERE, 'out')))
+const ATTEMPTS = Math.max(1, Number(opt('attempts', '2')) || 2)
 const CONFIRMED = flag('confirm-runtime')
 const NV = flag('nv')
 const TAG = NV ? 'nv' : 'amd'
@@ -57,11 +72,39 @@ const PAGE_ORIGIN = DEV_URL.origin
 const LAB = `${PAGE_ORIGIN}/src/dev/mapLibreLab/index.html`
 const SCENARIO_SEGMENTS = { urban: THRESHOLDS.urban.segments, stress: THRESHOLDS.stress.segments }
 
+/** Writes a result; never replaces an existing file (`wx`). */
 const save = (name, data) => {
   mkdirSync(OUT, { recursive: true })
-  writeFileSync(join(OUT, name), JSON.stringify(data, null, 1))
+  writeFileSync(join(OUT, name), JSON.stringify(data, null, 1), { flag: 'wx' })
+}
+/** A rebuilt report gets a new name instead of replacing an earlier one. Returns the name used. */
+const saveReport = (name, data) => {
+  mkdirSync(OUT, { recursive: true })
+  const used = existsSync(join(OUT, name)) ? name.replace(/\.json$/, `-${stamp}.json`) : name
+  writeFileSync(join(OUT, used), JSON.stringify(data, null, 1), { flag: 'wx' })
+  return used
 }
 const errorText = (e) => (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+
+/** Refuses a runtime mode before anything starts if one of its result files already exists. */
+function refuseExisting(names) {
+  const existing = names.filter((n) => existsSync(join(OUT, n)))
+  if (existing.length)
+    throw new Error(
+      `results already exist in ${OUT} (${existing.join(', ')}); use a new --session. Nothing was started.`,
+    )
+}
+
+/** Diagnostics of a failed lab opening: a JSON file and, if captured, a screenshot (unique names). */
+function saveDiagnostics(name, data, pngBase64) {
+  mkdirSync(OUT, { recursive: true })
+  let base = name
+  for (let i = 2; existsSync(join(OUT, `${base}.json`)); i++) base = `${name}-${i}`
+  writeFileSync(join(OUT, `${base}.json`), JSON.stringify(data, null, 1), { flag: 'wx' })
+  if (pngBase64)
+    writeFileSync(join(OUT, `${base}.png`), Buffer.from(pngBase64, 'base64'), { flag: 'wx' })
+  return join(OUT, `${base}.json`)
+}
 
 function startSampler(name) {
   mkdirSync(OUT, { recursive: true })
@@ -125,47 +168,37 @@ function memSummary(samples, from = 0, to = Infinity) {
 const lab = (page, expr, timeout) =>
   page.evaluate(`(async () => { const L = window.mapLibreLab; return ${expr} })()`, timeout)
 
-/** Starts the app and opens the lab with request logging, emulated 1280 × 900 CSS px at `dpr`. */
-async function openLab(dpr = 1) {
-  const app = await launchApp({ flags: FLAGS, confirmed: CONFIRMED, busyExtra: BUSY })
-  try {
-    const page = await connectPage(app.port)
-    await page.send('Page.enable')
-    const inst = await instrument(page)
-    await page.send('Emulation.setDeviceMetricsOverride', {
-      width: 1280,
-      height: 900,
-      deviceScaleFactor: dpr,
-      mobile: false,
-    })
-    const navT = Date.now()
-    await page.send('Page.navigate', { url: LAB })
-    let ready = false
-    for (let i = 0; i < 150 && !ready; i++) {
-      await sleep(200)
-      ready = await page
-        .evaluate('!!window.mapLibreLab && document.readyState === "complete"', 5000)
-        .catch(() => false)
-    }
-    if (!ready) throw new Error('lab page did not load')
-    // The page's own first configuration: wait for its result or its error (B1.2 `state().error`).
-    let initial = null
-    for (let i = 0; i < 400 && !initial; i++) {
-      initial = await page
-        .evaluate(
-          '(() => { const s = window.mapLibreLab.state(); return s.load || s.error ? s : null })()',
-          5000,
-        )
-        .catch(() => null)
-      if (!initial) await sleep(200)
-    }
-    if (!initial) throw new Error('initial lab configuration did not finish')
-    return { app, page, inst, navT, initial }
-  } catch (e) {
-    await closeApp(app)
-    throw e
-  }
+/**
+ * Starts the app and opens the lab with request logging, emulated 1280 × 900 CSS px at `dpr`.
+ * B1.5.1 (defect B): staged and bounded (openlab.mjs); a failure throws `OpenLabError` with the
+ * stage, the original error and the diagnostics file of every attempt.
+ */
+function openLab(dpr = 1, label = 'lab') {
+  return openLabStaged(
+    {
+      launch: () => launchApp({ flags: FLAGS, confirmed: CONFIRMED, busyExtra: BUSY }),
+      close: (app) => closeApp(app),
+      processes: () => processInfo(),
+      listTargets: (port) => listTargets(port),
+      connect: (url) => connect(url),
+      instrument: (page) => instrument(page),
+      devServer: () => devServerStatus(LAB),
+      save: saveDiagnostics,
+      now: () => Date.now(),
+      sleep,
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+    },
+    { labUrl: LAB, devOrigin: PAGE_ORIGIN, dpr, label: `${label}-${TAG}`, attempts: ATTEMPTS },
+  )
 }
+
+/** What a failed lab opening leaves in a result file. */
+const openLabFailure = (e) => ({
+  error: errorText(e),
+  stage: e?.stage ?? null,
+  attempts: Array.isArray(e?.attempts) ? e.attempts : null,
+})
 
 function networkInput(inst, navT, labState) {
   return {
@@ -181,14 +214,31 @@ function networkInput(inst, navT, labState) {
 async function screenshot(page, name) {
   const r = await page.send('Page.captureScreenshot', { format: 'png' })
   mkdirSync(OUT, { recursive: true })
-  writeFileSync(join(OUT, `${name}.png`), Buffer.from(r.data, 'base64'))
+  writeFileSync(join(OUT, `${name}.png`), Buffer.from(r.data, 'base64'), { flag: 'wx' })
 }
 
 // ---------------------------------------------------------------- functional
 
 async function functional() {
+  refuseExisting([`functional-${TAG}.json`])
   const res = { tag: TAG, env: {}, steps: {}, failedSteps: [] }
-  const { app, page, inst, navT, initial } = await openLab(1)
+  let opened
+  try {
+    opened = await openLab(1, 'functional')
+  } catch (e) {
+    // B1.5.1: a lab that never opened is an INVALID functional run, not a crash without a record.
+    res.failedSteps.push({ name: 'openLab', ...openLabFailure(e) })
+    res.network = null
+    save(`functional-${TAG}.json`, res)
+    printReport(buildReport({ functional: res }))
+    return
+  }
+  const { app, page, inst, navT, initial } = opened
+  res.env.openLab = {
+    attempt: opened.attempt,
+    failedAttempts: opened.failedAttempts,
+    stages: opened.stages,
+  }
   /** Runs one step; a failure is recorded (the criterion becomes INVALID) and the run continues. */
   const step = async (name, fn) => {
     try {
@@ -348,7 +398,13 @@ async function perfRun(kind, scenario, run) {
   const marks = {}
   try {
     if (!CONFIGS[kind]) throw new Error(`unknown kind ${kind}`)
-    opened = await openLab(1)
+    try {
+      opened = await openLab(1, `perf-${kind}-${scenario}-${run}`)
+    } catch (e) {
+      out.openLab = openLabFailure(e)
+      throw e
+    }
+    out.openLabAttempt = { attempt: opened.attempt, failedAttempts: opened.failedAttempts }
     const { page } = opened
     sampler = startSampler(`${kind}-${scenario}-${run}-${TAG}`)
     out.gpu = (await lab(page, 'L.gpuInfo()'))?.renderer ?? null
@@ -384,6 +440,8 @@ async function perfRun(kind, scenario, run) {
       out.network = networkInput(opened.inst, opened.navT, out.state ?? null)
       out.exceptions = opened.inst.log.exceptions
       out.errors = opened.inst.log.console.filter((c) => /error/.test(c.type))
+      // B1.5.1: warnings too; MapLibre reports a missing worker projection handler as a warning.
+      out.warnings = opened.inst.log.console.filter((c) => /warn/.test(c.type))
       out.close = await closeApp(opened.app)
     }
     save(`perf-${kind}-${scenario}-${run}-${TAG}.json`, { ...out, samples })
@@ -401,7 +459,7 @@ async function perfRun(kind, scenario, run) {
 async function perf() {
   const scenarios = ONLY ? [ONLY] : Object.keys(THRESHOLDS)
   const kinds = opt('kinds', 'maplibre,m3').split(',').filter(Boolean)
-  const all = []
+  const plan = []
   for (const scenario of scenarios) {
     if (!THRESHOLDS[scenario]) throw new Error(`unknown scenario ${scenario}`)
     // A B B A A B … : the order alternates per round (extra kinds follow the first).
@@ -410,9 +468,12 @@ async function perf() {
     const counts = {}
     for (const k of order) {
       counts[k] = (counts[k] ?? 0) + 1
-      all.push(await perfRun(k, scenario, counts[k]))
+      plan.push([k, scenario, counts[k]])
     }
   }
+  refuseExisting(plan.map(([k, s, n]) => `perf-${k}-${s}-${n}-${TAG}.json`))
+  const all = []
+  for (const [k, s, n] of plan) all.push(await perfRun(k, s, n))
   printReport(buildReport({ perf: all }))
 }
 
@@ -422,12 +483,18 @@ async function cycles() {
   const scenario = ONLY ?? 'stress'
   const kind = opt('kind', 'maplibre')
   const n = 8
+  refuseExisting([`cycles-${kind}-${scenario}-${TAG}.json`])
   const out = { tag: TAG, kind, scenario, cycles: [] }
   let opened = null
   let sampler = null
   try {
     if (!CONFIGS[kind] || !THRESHOLDS[scenario]) throw new Error(`unknown kind or scenario`)
-    opened = await openLab(1)
+    try {
+      opened = await openLab(1, `cycles-${kind}-${scenario}`)
+    } catch (e) {
+      out.openLab = openLabFailure(e)
+      throw e
+    }
     const { page } = opened
     sampler = startSampler(`cycles-${kind}-${scenario}-${TAG}`)
     await lab(
@@ -455,6 +522,8 @@ async function cycles() {
     for (const c of out.cycles) c.mem = memSummary(samples, c.t1 - 2000, c.t1).last
     if (opened) {
       out.exceptions = opened.inst.log.exceptions
+      out.warnings = opened.inst.log.console.filter((c) => /warn/.test(c.type))
+      out.state = await lab(opened.page, 'L.state()').catch(() => null)
       out.close = await closeApp(opened.app)
     }
     save(`cycles-${kind}-${scenario}-${TAG}.json`, { ...out, samples })
@@ -466,6 +535,8 @@ async function cycles() {
 
 /** Builds report-<tag>.json from the files saved in --out. Starts nothing. */
 function report() {
+  if (!opt('session', null) && !opt('out', null))
+    throw new Error('report needs --session=<name> or --out=<dir>')
   if (!existsSync(OUT)) throw new Error(`no results in ${OUT}`)
   const tags = opt('tag', null) ? [opt('tag')] : ['amd', 'nv']
   for (const tag of tags) {
@@ -483,8 +554,7 @@ function report() {
       perf: files.filter((f) => f.startsWith('perf-')).map((f) => strip(read(f))),
       cycles: files.filter((f) => f.startsWith('cycles-')).map((f) => strip(read(f))),
     })
-    save(`report-${tag}.json`, { tag, files, ...rep })
-    console.log(`report-${tag}.json`)
+    console.log(saveReport(`report-${tag}.json`, { tag, files, ...rep }))
     printReport(rep)
   }
 }

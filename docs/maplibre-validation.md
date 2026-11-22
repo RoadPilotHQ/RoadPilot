@@ -2,20 +2,22 @@
 
 How the runtime criteria of the MapLibre prototype ([maplibre-prototype.md](maplibre-prototype.md)) will be measured.
 
-> **Status: prepared, not run.** The harness has been written and its evaluation logic unit-tested (B1.4). It has **never** started RoadPilot, a browser or any measurement. Every runtime criterion of B1 is still NOT TESTED. Running it needs a separate approval.
+> **Status: B1.5 run stopped (NO-GO); B1.5.1 corrections made statically, not runtime-tested.** B1.5 (2026-11-22, AMD only) ran the harness and found two defects: MapLibre workers without the projection handler (lab) and lab pages that did not open after app start (harness). Both are corrected in B1.5.1 (see [B1.5.1 corrections](#b151-corrections)), verified by unit tests against fakes only. The B1.5 results stay in `out/` unchanged. Every runtime criterion needs a new run, which needs a separate approval.
 
 ## Location
 
 `tools/maplibre-validation/` in this repository:
 
-| File           | Role                                                                                                                        |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `run.mjs`      | Driver. Collects data only; every verdict comes from `report.mjs`                                                           |
-| `report.mjs`   | Pure evaluation: thresholds and verdict rules (no I/O). Unit-tested in `src/dev/mapLibreLab/tests/validationReport.test.ts` |
-| `report.d.mts` | Types of `report.mjs` for the tests                                                                                         |
-| `cdp.mjs`      | Starts and closes RoadPilot's debug build, DevTools connection, request / console / worker instrumentation, heaps           |
-| `sampler.ps1`  | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
-| `out/`         | Results, memory samples, screenshots and reports (ignored by Git)                                                           |
+| File            | Role                                                                                                                        |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `run.mjs`       | Driver. Collects data only; every verdict comes from `report.mjs`                                                           |
+| `report.mjs`    | Pure evaluation: thresholds and verdict rules (no I/O). Unit-tested in `src/dev/mapLibreLab/tests/validationReport.test.ts` |
+| `report.d.mts`  | Types of `report.mjs` for the tests                                                                                         |
+| `openlab.mjs`   | B1.5.1: staged, bounded lab opening with failure diagnostics and safe retry. Unit-tested in `tests/openLab.test.ts`         |
+| `openlab.d.mts` | Types of `openlab.mjs` for the tests                                                                                        |
+| `cdp.mjs`       | Starts and closes RoadPilot's debug build, DevTools connection, request / console / worker instrumentation, heaps           |
+| `sampler.ps1`   | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
+| `out/`          | Results (ignored by Git). B1.5 evidence in the root; every later run in its own session folder `out/<session>/`             |
 
 All paths derive from the repository. The app identifier and the dev-server URL are read from `src-tauri/tauri.conf.json`.
 
@@ -30,15 +32,16 @@ All paths derive from the repository. The app identifier and the dev-server URL 
 ## Invocation (later, after approval)
 
 ```
-node tools/maplibre-validation/run.mjs functional --confirm-runtime            # AMD (default GPU)
-node tools/maplibre-validation/run.mjs perf --confirm-runtime                  # 100k and 1M, MapLibre and M3, 3 runs each, A B B A A B
-node tools/maplibre-validation/run.mjs perf --confirm-runtime --kinds=maplibre-nolabels,m3
-node tools/maplibre-validation/run.mjs cycles --confirm-runtime --only=stress  # 8 zoom cycles, memory
-node tools/maplibre-validation/run.mjs functional --confirm-runtime --nv       # RTX via --force_high_performance_gpu
-node tools/maplibre-validation/run.mjs report                                  # offline: report-amd.json, report-nv.json
+node tools/maplibre-validation/run.mjs functional --confirm-runtime --session=b16            # AMD (default GPU)
+node tools/maplibre-validation/run.mjs perf --confirm-runtime --session=b16 --kinds=maplibre,maplibre-nolabels,m3
+node tools/maplibre-validation/run.mjs cycles --confirm-runtime --session=b16 --only=stress  # 8 zoom cycles, memory
+node tools/maplibre-validation/run.mjs functional --confirm-runtime --session=b16 --nv       # RTX via --force_high_performance_gpu
+node tools/maplibre-validation/run.mjs report --session=b16                                  # offline: report-amd.json, report-nv.json
 ```
 
-Without `--confirm-runtime`, `functional`, `perf` and `cycles` print a notice and exit with code 2 without starting anything; `launchApp` itself also refuses without confirmation. `report` reads saved files only. Options: `--out=<dir>`, `--only=urban|stress`, `--kinds=a,b` (`maplibre`, `maplibre-nolabels`, `m3`), `--runs=n` (fewer than 3 makes the report INVALID), `--kind=` for `cycles`, `--tag=amd|nv` for `report`.
+Without `--confirm-runtime`, `functional`, `perf` and `cycles` print a notice and exit with code 2 without starting anything; `launchApp` itself also refuses without confirmation. `report` reads saved files only and needs `--session` or `--out`. Options: `--session=<name>` (folder `out/<name>/`; default for runtime modes: a new `run-<timestamp>` folder), `--out=<dir>`, `--only=urban|stress`, `--kinds=a,b` (`maplibre`, `maplibre-nolabels`, `m3`), `--runs=n` (fewer than 3 makes the report INVALID), `--kind=` for `cycles`, `--tag=amd|nv` for `report`, `--attempts=n` (app starts per lab opening, default 2).
+
+**No overwriting (B1.5.1).** A runtime mode refuses to start, before launching anything, when a result file it would write already exists in its folder. Results, screenshots and diagnostics are written with `wx` (an existing file is an error, never replaced). A rebuilt report that would replace a report gets a timestamped name instead.
 
 Every run is a fresh app start with WebView2 arguments set only in that child process (`--remote-debugging-port`, occlusion throttling off, optionally `--force_high_performance_gpu`), window emulated at 1280 × 900 CSS px (map area 980 × 900), DPR 1 (DPR 1.5 for one accuracy pass). The app is closed with a normal window close.
 
@@ -62,6 +65,8 @@ Rules that prevent a silent pass:
 - Accuracy: an `infrastructure_error` from the lab (probe layer or source missing, nothing measured, non-finite values) is `INVALID`, never a rendering failure and never a pass. The harness also checks the lab's `withinTolerance` against the numbers, rejects a tolerance other than 0.5 px, and never assumes `results` exists.
 - Network: if the log contains no request for the lab page itself, the instrumentation did not work → `INVALID`. Without a CSP log → `INVALID`.
 - A MapLibre run whose first-visible frame had no road pixel, or an M3 run that drew no segment, is `INVALID`.
+- B1.5.1, worker projection: a MapLibre perf run is `INVALID` unless its cold load verified the handler in every worker (`cold.workerProjection.verified`), no workers were recreated during the load or the run, and MapLibre logged no "no projection handler is set in the workers" warning. The B1.5 result format has no such field, so B1.5 MapLibre runs can no longer pass. The functional criterion `workerProjection` is `FAIL` on that warning or a failed registration and `INVALID` when the state is missing, unfinished or saw a recreation.
+- B1.5.1, lab opening: a functional run whose lab never opened is saved with `failedSteps: [{name: 'openLab', stage, attempts}]` and is `INVALID`; a perf or cycles run keeps `error` and `openLab`.
 
 ## Criteria and thresholds
 
@@ -161,7 +166,61 @@ Files in `out/`, with `<tag>` = `amd` or `nv`:
 - `accuracy-<key>-<tag>.json`: the full accuracy result, including every probe.
 - `perf-<kind>-<scenario>-<n>-<tag>.json`: `cold` and `warm` load results, `datasetSegments`, `pan`, `zoom[3]`, `heap`, `memory`, `memoryAfterLoad`, `network`, `exceptions`, `errors`, `close`, `error` if the run failed, `samples`.
 - `cycles-<kind>-<scenario>-<tag>.json`: per cycle frame gaps, heaps and memory; `error` if failed.
+- `openlab-failure-<label>-<tag>-a<n>.json` / `.png` (B1.5.1): diagnostics of every failed lab opening (see [Defect B](#defect-b-lab-page-not-opening-after-app-start)).
+- B1.5.1 additions: MapLibre load results carry `workerProjection`; `state()` carries `workerProjection` (state, generation, attempts, recreations, events); perf and cycles results carry `warnings`; functional results carry `env.openLab` (attempt, failed attempts, stage timings).
 - `report-<tag>.json` (`report` mode): thresholds, tolerance, `minRuns`, the memory rule (`memoryRule.status = 'provisional'`), every criterion with `verdict`, `reason`, `metrics` / `checks` / per-run details (memory criteria: `diagnostic`), and `overall`.
+
+## B1.5.1 corrections
+
+Static corrections of the two defects found in B1.5. Nothing was run; the tests use fakes.
+
+### Defect A: MapLibre workers without the projection handler
+
+**B1.5 evidence:** 8 worker sessions in one functional run, 5 MapLibre warnings "GeoJSON sources are drawn in the wrong place: no projection handler is set in the workers", one `AbortError: The workers were terminated while a message was in flight` during the handler import; the same warning during MapLibre perf runs (Vite log).
+
+**Mechanism (FACT, MapLibre 6.19.0 source):**
+
+- Removing the last map releases the global worker pool, which terminates its workers (`WorkerPool.release`). The lab removed its map on every `configure`. `workerCount` is 1 outside Safari, so each configuration got a new worker. The typings say the same: "Removing the last map terminates them unless `prewarm()` holds them".
+- `importScriptInWorkers` remembers its url and the global dispatcher sends it to every new worker (`GlobalDispatcher.buildActors`). So the handler was **not** "registered only once"; the B1.5 description is corrected here.
+- In the worker the import is an asynchronous module import (`_importScript`), and the worker handles other messages meanwhile. A GeoJSON load that runs first finds no handler: `createWorkerCRSHelper` warns once and returns `undefined`. Nothing in MapLibre makes data loads wait for an imported script.
+- Unknown worker message types are answered with `null`.
+
+**Correction (`src/dev/mapLibreLab/workerProjection.ts`, `scsProjection.worker.mjs`, `main.ts`):**
+
+1. `prewarm()` (public, documented) holds the pool, so removing a map no longer terminates the workers.
+2. Registration awaits `importScriptInWorkers` (resolves after every current worker finished the import), then broadcasts a status message through `getGlobalDispatcher().broadcast` (public). The worker script answers it only after `setProjectionHandler` was really called. Every current worker must answer; a `null`, an empty answer list, or workers recreated during the check fail the attempt.
+3. Attempts are bounded (3 × 15 s), concurrent callers share one registration, a failure is not cached, and every failed attempt (stage, generation, error) stays in `state().workerProjection.attempts`.
+4. Every `workerscreate` increases the worker generation. Workers recreated after registration (with `prewarm()` only possible through `WorkerPool.restart`) make the state `stale`; the lab registers again and reloads its road and city data.
+5. Every map mount and every data load waits for the registration. A failure fails that load with `WorkerProjectionError`; there is no fallback. Each MapLibre load result carries `workerProjection: {verified, generation, workers, recreatedDuringLoad}`.
+6. The SCS transform and the `/2048` API carrier are unchanged.
+
+**Limitation:** the worker-side status answer uses `self.worker.actor.registerMessageHandler`. MapLibre documents actor message handlers as an extension point of `importScriptInWorkers`, but names `self.actor`, which does not exist in 6.19.0; the worker exposes its actor as `self.worker.actor`. The script tries both. The handler only reports state and changes nothing in MapLibre. If MapLibre removes both, verification fails loudly; it cannot pass silently. Not a monkey patch: no MapLibre function is replaced.
+
+**Not verified:** that real WebView2 workers behave like the fake (import timing, `prewarm()` keeping the worker across `map.remove()`, the status answer). This needs the next runtime run.
+
+### Defect B: lab page not opening after app start
+
+**B1.5 evidence:** 6 of 10 app starts ended in "lab page did not load" after 30 s; the dev server answered in 0.2 s; one separate start opened the lab in 2 s, with the page target already at `http://127.0.0.1:1420/` when the harness connected. The failed starts saved no URL, events, console or screenshot.
+
+**Possible mechanism (source, not proven):** wry 0.57.1 (`src/webview2/mod.rs`, `new_in_hwnd`) creates the WebView2 environment (browser process and debugging port) and the controller (the page target) before it calls `webview.Navigate(devUrl)` at the end of `init_webview`. The old harness connected to the first `page` target, whatever its URL, and navigated at once; a navigation sent in that window is replaced by wry's own. Whether this caused the B1.5 failures cannot be shown from the saved evidence.
+
+**Correction (`tools/maplibre-validation/openlab.mjs`, `cdp.mjs`, `run.mjs`):**
+
+| Stage           | Condition                                                                                   | Deadline |
+| --------------- | ------------------------------------------------------------------------------------------- | -------- |
+| `startup`       | `launchApp` (confirmation, busy-desktop guard, debugging port)                              | 30 s     |
+| `target`        | a `page` target exists (and the app has not exited); connected; requests logged             | 15 s     |
+| `appNavigation` | the main frame has committed a URL on the dev server (wry's navigation done)                | 30 s     |
+| `navigation`    | `Page.navigate` without `errorText`; the main frame committed the lab URL                   | 20 s     |
+| `labReady`      | lab URL, `readyState` complete, `window.mapLibreLab` present; leaving the lab fails at once | 30 s     |
+| `initialConfig` | the lab's first configuration has a result or an error                                      | 80 s     |
+
+- Stages poll a condition every 100 ms against their deadline; each DevTools command is bounded to 5 s. No fixed sleep decides anything.
+- A failure keeps its original stage and error. Diagnostics are captured afterwards, each part bounded and optional: stage timings, navigation and target events with timestamps, console, page exceptions, the initial target, final URL (page, frame tree, target list), navigation history, page state, screenshot, dev-server status, app port/pid/exit code, RoadPilot's process list. They are saved as `openlab-failure-<label>-a<n>.json` (+ `.png`) with unique names. A capture problem is recorded in `captureErrors` and never replaces the failure.
+- Retry: up to `--attempts` (default 2), only after the app was closed **and** no RoadPilot or RoadPilot WebView2 process is left; otherwise no retry. Refusals (no confirmation, busy desktop, app already running) are never retried and save nothing.
+- A DevTools connection that closes rejects every pending and later command (`TargetClosedError`) instead of leaving it waiting.
+
+**Not verified:** the real start-up timing of RoadPilot's WebView2 and whether the `appNavigation` stage removes the B1.5 failures. This needs the next runtime run; its diagnostics would now show the failure stage if it happens again.
 
 ## Open runtime questions
 

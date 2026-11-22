@@ -9,9 +9,11 @@
  *   after a release are ignored.
  * - `createRetryableInit` (F4): a shared, retryable one-time initialisation. Concurrent callers
  *   share one promise; a failure is not cached, and steps that already succeeded are not repeated
- *   on retry (so the CRS is registered and the worker handler imported at most once each).
+ *   on retry (so the CRS is registered at most once).
  *
- * MapLibre's worker pool is global and lives as long as the page; nothing here stops it.
+ * B1.5.1: MapLibre's worker pool does NOT live as long as the page by itself (removing the last
+ * map terminates its workers). The worker projection handler is therefore handled per worker
+ * generation by `workerProjection.ts`, not as a one-time step here.
  */
 
 /** Default time a map may take to load its style or its data before the lab reports an error. */

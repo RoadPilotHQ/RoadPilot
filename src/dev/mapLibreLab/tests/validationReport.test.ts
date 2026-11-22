@@ -11,6 +11,7 @@ import {
   evaluateNetwork,
   evaluatePerfRun,
   evaluateRelease,
+  evaluateWorkerProjection,
   MEMORY,
   MIN_RUNS,
   THRESHOLDS,
@@ -247,15 +248,27 @@ const phase = (p95: number, max: number, o: Record<string, unknown> = {}) => ({
   settleMs: 40,
   ...o,
 })
+/** B1.5.1: a MapLibre load verified the worker projection handler before `setData`. */
+const verifiedProjection = { verified: true, generation: 1, workers: 1, recreatedDuringLoad: false }
 const perfRun = (o: Record<string, unknown> = {}) => ({
   kind: 'maplibre',
   scenario: 'urban',
   datasetSegments: 100_000,
-  cold: { firstMs: 80, firstRoadPixels: 1200, completeMs: 150 },
   warm: { firstMs: 60 },
   pan: phase(12, 30),
   zoom: [phase(15, 40), phase(16, 41), phase(14, 39)],
   ...o,
+  // `cold` overrides are merged so that runs keep their verified projection; `null` stays null.
+  cold:
+    o.cold === null
+      ? null
+      : {
+          firstMs: 80,
+          firstRoadPixels: 1200,
+          completeMs: 150,
+          workerProjection: verifiedProjection,
+          ...(o.cold as Record<string, unknown> | undefined),
+        },
 })
 
 describe('evaluatePerfRun', () => {
@@ -315,6 +328,66 @@ describe('evaluatePerfRun', () => {
       verdict: 'FAIL',
       reason: 'webgl_error',
     })
+  })
+})
+
+describe('worker projection (B1.5.1, defect A)', () => {
+  const warning = {
+    type: 'warning',
+    text: 'GeoJSON sources are drawn in the wrong place: no projection handler is set in the workers, see `setProjectionHandler` in the custom CRS guide.',
+  }
+
+  it('a MapLibre run without a verified handler, or with the MapLibre warning, is invalid', () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ cold: { workerProjection: undefined } }, 'worker_projection_unverified'],
+      [{ cold: { workerProjection: { verified: false } } }, 'worker_projection_unverified'],
+      [
+        { cold: { workerProjection: { ...verifiedProjection, recreatedDuringLoad: true } } },
+        'workers_recreated_during_load',
+      ],
+      [{ warnings: [warning] }, 'worker_projection_warning'],
+      [{ state: { workerProjection: { recreations: 1 } } }, 'workers_recreated'],
+    ]
+    for (const [o, reason] of cases)
+      expect(evaluatePerfRun(perfRun(o), 'urban'), reason).toMatchObject({
+        verdict: 'INVALID',
+        reason,
+      })
+    // The B1.5 MapLibre run format (no workerProjection field) can no longer pass.
+    expect(
+      evaluatePerfRun(
+        perfRun({ kind: 'maplibre-nolabels', cold: { workerProjection: null } }),
+        'urban',
+      ).verdict,
+    ).toBe('INVALID')
+  })
+
+  it('M3 runs do not use MapLibre workers and need no handler', () => {
+    const m3 = perfRun({
+      kind: 'm3',
+      cold: { firstMs: 20, firstSegments: 10, workerProjection: undefined },
+    })
+    expect(evaluatePerfRun(m3, 'urban').verdict).toBe('PASS')
+  })
+
+  it('functional state: verified passes; failure, missing state, recreation and the warning do not', () => {
+    const ready = { state: 'ready', generation: 1, recreations: 0, keepAlive: true, attempts: [] }
+    expect(evaluateWorkerProjection(ready, []).verdict).toBe('PASS')
+    expect(evaluateWorkerProjection(ready, [warning])).toMatchObject({
+      verdict: 'FAIL',
+      reason: 'worker_warned_no_handler',
+    })
+    expect(evaluateWorkerProjection({ ...ready, state: 'failed' }, []).verdict).toBe('FAIL')
+    expect(evaluateWorkerProjection(undefined, []).verdict).toBe('INVALID')
+    expect(evaluateWorkerProjection({ ...ready, state: 'stale' }, []).reason).toBe(
+      'not_ready:stale',
+    )
+    expect(evaluateWorkerProjection({ ...ready, recreations: 2 }, []).reason).toBe(
+      'workers_recreated',
+    )
+    expect(evaluateWorkerProjection({ ...ready, keepAlive: false }, []).reason).toBe(
+      'worker_pool_not_kept',
+    )
   })
 })
 
@@ -428,13 +501,24 @@ describe('buildReport', () => {
           afterRelease: { listeners: 0, pendingWaits: 0 },
           remount: { canvases: 1 },
         },
+        finalState: {
+          workerProjection: {
+            state: 'ready',
+            generation: 1,
+            recreations: 0,
+            keepAlive: true,
+            attempts: [],
+          },
+        },
       },
       failedSteps: [],
       network: net(),
+      console: [],
     }
     const r = buildReport({ functional: good })
     expect(r.criteria.accuracyScs!.verdict).toBe('PASS')
     expect(r.criteria.network!.verdict).toBe('PASS')
+    expect(r.criteria.workerProjection!.verdict).toBe('PASS')
     expect(r.criteria.labels!.verdict).toBe('NOT_TESTED')
     expect(r.overall).toBe('NOT_TESTED')
   })
@@ -463,6 +547,8 @@ describe('harness sources', () => {
       'run.mjs',
       'report.mjs',
       'report.d.mts',
+      'openlab.mjs',
+      'openlab.d.mts',
       'cdp.mjs',
       'sampler.ps1',
       'README.md',
@@ -490,6 +576,23 @@ describe('harness sources', () => {
     expect(run).toMatch(/if \(CONFIRMED\) await RUNTIME\[mode\]\(\)/)
     expect(run).toMatch(/confirmed: CONFIRMED/)
     expect(run).toContain('args.includes(`--${name}`)')
+  })
+
+  it('B1.5.1: opens the lab through the staged openlab.mjs and never overwrites results', () => {
+    const run = harness['/tools/maplibre-validation/run.mjs']!
+    expect(run).toContain("from './openlab.mjs'")
+    expect(run).not.toContain('connectPage')
+    expect(run).not.toContain("'lab page did not load'")
+    // Raw results, screenshots and diagnostics are written with `wx` (fail instead of replace).
+    expect(run.match(/flag: 'wx'/g)?.length).toBeGreaterThanOrEqual(5)
+    expect(run).toMatch(/refuseExisting\(\[`functional-\$\{TAG\}\.json`\]\)/)
+    expect(run).toMatch(/refuseExisting\(plan\.map/)
+    expect(run).toMatch(/refuseExisting\(\[`cycles-/)
+    // New runs go into a session folder, never into the out/ root that holds the B1.5 evidence.
+    expect(run).toMatch(/join\(HERE, 'out', SESSION\)/)
+    expect(run).toContain('report needs --session=<name> or --out=<dir>')
+    // A closed DevTools connection rejects pending commands.
+    expect(harness['/tools/maplibre-validation/cdp.mjs']).toMatch(/ws\.onclose = /)
   })
 
   it('opens the lab page that exists in the repository', () => {

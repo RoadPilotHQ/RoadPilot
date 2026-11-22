@@ -3,3 +3,5 @@ dist
 package-lock.json
 src-tauri/target
 README.md
+# Local runtime results of the MapLibre validation harness (ignored by Git; raw evidence, never reformatted)
+tools/maplibre-validation/out
