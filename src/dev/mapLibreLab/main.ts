@@ -60,6 +60,7 @@ import {
 } from './lifecycle'
 import { panCamera, summarizePhase, zoomCamera, type Camera, type PhaseSummary } from './benchmark'
 import { buildStyle, COLORS, DRAW_ORDER } from './mapStyle'
+import { countRoadPixels, detectableRoadColours } from './roadPixels'
 import {
   buildDataset,
   citiesGeoJSON,
@@ -307,7 +308,18 @@ function readOnePixel(gl: WebGL2RenderingContext) {
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4))
 }
 
-/** Pixels of the current drawing buffer that differ from the background (every 2nd pixel). */
+/** The whole current drawing buffer (`readPixels` layout, bottom row first). */
+function readFrame(gl: WebGL2RenderingContext): Uint8Array {
+  const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4)
+  gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px)
+  return px
+}
+
+/**
+ * Pixels of the current drawing buffer that differ from the background (every 2nd pixel). Any
+ * drawn content counts, labels included: used only by the context-loss check ("is anything drawn
+ * at all"), never for first visible geometry (B1.4, see `roadPixels.ts`).
+ */
 function countDrawnPixels(gl: WebGL2RenderingContext): number {
   const w = gl.drawingBufferWidth
   const h = gl.drawingBufferHeight
@@ -326,9 +338,14 @@ type Json = Parameters<GeoJSONSource['setData']>[0]
 
 /**
  * Hands the dataset to the mounted map and times it: data preparation (GeoJSON in carrier
- * coordinates, main thread), `setData` (main thread), first visible geometry (first frame with
- * road pixels after a road tile arrived; one-pixel read-back first, as in M3), complete geometry
+ * coordinates, main thread), `setData` (main thread), first visible geometry, complete geometry
  * (every tile of the view loaded and drawn) and idle (placement and fades done).
+ *
+ * B1.4 (O3): first visible geometry is the first rendered frame with at least one pixel of the
+ * road line layers, as classified by `countRoadPixels` with the road colours that no background,
+ * label, halo or probe pixel of the mounted style can match (`detectableRoadColours`). The time
+ * is taken after a one-pixel read-back (GPU done, as in M3) and before the full read-back used
+ * for classification. Labels drawn first can no longer stop the clock.
  */
 async function loadMapLibreData(s: LoadSession, ds: LabDataset) {
   const m = map!
@@ -340,9 +357,10 @@ async function loadMapLibreData(s: LoadSession, ds: LabDataset) {
   const probes = probesGeoJSON(ds.probes)
   const prepMs = now() - p0
 
+  const roadColours = detectableRoadColours({ labels: config.labels, probes: config.probes })
   let tileArrived = false
   let firstMs = NaN
-  let firstPixels = 0
+  let firstRoadPixels = 0
   let completeMs = NaN
   let frames = 0
   let longestFrame = 0
@@ -369,10 +387,10 @@ async function loadMapLibreData(s: LoadSession, ds: LabDataset) {
       if (Number.isNaN(firstMs) && tileArrived) {
         readOnePixel(gl)
         const tf = now()
-        const n = countDrawnPixels(gl)
+        const n = countRoadPixels(readFrame(gl), roadColours)
         if (n > 0) {
           firstMs = tf - t0
-          firstPixels = n
+          firstRoadPixels = n
         }
       }
       if (!Number.isNaN(firstMs) && m.areTilesLoaded()) {
@@ -406,7 +424,9 @@ async function loadMapLibreData(s: LoadSession, ds: LabDataset) {
     prepMs,
     setDataMs,
     firstMs,
-    firstPixels,
+    firstRoadPixels,
+    /** Road layers whose pixels were counted (depends on labels and probes, see roadPixels.ts). */
+    roadDetectionLayers: roadColours.map((c) => c.layer),
     completeMs,
     idleMs,
     loadFrames: frames,

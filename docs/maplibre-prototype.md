@@ -10,7 +10,8 @@ An isolated, development-only experiment: can MapLibre GL JS draw RoadPilot's ro
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Implemented              | Dev-only lab (`src/dev/mapLibreLab/`): registered planar CRS `roadpilot:scs`, worker projection handler, scenarios A–D, inline offline style, MapLibre / M3 side-by-side mounting, timing, accuracy, context-loss and request instrumentation |
 | Static checks passed     | `tsc -b`, ESLint, Prettier; static audit of the lab and of the MapLibre 6.19.0 sources (see [Static audit (B1.1)](#static-audit-b11)); the seven audit findings were addressed in [B1.2](#b12--reliability-fixes)                             |
-| Tests passed             | `npm run check`: 41 test files, 441 tests, including 68 lab tests in 6 files (coordinates, synthetic data, style, isolation, lifecycle, accuracy evaluation); all CPU-only                                                                    |
+| Tests passed             | `npm run check`: 43 test files, 482 tests, including 109 lab and harness tests in 8 files (coordinates, synthetic data, style, isolation, lifecycle, accuracy evaluation, road-pixel detection, validation report); all CPU-only              |
+| Validation harness       | B1.4: prepared in `tools/maplibre-validation/`, documented in [maplibre-validation.md](maplibre-validation.md); **never run**                                                                                                                 |
 | Production isolation     | `maplibre-gl` 6.19.0 exact, dev-only (all 24 lockfile entries `dev: true`); no production import (test); production `dist` byte-identical to the build of `e1d2fe9`                                                                           |
 | Runtime criteria         | **All NOT TESTED:** zero external requests, CSP at runtime, rendered positional accuracy, picking, labels, interaction, context loss, first display, frame times, memory, comparison with M3                                                  |
 | Why validation is paused | The harness's busy-GPU guard refused to start RoadPilot because a game was using the RTX 3080, and runtime measurements were then stopped by decision. The lab has never run in a browser or in WebView2                                      |
@@ -22,19 +23,21 @@ Statements are marked **FACT** (follows from code, source or a test that ran), *
 
 ## Layout
 
-| Path                                           | Role                                                                                    |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `src/dev/mapLibreLab/index.html`               | Lab page; carries the production CSP verbatim as a meta tag                             |
-| `src/dev/mapLibreLab/main.ts`                  | Lab UI, MapLibre and M3 mounting, load timing, benchmark driver, accuracy, context loss |
-| `src/dev/mapLibreLab/coordinates.ts`           | Display convention, carrier conversion, registered CRS, expected screen positions       |
-| `src/dev/mapLibreLab/scsProjection.worker.mjs` | Projection handler for MapLibre's workers (GeoJSON in the registered CRS)               |
-| `src/dev/mapLibreLab/syntheticData.ts`         | Scenarios A–D, GeoJSON conversion, conversion to the M3 `Scenario`                      |
-| `src/dev/mapLibreLab/mapStyle.ts`              | Inline style: no URL of any kind                                                        |
-| `src/dev/mapLibreLab/benchmark.ts`             | Frame-gap statistics and the M3 lab's pan/zoom camera paths                             |
-| `src/dev/mapLibreLab/lifecycle.ts`             | B1.2: load session (timeouts, release, listener ownership), retryable global setup      |
-| `src/dev/mapLibreLab/accuracyReport.ts`        | B1.2: accuracy evaluation; infrastructure errors kept apart from rendering results      |
-| `src/dev/mapLibreLab/tests/`                   | Coordinates, synthetic data, style, isolation, lifecycle, accuracy (68 tests)           |
-| `package.json`                                 | `maplibre-gl` `6.19.0`, exact, `devDependencies` only                                   |
+| Path                                           | Role                                                                                                           |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `src/dev/mapLibreLab/index.html`               | Lab page; carries the production CSP verbatim as a meta tag                                                    |
+| `src/dev/mapLibreLab/main.ts`                  | Lab UI, MapLibre and M3 mounting, load timing, benchmark driver, accuracy, context loss                        |
+| `src/dev/mapLibreLab/coordinates.ts`           | Display convention, carrier conversion, registered CRS, expected screen positions                              |
+| `src/dev/mapLibreLab/scsProjection.worker.mjs` | Projection handler for MapLibre's workers (GeoJSON in the registered CRS)                                      |
+| `src/dev/mapLibreLab/syntheticData.ts`         | Scenarios A–D, GeoJSON conversion, conversion to the M3 `Scenario`                                             |
+| `src/dev/mapLibreLab/mapStyle.ts`              | Inline style: no URL of any kind                                                                               |
+| `src/dev/mapLibreLab/benchmark.ts`             | Frame-gap statistics and the M3 lab's pan/zoom camera paths                                                    |
+| `src/dev/mapLibreLab/lifecycle.ts`             | B1.2: load session (timeouts, release, listener ownership), retryable global setup                             |
+| `src/dev/mapLibreLab/accuracyReport.ts`        | B1.2: accuracy evaluation; infrastructure errors kept apart from rendering results                             |
+| `src/dev/mapLibreLab/roadPixels.ts`            | B1.4: classifies road-layer pixels for first visible geometry                                                  |
+| `src/dev/mapLibreLab/tests/`                   | Coordinates, synthetic data, style, isolation, lifecycle, accuracy, road pixels, validation report (109 tests) |
+| `tools/maplibre-validation/`                   | B1.4: runtime validation harness and its evaluation ([maplibre-validation.md](maplibre-validation.md))         |
+| `package.json`                                 | `maplibre-gl` `6.19.0`, exact, `devDependencies` only                                                          |
 
 The lab is at `http://127.0.0.1:1420/src/dev/mapLibreLab/index.html` on the dev server (`npm run dev`). `window.mapLibreLab` is the harness interface: `configure`, `run('pan' | 'zoom')`, `settle`, `accuracy`, `apiChecks`, `labelStats`, `contextLoss`, `release`, `remount`, `gpuInfo`, `state`.
 
@@ -159,9 +162,10 @@ Prepared and unused:
 - Same camera paths as the M3 lab: pan = 300 px circle, 1.5 s per turn, 3 s; zoom = ×64 in and out, 3 s per cycle.
 - Same nearest-rank quantile. Frame gaps from `requestAnimationFrame` timestamps; MapLibre is driven with `jumpTo` + `redraw()` so that both renderers render once per frame.
 - Load timing:
-  - MapLibre: data preparation; `setData`; first visible geometry (first frame with road pixels after a tile arrived, with a one-pixel read-back first, as in M3); complete geometry; idle.
-  - M3: its `firstFrame` method.
-- Harness (scratchpad, not committed): fresh app per run, A B B A A B, three runs per renderer and scenario; per-process memory sampler and GPU process counters as in M3; page and worker heaps after GC; 8 zoom cycles for memory growth; `--force_high_performance_gpu` for the RTX 3080.
+  - MapLibre: data preparation; `setData`; first visible geometry (B1.4: the first rendered frame containing at least one pixel of the road line layers, classified by road colour so that labels cannot count; see [maplibre-validation.md](maplibre-validation.md#first-visible-geometry-b14-definition)); complete geometry; idle.
+  - M3: its `firstFrame` method (first frame with submitted segments; no pixel classification).
+  - B1.4.1: the two first-visible measurements are **not** equivalent (detection method, timed work and labels differ). A comparison with M3 is meaningful at most for `maplibre-nolabels` and **requires runtime verification**; see [maplibre-validation.md](maplibre-validation.md#comparison-with-m3-b141).
+- Harness (B1.4: `tools/maplibre-validation/`, see [maplibre-validation.md](maplibre-validation.md)): fresh app per run, A B B A A B, three runs per renderer and scenario; per-process memory sampler and GPU process counters as in M3; page and worker heaps after GC; 8 zoom cycles for memory growth (B1.4.1: 5 % growth limit is a **provisional diagnostic**, not an approved acceptance criterion; memory stays NOT TESTED in the report); `--force_high_performance_gpu` for the RTX 3080.
 
 The environment would have been the M3 machine: AMD Ryzen 7 6800HS, AMD Radeon iGPU (driver 31.0.12024.2005) and RTX 3080 Laptop (32.0.16.1742), Windows 11 Home build 26300, WebView2 158.0.4370.33, 2560 × 1440 at 240 Hz, 150 % scaling, MapLibre 6.19.0. **No numbers are given for it.** The M3 results in [webgl-prototype.md](webgl-prototype.md) are **not** a MapLibre comparison and must not be read as one.
 
@@ -204,7 +208,7 @@ PASS = evidence recorded; PARTIAL = part verified or met with a documented devia
 | 23  | No WebGL errors, crashes or context-loss loop                                | NOT TESTED     | —                                                                                                            |
 | 24  | Test environment recorded                                                    | PARTIAL        | hardware, driver and WebView2 read on the machine; no run in it                                              |
 | 25  | Production code, Rust, RPMT, IPC, telemetry, SDK, Input Plugin, M3 unchanged | PASS           | diff: only `package.json`, `package-lock.json`, `src/dev/mapLibreLab/`, this file                            |
-| 26  | Typecheck, lint, format, tests, build                                        | PASS           | `npm run check` (41 files, 441 tests after B1.2); `npm run build`                                            |
+| 26  | Typecheck, lint, format, tests, build                                        | PASS           | `npm run check` (43 files, 482 tests after B1.4); `npm run build`                                            |
 
 ### ADR-003 B1 criteria
 
@@ -300,9 +304,18 @@ No memory was measured. When the lab is measured later, the figures can only be 
 
 So a heap or process figure from this lab is an upper bound for "MapLibre's" cost and overstates what a tile-fed production map would hold. MapLibre and M3 also keep different copies (M3: dataset plus tile arrays; MapLibre: dataset plus GeoJSON plus worker data), so a total-memory comparison of the two compares whole lab configurations, not renderers.
 
+## B1.4 – Validation harness and first visible geometry
+
+Static preparation for the B1 runtime validation, following the B1.3 readiness audit. Nothing was run.
+
+- **O1 / O2, harness:** moved from a temporary folder into `tools/maplibre-validation/`. It now reads the B1.2 accuracy format and never assumes `results` exists. Evaluation lives in a pure module (`report.mjs`) with PASS / FAIL / INVALID / NOT_TESTED verdicts, and a failed step, a failed run, a broken request log or too few runs can never produce a pass. Repository-relative paths, an explicit `--confirm-runtime` gate, and a busy-desktop guard limited to the supported games and NVIDIA utilisation. Details: [maplibre-validation.md](maplibre-validation.md).
+- **O3, first visible geometry:** now the first rendered frame with at least one pixel of the road line layers, classified against the style's road colours. Only colours that no background, label, halo or probe mix can produce are used. With labels this is the motorway fill alone; without labels every road layer. Labels can no longer stop the clock, and the definition can only report a later time, never an earlier one. Code: `roadPixels.ts`; result fields `firstRoadPixels` and `roadDetectionLayers`.
+- **New tests:** `roadPixels.test.ts` (9) and `validationReport.test.ts` (33), CPU-only.
+- **B1.4.1 review corrections:** the 5 % memory growth limit is a provisional diagnostic threshold. It is reported as `diagnostic` and never decides PASS or FAIL. The memory criterion stays NOT TESTED until a threshold is approved. The MapLibre and M3 first-visible measurements were reviewed statically and found not equivalent; any comparison between them requires runtime verification. Thresholds unchanged.
+
 ### Remaining runtime validation
 
-Unchanged by B1.2. Everything in the [acceptance matrix](#acceptance-matrix) that is NOT TESTED remains NOT TESTED, including whether the new timeouts, release handling and infrastructure checks behave in a real browser as they do against the fakes.
+Unchanged by B1.2 and B1.4. Everything in the [acceptance matrix](#acceptance-matrix) that is NOT TESTED remains NOT TESTED, including whether the new timeouts, release handling and infrastructure checks behave in a real browser as they do against the fakes.
 
 ## Known limitations
 

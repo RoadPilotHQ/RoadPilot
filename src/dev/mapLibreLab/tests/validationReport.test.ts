@@ -1,0 +1,501 @@
+/** B1.4: the validation harness's pure evaluation (tools/maplibre-validation/report.mjs). */
+import { describe, expect, it } from 'vitest'
+import {
+  ACCURACY_TOLERANCE_PX,
+  aggregatePerf,
+  buildReport,
+  combine,
+  evaluateAccuracy,
+  evaluateContextLoss,
+  evaluateMemoryCycles,
+  evaluateNetwork,
+  evaluatePerfRun,
+  evaluateRelease,
+  MEMORY,
+  MIN_RUNS,
+  THRESHOLDS,
+  worstProbe,
+} from '../../../../tools/maplibre-validation/report.mjs'
+
+import gitignore from '../../../../tools/maplibre-validation/.gitignore?raw'
+
+/** The harness files (`*` does not match dotfiles; `.gitignore` is imported separately). */
+const harness: Record<string, string> = {
+  ...import.meta.glob<string>('/tools/maplibre-validation/*', {
+    query: '?raw',
+    import: 'default',
+    eager: true,
+  }),
+  '/tools/maplibre-validation/.gitignore': gitignore,
+}
+
+describe('thresholds are the B1 brief values, unchanged', () => {
+  it('100k and 1M targets, 0.5 px, three runs', () => {
+    expect(THRESHOLDS.urban).toEqual({
+      segments: 100_000,
+      firstVisibleMs: 100,
+      gapP95Ms: 20,
+      gapMaxMs: 50,
+    })
+    expect(THRESHOLDS.stress).toEqual({
+      segments: 1_000_000,
+      firstVisibleMs: 500,
+      gapP95Ms: 33,
+      gapMaxMs: 75,
+    })
+    expect(ACCURACY_TOLERANCE_PX).toBe(0.5)
+    expect(MIN_RUNS).toBe(3)
+    expect(MEMORY).toEqual({ status: 'provisional', cycles: 8, steadyFrom: 5, growthLimit: 0.05 })
+    expect(Object.isFrozen(THRESHOLDS.urban)).toBe(true)
+  })
+
+  it('combine: FAIL before INVALID before NOT_TESTED; PASS only when all pass', () => {
+    expect(combine([])).toBe('NOT_TESTED')
+    expect(combine(['PASS', 'PASS'])).toBe('PASS')
+    expect(combine(['PASS', 'NOT_TESTED'])).toBe('NOT_TESTED')
+    expect(combine(['PASS', 'INVALID', 'NOT_TESTED'])).toBe('INVALID')
+    expect(combine(['INVALID', 'FAIL'])).toBe('FAIL')
+  })
+})
+
+// ---------------------------------------------------------------- accuracy
+
+const measured = (o: Record<string, unknown> = {}) => ({
+  status: 'measured',
+  tolerancePx: 0.5,
+  cases: 35,
+  probes: 315,
+  missingDots: 0,
+  maxApiError: 0.01,
+  maxRenderedError: 0.2,
+  maxUnprojectError: 0.001,
+  withinTolerance: true,
+  constrainedCases: [],
+  ...o,
+})
+
+describe('evaluateAccuracy (B1.2 result format)', () => {
+  it('a valid result within tolerance passes', () => {
+    expect(evaluateAccuracy(measured())).toMatchObject({
+      verdict: 'PASS',
+      reason: 'within_tolerance',
+    })
+  })
+
+  it('missing probe infrastructure is an invalid run, not a rendering failure', () => {
+    const r = evaluateAccuracy({
+      status: 'infrastructure_error',
+      reason: 'probe_layer_missing',
+      detail: 'x',
+    })
+    expect(r).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'infrastructure_error:probe_layer_missing',
+    })
+  })
+
+  it('missing dots and errors above 0.5 px fail', () => {
+    expect(evaluateAccuracy(measured({ missingDots: 2, withinTolerance: false }))).toMatchObject({
+      verdict: 'FAIL',
+      reason: 'missing_dots',
+    })
+    expect(
+      evaluateAccuracy(measured({ maxRenderedError: 0.51, withinTolerance: false })),
+    ).toMatchObject({ verdict: 'FAIL', reason: 'error_above_tolerance' })
+  })
+
+  it('no result, unknown status, malformed, relaxed tolerance or inconsistent flags are invalid', () => {
+    for (const bad of [
+      undefined,
+      null,
+      [],
+      { status: 'ok' },
+      measured({ cases: 0 }),
+      measured({ missingDots: -1 }),
+      measured({ tolerancePx: 0.6 }),
+      measured({ withinTolerance: 'yes' }),
+      measured({ maxRenderedError: 2 }), // flag says within tolerance, the numbers do not
+      measured({ maxApiError: NaN }),
+    ])
+      expect(evaluateAccuracy(bad).verdict, JSON.stringify(bad)).toBe('INVALID')
+  })
+
+  it('worstProbe never assumes `results` exists', () => {
+    expect(worstProbe(undefined)).toBeNull()
+    expect(worstProbe({ status: 'infrastructure_error' })).toBeNull()
+    expect(worstProbe({ results: 'x' })).toBeNull()
+    const w = worstProbe({
+      results: [
+        {
+          zoom: 3,
+          probes: [
+            { id: 'a', renderedError: 0.1 },
+            { id: 'b', renderedError: NaN },
+          ],
+        },
+        { zoom: 9, probes: [{ id: 'c', renderedError: 0.3 }] },
+        { zoom: 11 },
+      ],
+    })
+    expect(w).toMatchObject({ id: 'c', zoom: 9 })
+  })
+})
+
+// ---------------------------------------------------------------- network
+
+const origin = 'http://127.0.0.1:1420'
+const page = (url: string, session = 'page') => ({ url, session })
+const labRequests = [
+  page(`${origin}/src/dev/mapLibreLab/index.html`),
+  page(`${origin}/src/dev/mapLibreLab/main.ts`),
+  page(`${origin}/node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs`, 'w1'),
+  page('ws://127.0.0.1:1420/?token=x'),
+  page('data:image/svg+xml,abc'),
+]
+const net = (o: Record<string, unknown> = {}) => ({
+  requests: labRequests,
+  pageOrigin: origin,
+  cspViolations: [],
+  maplibreRequests: [],
+  ...o,
+})
+
+describe('evaluateNetwork', () => {
+  it('only dev-server, data and IPC requests: offline', () => {
+    const r = evaluateNetwork(net({ requests: [...labRequests, page('http://ipc.localhost/x')] }))
+    expect(r).toMatchObject({ verdict: 'PASS', metrics: { workerRequests: 1, external: [] } })
+  })
+
+  it('any external request fails, from the page, a worker or MapLibre', () => {
+    expect(
+      evaluateNetwork(
+        net({ requests: [...labRequests, page('https://tiles.example/0.pbf', 'w2')] }),
+      ),
+    ).toMatchObject({ verdict: 'FAIL', reason: 'external_requests' })
+    expect(
+      evaluateNetwork(net({ maplibreRequests: [{ url: 'https://fonts.example/a.pbf' }] })),
+    ).toMatchObject({
+      verdict: 'FAIL',
+    })
+    expect(
+      evaluateNetwork(net({ requests: [...labRequests, page('http://127.0.0.1:9999/x')] })),
+    ).toMatchObject({
+      verdict: 'FAIL',
+    })
+  })
+
+  it('a CSP violation fails', () => {
+    expect(evaluateNetwork(net({ cspViolations: [{ blocked: 'blob' }] }))).toMatchObject({
+      verdict: 'FAIL',
+      reason: 'csp_violations',
+    })
+  })
+
+  it('an empty or broken log can never pass', () => {
+    expect(evaluateNetwork(undefined).verdict).toBe('INVALID')
+    expect(evaluateNetwork(net({ requests: [] }))).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'instrumentation_saw_no_lab_request',
+    })
+    expect(evaluateNetwork(net({ cspViolations: null }))).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'no_csp_log',
+    })
+  })
+})
+
+// ---------------------------------------------------------------- context loss, release
+
+describe('evaluateContextLoss and evaluateRelease', () => {
+  it('context loss', () => {
+    const ok = { lostMs: 3, restoreMs: 20, pixelsBefore: 5000, pixelsAfter: 4990, errors: [] }
+    expect(evaluateContextLoss(ok).verdict).toBe('PASS')
+    expect(evaluateContextLoss({ ...ok, pixelsAfter: 0 })).toMatchObject({
+      verdict: 'FAIL',
+      reason: 'blank_after_restore',
+    })
+    expect(evaluateContextLoss({ ...ok, errors: ['x'] }).verdict).toBe('FAIL')
+    expect(evaluateContextLoss({ ...ok, pixelsBefore: 0 }).verdict).toBe('INVALID')
+    expect(evaluateContextLoss(undefined).verdict).toBe('INVALID')
+  })
+
+  it('release and remount', () => {
+    const ok = {
+      release: { canvases: 0 },
+      afterRelease: { listeners: 0, pendingWaits: 0 },
+      remount: { canvases: 1 },
+    }
+    expect(evaluateRelease(ok).verdict).toBe('PASS')
+    expect(
+      evaluateRelease({ ...ok, afterRelease: { listeners: 2, pendingWaits: 0 } }).verdict,
+    ).toBe('FAIL')
+    expect(evaluateRelease({ ...ok, release: { canvases: 1 } }).verdict).toBe('FAIL')
+    expect(evaluateRelease({ ...ok, remount: { canvases: 2 } }).verdict).toBe('FAIL')
+    expect(evaluateRelease({ ...ok, afterRelease: {} }).verdict).toBe('INVALID')
+    expect(evaluateRelease(undefined).verdict).toBe('INVALID')
+  })
+})
+
+// ---------------------------------------------------------------- performance
+
+const phase = (p95: number, max: number, o: Record<string, unknown> = {}) => ({
+  frames: 300,
+  p95,
+  max,
+  fps: 120,
+  glError: 0,
+  settleMs: 40,
+  ...o,
+})
+const perfRun = (o: Record<string, unknown> = {}) => ({
+  kind: 'maplibre',
+  scenario: 'urban',
+  datasetSegments: 100_000,
+  cold: { firstMs: 80, firstRoadPixels: 1200, completeMs: 150 },
+  warm: { firstMs: 60 },
+  pan: phase(12, 30),
+  zoom: [phase(15, 40), phase(16, 41), phase(14, 39)],
+  ...o,
+})
+
+describe('evaluatePerfRun', () => {
+  it('a run inside every 100k target passes; the boundary values pass (≤)', () => {
+    expect(evaluatePerfRun(perfRun(), 'urban').verdict).toBe('PASS')
+    const edge = perfRun({ cold: { firstMs: 100, firstRoadPixels: 1 }, pan: phase(20, 50) })
+    expect(evaluatePerfRun(edge, 'urban').verdict).toBe('PASS')
+  })
+
+  it('each threshold fails on its own', () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ cold: { firstMs: 100.1, firstRoadPixels: 9 } }, 'firstVisible'],
+      [{ zoom: [phase(15, 40), phase(20.1, 41), phase(14, 39)] }, 'gapP95'],
+      [{ pan: phase(12, 50.1) }, 'gapMax'],
+    ]
+    for (const [o, key] of cases) {
+      const r = evaluatePerfRun(perfRun(o), 'urban')
+      expect(r.verdict).toBe('FAIL')
+      expect(r.checks?.[key]).toBe('FAIL')
+    }
+  })
+
+  it('1M uses the 1M targets', () => {
+    const run = perfRun({
+      datasetSegments: 1_000_000,
+      cold: { firstMs: 450, firstRoadPixels: 5 },
+      pan: phase(30, 70),
+    })
+    expect(evaluatePerfRun(run, 'stress').verdict).toBe('PASS')
+    expect(evaluatePerfRun(run, 'urban').verdict).toBe('INVALID') // wrong dataset for 100k
+  })
+
+  it('incomplete or failed runs are invalid, never a pass', () => {
+    const bad: Record<string, unknown>[] = [
+      { error: 'LoadTimeoutError: MapLibre style load did not finish' },
+      { datasetSegments: 99_999 },
+      { cold: null },
+      { cold: { firstMs: 50, firstRoadPixels: 0 } }, // nothing classified as road
+      { zoom: [phase(1, 2), phase(1, 2)] },
+      { pan: phase(1, 2, { frames: 1 }) },
+      { pan: phase(NaN, 2) },
+    ]
+    for (const o of bad)
+      expect(evaluatePerfRun(perfRun(o), 'urban').verdict, JSON.stringify(o)).toBe('INVALID')
+    expect(evaluatePerfRun(perfRun(), 'other').verdict).toBe('INVALID')
+  })
+
+  it('M3 must have drawn segments; a WebGL error fails', () => {
+    const m3 = perfRun({ kind: 'm3', cold: { firstMs: 20, firstSegments: 293_468 } })
+    expect(evaluatePerfRun(m3, 'urban').verdict).toBe('PASS')
+    expect(
+      evaluatePerfRun({ ...m3, cold: { firstMs: 20, firstSegments: 0 } }, 'urban').verdict,
+    ).toBe('INVALID')
+    expect(
+      evaluatePerfRun(perfRun({ pan: phase(1, 2, { glError: 1282 }) }), 'urban'),
+    ).toMatchObject({
+      verdict: 'FAIL',
+      reason: 'webgl_error',
+    })
+  })
+})
+
+describe('aggregatePerf', () => {
+  it('three passing runs pass; medians are diagnostic', () => {
+    const r = aggregatePerf(
+      [perfRun(), perfRun(), perfRun({ cold: { firstMs: 90, firstRoadPixels: 3 } })],
+      'urban',
+    )
+    expect(r).toMatchObject({ verdict: 'PASS', runs: 3, invalidRuns: 0 })
+    expect((r.medians as Record<string, number>).firstVisibleMs).toBe(80)
+  })
+
+  it('every run must pass: one failing run fails the criterion', () => {
+    const r = aggregatePerf([perfRun(), perfRun(), perfRun({ pan: phase(12, 80) })], 'urban')
+    expect(r).toMatchObject({ verdict: 'FAIL', checks: { gapMax: 'FAIL', firstVisible: 'PASS' } })
+  })
+
+  it('too few runs, or any invalid run, is invalid; no runs is not tested', () => {
+    expect(aggregatePerf([perfRun(), perfRun()], 'urban')).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'too_few_runs',
+    })
+    expect(
+      aggregatePerf([perfRun(), perfRun(), perfRun(), perfRun({ error: 'x' })], 'urban'),
+    ).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'invalid_runs',
+    })
+    expect(aggregatePerf([], 'urban').verdict).toBe('NOT_TESTED')
+  })
+})
+
+// ---------------------------------------------------------------- memory
+
+const cycle = (total: number) => ({
+  mem: { total, gpuProc: 300, renderer: 200, gpuDedicated: 100 },
+  heap: { main: 20, workersTotal: 30 },
+})
+
+describe('evaluateMemoryCycles (provisional diagnostic threshold)', () => {
+  it('steady over cycles 5–8 is within the provisional limit but never a PASS', () => {
+    const cycles = [500, 520, 540, 560, 570, 572, 575, 580].map(cycle)
+    expect(evaluateMemoryCycles({ cycles })).toMatchObject({
+      verdict: 'NOT_TESTED',
+      reason: 'provisional_threshold_not_approved',
+      diagnostic: { threshold: 'provisional', verdict: 'within_provisional_limit', over: [] },
+    })
+  })
+
+  it('more than 5 % growth from cycle 5 to 8 is flagged as a diagnostic, not a FAIL', () => {
+    const cycles = [500, 500, 500, 500, 500, 510, 520, 530].map(cycle)
+    const e = evaluateMemoryCycles({ cycles })
+    expect(e).toMatchObject({
+      verdict: 'NOT_TESTED',
+      diagnostic: { verdict: 'above_provisional_limit', over: ['total'] },
+    })
+    expect((e.diagnostic as { growth: { total: number } }).growth.total).toBeCloseTo(0.06)
+  })
+
+  it('a steady memory series cannot turn a report into PASS', () => {
+    const cycles = [500, 500, 500, 500, 500, 500, 500, 500].map(cycle)
+    const r = buildReport({ cycles: [{ kind: 'maplibre', scenario: 'stress', cycles }] })
+    expect(r.criteria['memory:maplibre:stress']!.verdict).toBe('NOT_TESTED')
+    expect(r.memoryRule.status).toBe('provisional')
+    expect(r.overall).not.toBe('PASS')
+  })
+
+  it('too few cycles or a missing series is invalid; none is not tested', () => {
+    expect(evaluateMemoryCycles({ cycles: [1, 2, 3, 4, 5, 6, 7].map(cycle) }).verdict).toBe(
+      'INVALID',
+    )
+    const broken = [500, 500, 500, 500, 500, 500, 500, 500].map(cycle)
+    broken[7] = {
+      mem: { total: 500, gpuProc: 300, renderer: 200, gpuDedicated: 100 },
+      heap: {} as never,
+    }
+    expect(evaluateMemoryCycles({ cycles: broken }).verdict).toBe('INVALID')
+    expect(evaluateMemoryCycles({ cycles: [], error: 'x' }).verdict).toBe('INVALID')
+    expect(evaluateMemoryCycles(undefined).verdict).toBe('NOT_TESTED')
+  })
+})
+
+// ---------------------------------------------------------------- whole report
+
+describe('buildReport', () => {
+  it('nothing collected: every criterion NOT_TESTED, overall NOT_TESTED', () => {
+    const r = buildReport({})
+    expect(r.overall).toBe('NOT_TESTED')
+    expect(Object.values(r.criteria).every((c) => c.verdict === 'NOT_TESTED')).toBe(true)
+  })
+
+  it('a functional run with failed steps or a missing CSP log cannot pass', () => {
+    const r = buildReport({
+      functional: { steps: {}, failedSteps: [{ name: 'accuracyScs', error: 'x' }], network: net() },
+    })
+    expect(r.criteria.functionalSteps!.verdict).toBe('INVALID')
+    expect(r.criteria.accuracyScs!.verdict).toBe('INVALID')
+    expect(r.overall).not.toBe('PASS')
+  })
+
+  it('labels always need a visual review, so the overall verdict is never an automatic PASS', () => {
+    const good = {
+      steps: {
+        accuracyScs: measured(),
+        accuracyIdentity: measured(),
+        accuracyScsDpr15: measured(),
+        contextLoss: { pixelsBefore: 10, pixelsAfter: 10, errors: [] },
+        releaseRemount: {
+          release: { canvases: 0 },
+          afterRelease: { listeners: 0, pendingWaits: 0 },
+          remount: { canvases: 1 },
+        },
+      },
+      failedSteps: [],
+      network: net(),
+    }
+    const r = buildReport({ functional: good })
+    expect(r.criteria.accuracyScs!.verdict).toBe('PASS')
+    expect(r.criteria.network!.verdict).toBe('PASS')
+    expect(r.criteria.labels!.verdict).toBe('NOT_TESTED')
+    expect(r.overall).toBe('NOT_TESTED')
+  })
+
+  it('groups perf runs by renderer and scenario and checks every run offline', () => {
+    const runs = [perfRun(), perfRun(), perfRun()].map((r) => ({ ...r, network: net() }))
+    const m3 = [1, 2, 3].map(() => ({
+      ...perfRun({ kind: 'm3', cold: { firstMs: 20, firstSegments: 10 } }),
+      network: net({ requests: [] }),
+    }))
+    const r = buildReport({ perf: [...runs, ...m3] })
+    expect(r.criteria['perf:maplibre:urban']!.verdict).toBe('PASS')
+    expect(r.criteria['perf:m3:urban']!.verdict).toBe('PASS')
+    expect(r.criteria['perf:maplibre:stress']!.verdict).toBe('NOT_TESTED')
+    expect(r.criteria['network:perfRuns']!.verdict).toBe('INVALID') // m3 runs logged nothing
+  })
+})
+
+// ---------------------------------------------------------------- harness sources
+
+describe('harness sources', () => {
+  const files = Object.keys(harness)
+
+  it('the harness is stored in the repository with all its parts', () => {
+    for (const f of [
+      'run.mjs',
+      'report.mjs',
+      'report.d.mts',
+      'cdp.mjs',
+      'sampler.ps1',
+      'README.md',
+      '.gitignore',
+    ])
+      expect(files).toContain(`/tools/maplibre-validation/${f}`)
+  })
+
+  it('contains no machine-specific absolute path and no external host', () => {
+    for (const f of files) {
+      const text = harness[f]!
+      expect(text, f).not.toMatch(/\b[A-Za-z]:[\\/]/)
+      expect(text, f).not.toMatch(/[\\/]Users[\\/]/i)
+      const hosts = [...text.matchAll(/(?:https?|wss?):\/\/([^/'"`\s:]+)/g)].map((m) => m[1])
+      for (const h of hosts)
+        expect(['127.0.0.1', 'ipc.localhost', 'tiles.example'], `${f}: ${h}`).toContain(h)
+    }
+  })
+
+  it('never starts the app without explicit confirmation', () => {
+    expect(harness['/tools/maplibre-validation/cdp.mjs']).toMatch(
+      /if \(confirmed !== true\)\s*\n?\s*throw/,
+    )
+    const run = harness['/tools/maplibre-validation/run.mjs']!
+    expect(run).toMatch(/if \(CONFIRMED\) await RUNTIME\[mode\]\(\)/)
+    expect(run).toMatch(/confirmed: CONFIRMED/)
+    expect(run).toContain('args.includes(`--${name}`)')
+  })
+
+  it('opens the lab page that exists in the repository', () => {
+    expect(harness['/tools/maplibre-validation/run.mjs']).toContain(
+      '/src/dev/mapLibreLab/index.html',
+    )
+    expect(harness['/tools/maplibre-validation/.gitignore']).toMatch(/^out\/$/m)
+  })
+})
