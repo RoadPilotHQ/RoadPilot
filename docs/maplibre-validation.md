@@ -3,28 +3,36 @@
 How the runtime criteria of the MapLibre prototype ([maplibre-prototype.md](maplibre-prototype.md)) will be measured.
 
 > **Status: B1.5 run stopped (NO-GO); B1.5.1 corrections made statically, not runtime-tested.** B1.5 (2026-11-22, AMD only) ran the harness and found two defects: MapLibre workers without the projection handler (lab) and lab pages that did not open after app start (harness). Both are corrected in B1.5.1 (see [B1.5.1 corrections](#b151-corrections)), verified by unit tests against fakes only. The B1.5 results stay in `out/` unchanged. Every runtime criterion needs a new run, which needs a separate approval.
+>
+> **B1.5.4B (harness reliability):** the three harness defects of B1.5.4 / B1.5.4A (screenshot name collision, Vite cold start, Vite shutdown) are corrected and covered by automated tests, see [B1.5.4B harness reliability correction](#b154b-harness-reliability-correction). The corrected harness has **not** run against RoadPilot's WebView2 yet; a later runtime phase must validate it.
 
 ## Location
 
 `tools/maplibre-validation/` in this repository:
 
-| File            | Role                                                                                                                        |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `run.mjs`       | Driver. Collects data only; every verdict comes from `report.mjs`                                                           |
-| `report.mjs`    | Pure evaluation: thresholds and verdict rules (no I/O). Unit-tested in `src/dev/mapLibreLab/tests/validationReport.test.ts` |
-| `report.d.mts`  | Types of `report.mjs` for the tests                                                                                         |
-| `openlab.mjs`   | B1.5.1: staged, bounded lab opening with failure diagnostics and safe retry. Unit-tested in `tests/openLab.test.ts`         |
-| `openlab.d.mts` | Types of `openlab.mjs` for the tests                                                                                        |
-| `cdp.mjs`       | Starts and closes RoadPilot's debug build, DevTools connection, request / console / worker instrumentation, heaps           |
-| `sampler.ps1`   | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
-| `out/`          | Results (ignored by Git). B1.5 evidence in the root; every later run in its own session folder `out/<session>/`             |
+| File                 | Role                                                                                                                        |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `run.mjs`            | Driver. Collects data only; every verdict comes from `report.mjs`                                                           |
+| `report.mjs`         | Pure evaluation: thresholds and verdict rules (no I/O). Unit-tested in `src/dev/mapLibreLab/tests/validationReport.test.ts` |
+| `report.d.mts`       | Types of `report.mjs` for the tests                                                                                         |
+| `openlab.mjs`        | B1.5.1: staged, bounded lab opening with failure diagnostics and safe retry. Unit-tested in `tests/openLab.test.ts`         |
+| `openlab.d.mts`      | Types of `openlab.mjs` for the tests                                                                                        |
+| `cdp.mjs`            | Starts and closes RoadPilot's debug build, DevTools connection, request / console / worker instrumentation, heaps           |
+| `lifecycle.mjs`      | B1.5.4B: one session, preflight to cleanup (`tests/sessionLifecycle.test.ts`)                                               |
+| `devserver.mjs`      | B1.5.4B: the session's own Vite dev server: readiness stages, ownership, graceful stop (`tests/devServer.test.ts`)          |
+| `devserver-node.mjs` | B1.5.4B: its real process, HTTP, port-owner and process-tree access, by PID only (`tests/devServerProcess.test.ts`)         |
+| `viteserver.mjs`     | B1.5.4B: the forked dev server (Vite JS API, `vite.config.ts`), IPC `listening` / `shutdown` / `closed`                     |
+| `evidence.mjs`       | B1.5.4B: screenshot recorder, unique deterministic names, never overwrites (`tests/screenshotEvidence.test.ts`)             |
+| `*.d.mts`            | Types of the modules above for the tests                                                                                    |
+| `sampler.ps1`        | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
+| `out/`               | Results (ignored by Git). B1.5 evidence in the root; every later run in its own session folder `out/<session>/`             |
 
 All paths derive from the repository. The app identifier and the dev-server URL are read from `src-tauri/tauri.conf.json`.
 
 ## Required environment
 
 - Windows with WebView2 (PowerShell, `taskkill`, the `GPU Process Memory` performance counters). Linux / WebKitGTK is not supported by this harness.
-- `npm run dev` running (Vite on the `devUrl` of `tauri.conf.json`, `127.0.0.1:1420`).
+- The `devUrl` port of `tauri.conf.json` (`127.0.0.1:1420`) **free**. Since B1.5.4B the harness starts, checks and stops its own Vite dev server; do not run `npm run dev` beside it (a session refuses to start when the port is owned or answers).
 - A current debug build: `src-tauri/target/debug/roadpilot.exe`.
 - An idle desktop. Before every start the harness refuses to run when NVIDIA utilisation exceeds 25 % (if `nvidia-smi` exists) or when `amtrucks` / `eurotrucks2` (or processes named with `--busy=`) are running. It never stops any process. The harness does not start a game, telemetry or input of any kind; RoadPilot's settings are not touched.
 - Node ≥ 22.12 (built-in `fetch` and `WebSocket`).
@@ -39,7 +47,7 @@ node tools/maplibre-validation/run.mjs functional --confirm-runtime --session=b1
 node tools/maplibre-validation/run.mjs report --session=b16                                  # offline: report-amd.json, report-nv.json
 ```
 
-Without `--confirm-runtime`, `functional`, `perf` and `cycles` print a notice and exit with code 2 without starting anything; `launchApp` itself also refuses without confirmation. `report` reads saved files only and needs `--session` or `--out`. Options: `--session=<name>` (folder `out/<name>/`; default for runtime modes: a new `run-<timestamp>` folder), `--out=<dir>`, `--only=urban|stress`, `--kinds=a,b` (`maplibre`, `maplibre-nolabels`, `m3`), `--runs=n` (fewer than 3 makes the report INVALID), `--kind=` for `cycles`, `--tag=amd|nv` for `report`, `--attempts=n` (app starts per lab opening, default 2).
+Without `--confirm-runtime`, `functional`, `perf` and `cycles` print a notice and exit with code 2 without starting anything; `launchApp` itself also refuses without confirmation. `report` reads saved files only and needs `--session` or `--out`. Options: `--session=<name>` (folder `out/<name>/`; default for runtime modes: a new `run-<timestamp>` folder), `--out=<dir>`, `--only=urban|stress`, `--kinds=a,b` (`maplibre`, `maplibre-nolabels`, `m3`), `--runs=n` (fewer than 3 makes the report INVALID), `--kind=` for `cycles`, `--tag=amd|nv` for `report`, `--attempts=n` (app starts per lab opening; B1.5.4B: default 1, and a retry makes the `startup` criterion `INVALID`).
 
 **No overwriting (B1.5.1).** A runtime mode refuses to start, before launching anything, when a result file it would write already exists in its folder. Results, screenshots and diagnostics are written with `wx` (an existing file is an error, never replaced). A rebuilt report that would replace a report gets a timestamped name instead.
 
@@ -67,6 +75,9 @@ Rules that prevent a silent pass:
 - A MapLibre run whose first-visible frame had no road pixel, or an M3 run that drew no segment, is `INVALID`.
 - B1.5.1, worker projection: a MapLibre perf run is `INVALID` unless its cold load verified the handler in every worker (`cold.workerProjection.verified`), no workers were recreated during the load or the run, and MapLibre logged no "no projection handler is set in the workers" warning. The B1.5 result format has no such field, so B1.5 MapLibre runs can no longer pass. The functional criterion `workerProjection` is `FAIL` on that warning or a failed registration and `INVALID` when the state is missing, unfinished or saw a recreation.
 - B1.5.1, lab opening: a functional run whose lab never opened is saved with `failedSteps: [{name: 'openLab', stage, attempts}]` and is `INVALID`; a perf or cycles run keeps `error` and `openLab`.
+- B1.5.4B, `startup`: every run must open the lab at its first attempt. A failed attempt followed by a successful one is `INVALID` (`failed_attempt_before_success`), never hidden; a lab that never opened is `INVALID`.
+- B1.5.4B, `screenshots`: a missing screenshot (capture, name or write failed) is `INVALID` (`screenshots_missing`) in this criterion only. It does not fail the functional step it was taken in and does not touch any measured criterion. Duplicate names are `INVALID`.
+- B1.5.4B, `sessionLifecycle`: `FAIL` when cleanup failed (RoadPilot still running, or the dev server did not stop gracefully); `INVALID` when a session stage failed or did not run (preflight, dev server readiness, the measurement); `PASS` only when every stage passed.
 
 ## Criteria and thresholds
 
@@ -169,6 +180,12 @@ Files in `out/`, with `<tag>` = `amd` or `nv`:
 - `openlab-failure-<label>-<tag>-a<n>.json` / `.png` (B1.5.1): diagnostics of every failed lab opening (see [Defect B](#defect-b-lab-page-not-opening-after-app-start)).
 - B1.5.1 additions: MapLibre load results carry `workerProjection`; `state()` carries `workerProjection` (state, generation, attempts, recreations, events); perf and cycles results carry `warnings`; functional results carry `env.openLab` (attempt, failed attempts, stage timings).
 - `report-<tag>.json` (`report` mode): thresholds, tolerance, `minRuns`, the memory rule (`memoryRule.status = 'provisional'`), every criterion with `verdict`, `reason`, `metrics` / `checks` / per-run details (memory criteria: `diagnostic`), and `overall`.
+- B1.5.4B additions (session folders):
+  - screenshots `functional-<seq>-<scenario>-<view>-<tag>.png` (replacing `A-…`, `B-…`, `D-…`), and `screenshots` in `functional-<tag>.json`: one record per capture (`seq`, `name`, `scenario`, `view`, `status`, failing `stage`, `error`);
+  - `session-lifecycle-<mode>-<tag>.json`: the session's stages with verdicts and timings, the dev server (PID, readiness stage timings, child processes, module passes) and the cleanup result;
+  - `vite-dev-<mode>-<tag>.log`: the dev server's own output;
+  - `devserver-failure-<mode>-<tag>.json` on a failed dev server start;
+  - `perf-*` and `cycles-*` carry `openLabAttempt` (attempt, failed attempts).
 
 ## B1.5.1 corrections
 
@@ -217,7 +234,7 @@ Static corrections of the two defects found in B1.5. Nothing was run; the tests 
 
 - Stages poll a condition every 100 ms against their deadline; each DevTools command is bounded to 5 s. No fixed sleep decides anything.
 - A failure keeps its original stage and error. Diagnostics are captured afterwards, each part bounded and optional: stage timings, navigation and target events with timestamps, console, page exceptions, the initial target, final URL (page, frame tree, target list), navigation history, page state, screenshot, dev-server status, app port/pid/exit code, RoadPilot's process list. They are saved as `openlab-failure-<label>-a<n>.json` (+ `.png`) with unique names. A capture problem is recorded in `captureErrors` and never replaces the failure.
-- Retry: up to `--attempts` (default 2), only after the app was closed **and** no RoadPilot or RoadPilot WebView2 process is left; otherwise no retry. Refusals (no confirmation, busy desktop, app already running) are never retried and save nothing.
+- Retry: up to `--attempts` (default 2; **B1.5.4B: default 1**, and the report marks any retry `INVALID`), only after the app was closed **and** no RoadPilot or RoadPilot WebView2 process is left; otherwise no retry. Refusals (no confirmation, busy desktop, app already running) are never retried and save nothing.
 - A DevTools connection that closes rejects every pending and later command (`TargetClosedError`) instead of leaving it waiting.
 
 **Not verified:** the real start-up timing of RoadPilot's WebView2 and whether the `appNavigation` stage removes the B1.5 failures. This needs the next runtime run; its diagnostics would now show the failure stage if it happens again.
@@ -325,6 +342,79 @@ Every worker started from the entry therefore has the handler in every generatio
 - The Vite dev server's injection of `/@vite/client` into the worker could change with a Vite update (it would need a top-level `await` to matter; the probe would then report it and verification would fail loudly).
 
 **B1 runtime validation is not PASS.** B1.5.4 must repeat B1.5.2 Test B (and continue with C–F) in RoadPilot's WebView2.
+
+## B1.5.4B harness reliability correction
+
+Test infrastructure only. The worker entry, projection registration, coordinates, the `/2048` carrier, rendering and every acceptance threshold are unchanged. Evidence of the phases that found the defects stays untouched: B1.5.4 in `out/b154-20261123-154840/`, B1.5.4A in `out/b154a-20261123-170102/` (B1.5.4A: 10 of 10 forced worker replacements PASS in WebView2).
+
+### Root causes
+
+| Defect                  | Evidence                                                                                                                            | Root cause                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A: screenshot collision | B1.5.4 functional run: `EEXIST` on `A-basic-whole-amd.png`, label step recorded as failed, `functionalSteps` INVALID                | `run.mjs` named screenshots by scenario and view only. The opening shot and the first label view were both `A-basic-whole-<tag>`; the second write met the (correct) `wx` rule and threw inside the label step                                                                                                                                                                                                                          |
+| B: Vite cold start      | B1.5.4A attempt 1: `Page.navigate` no answer in 5 s; the dev server, started seconds earlier, did not answer the lab URL within 3 s | The dev server was started by hand and only its first answer was awaited. **MEASUREMENT (2026-11-23, Vite 8.3.5, two fresh starts through the new harness, no app):** the first complete request pass over the app and lab modules took 31–32 s, one request (`scsWorkerEntry.mjs`) did not answer within 10 s, while the optimiser logged `scanning dependencies...`; the next passes took 0.2 s. RoadPilot started inside that window |
+| C: Vite shutdown        | B1.5.4A: stopping the background task left the Vite process running; it needed `Stop-Process`                                       | `npm run dev` on Windows is a tree (shell → `npm-cli` node → `cmd.exe` → vite node). **MEASUREMENT:** stopping the root left all three running. Windows has no signal that asks such a console tree to exit gracefully                                                                                                                                                                                                                  |
+
+### Screenshot naming (A)
+
+`evidence.mjs`: `<test>-<seq>-<scenario>-<view>-<adapter>.png`, for example `functional-002-basic-labels-whole-amd.png`. `seq` is the three-digit capture number of the run, so names are unique within a run and identical across runs in the same order. Parts must be plain tokens (`a-z`, `0-9`, `-`). The `wx` rule stays: a name that exists in the session folder is not written, and a duplicate name within a run is refused. `capture` never throws. Each capture is recorded (`saved` or `failed` with its stage `name`, `capture` or `write`, and the error), and a capture that does not answer within 10 s is failed. `report.mjs` judges the records in their own criterion `screenshots`, separate from `functionalSteps` and from every measurement.
+
+### Dev server readiness (B)
+
+A runtime mode starts **its own** dev server (`viteserver.mjs`, forked with an IPC channel; Vite's JS API `createServer` / `listen` with the repository's `vite.config.ts` and the `devUrl` host and port, `strictPort`). RoadPilot starts only after every stage passed:
+
+| Stage       | Condition                                                                                                                                                                                                                               | Deadline                |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `preflight` | no socket listens on the port and nothing answers at the origin                                                                                                                                                                         | —                       |
+| `spawn`     | the server process exists; its PID is recorded                                                                                                                                                                                          | —                       |
+| `listening` | the server's own IPC `listening` message, from that PID, for exactly the origin (a console line such as Vite's "ready" is not used)                                                                                                     | 30 s                    |
+| `ownership` | the port's listening socket belongs to that PID and to no other                                                                                                                                                                         | 10 s                    |
+| `http`      | `/` answers 200 with an HTML page that has a module script                                                                                                                                                                              | 15 s                    |
+| `labRoute`  | the lab URL answers 200 **and** contains the lab marker (Vite's SPA fallback answers wrong routes with the app page and 200)                                                                                                            | 15 s                    |
+| `modules`   | every module of both pages (static and literal dynamic imports, same origin, transitively; package files fetched, not parsed) and the worker entry answer 200 with JavaScript, in two consecutive complete passes with the same URL set | 120 s, at most 3 passes |
+
+Each HTTP request is bounded (10 s, no keep-alive). A server exit at any point fails the current stage at once. A failed start saves `devserver-failure-<label>.json` (stage, error, stage timings, events, PID, exit, IPC messages, output tail, port owners, child processes), stops the server it started (below) and stops the session. Nothing is retried.
+
+### Process ownership and shutdown (C)
+
+- The harness owns exactly one process: the forked server (no npm or `cmd.exe` wrapper). Its PID is recorded at the spawn and checked against the `listening` message and the port owner. Its child processes are recorded at readiness. Measured: one `conhost.exe`, the console host Windows gives every forked Node process; Vite 8 itself starts no child process.
+- Lookups use PIDs only: the server's PID, the owner of the listening socket, the descendants of the server's PID. There is no lookup by process name, and the harness code has no kill function.
+- Shutdown: the IPC message `shutdown` makes the server call `server.close()` (Vite's documented close: HTTP and WebSocket servers, watcher, optimiser) and send `closed`. It then disconnects and exits on its own with code 0. If the harness disappears, the server closes itself the same way.
+- After the exit (bounded at 20 s; measured 0.1–0.9 s): the endpoint must refuse connections, the port must have no socket of that PID, and every recorded child process must have exited (bounded at 5 s).
+- On a timeout or any failed check, cleanup is `FAIL` with the process identities, and **nothing is force-terminated**. The session reports it and stops; the leftover process must be checked by hand.
+
+### Session lifecycle
+
+`lifecycle.mjs`: `preflight` (result files, idle desktop, RoadPilot not running) → `devServer` (readiness above) → `body` (RoadPilot start and the openlab stages `startup`, `target`, `appNavigation`, `navigation`, `labReady`, `initialConfig`, then the tests and the RoadPilot close) → `appClosed` (no RoadPilot or RoadPilot WebView2 process left; not killed if there is one) → `stopDevServer`.
+
+- A failed stage marks every dependent stage `NOT_TESTED`.
+- The dev server is stopped after every outcome.
+- Nothing is retried, and the lab opening defaults to one attempt.
+- Each session writes `session-lifecycle-<mode>-<tag>.json` once, into a session folder it never overwrites.
+
+### Regression tests (automated, `src/dev/mapLibreLab/tests/`)
+
+| File                         | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `screenshotEvidence.test.ts` | Reproduces the B1.5.4 collision with the old names; the functional sequence gets 15 unique deterministic names; the same view twice does not collide; no overwrite (existing name, `wx` refusal); old evidence names are never produced; failed, empty and hanging captures are recorded, not thrown; report criterion separate from `functionalSteps`; `run.mjs` names no screenshot itself                                                                                                                                                          |
+| `devServer.test.ts`          | Fakes: normal start (stage order, app, lab and worker-entry modules); cold start (504 and a new `?v=`); delayed readiness; listening without HTTP; startup timeout; process exit during readiness; server error; wrong process or port (owned port, answering origin, other origin, other PID, shared socket); invalid lab route (SPA fallback, 404); modules that never settle. Shutdown: normal, children, a child left behind, delayed, already exited, timeout without kill, not graceful, endpoint still up, unrelated processes never looked up |
+| `devServerProcess.test.ts`   | Real processes (Windows): full readiness against a fixture server; a second start on an owned port refused with the owner's PID; graceful stop with a child process; delayed stop; already exited; shutdown timeout leaves the process running; an unrelated Node process survives                                                                                                                                                                                                                                                                    |
+| `sessionLifecycle.test.ts`   | Stage order, the app only after readiness, refused preflight, failed dev server (diagnostics and cleanup kept), failed body still stops the server, RoadPilot left running and a failed stop are FAIL, no retry, save errors reported; `startup` and `sessionLifecycle` verdicts; one attempt by default                                                                                                                                                                                                                                              |
+| `openLab.test.ts`            | Retries only with an explicit `attempts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+The real Vite path (`viteserver.mjs` with the repository's config, through `devserver.mjs`) was run twice without RoadPilot: both times ready after about 40 s (the cold pass above), then stopped gracefully, with the port free and no process left.
+
+### Lint scope
+
+`npm run lint` no longer scans `tools/maplibre-validation/out/`, the git-ignored evidence that includes one-off scripts of earlier sessions (the same exclusion as `.prettierignore`). Tracked harness files are linted with Node globals.
+
+### Remaining runtime risks
+
+- The corrected harness has not run against RoadPilot's WebView2. The next runtime phase must show that a session passes readiness, the lab opening, the tests and the cleanup in one go.
+- The `modules` stage proves that the server has settled for the modules it can see statically. A module that the lab loads only through a computed URL would not be warmed.
+- A cold start now takes about 40 s before RoadPilot starts. The 120 s `modules` deadline leaves margin on this machine only.
+- `Get-NetTCPConnection` and `Get-CimInstance` (PowerShell) are needed for ownership checks, and each call takes about 1–2 s.
+- A cleanup `FAIL` leaves a process for a person to check. That is intended, and the next session refuses to start while the port is taken.
 
 ## Open runtime questions
 

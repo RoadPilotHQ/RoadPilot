@@ -39,7 +39,18 @@ const boundaryConfigs = layers
   }))
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'src-tauri/target', 'src-tauri/gen'] },
+  {
+    ignores: [
+      'dist',
+      'node_modules',
+      'src-tauri/target',
+      'src-tauri/gen',
+      // Runtime evidence of the MapLibre validation harness: git-ignored raw records, including
+      // the one-off scripts a session ran (kept as they were run, never reformatted or linted;
+      // the same exclusion as .prettierignore).
+      'tools/maplibre-validation/out',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

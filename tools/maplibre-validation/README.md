@@ -1,16 +1,22 @@
 # MapLibre B1 runtime validation harness
 
-Development tooling for Phase 2.4D B1. **B1.5 and B1.5.2 were run and stopped (NO-GO). The B1.5.3 worker entry is unit-tested and checked in headless Edge (`workerorder.mjs`), not yet in RoadPilot's WebView2 (B1.5.4).** See [docs/maplibre-validation.md](../../docs/maplibre-validation.md) for the environment, invocation, result format and acceptance thresholds.
+Development tooling for Phase 2.4D B1. **B1.5 and B1.5.2 were run and stopped (NO-GO). B1.5.4 ran in RoadPilot's WebView2 (CONDITIONAL GO), and B1.5.4A passed 10 of 10 forced worker replacements. B1.5.4B corrected three harness defects; the corrected harness has not run against WebView2 yet.** See [docs/maplibre-validation.md](../../docs/maplibre-validation.md) for the environment, invocation, result format and acceptance thresholds.
 
-| File            | Role                                                                                   |
-| --------------- | -------------------------------------------------------------------------------------- |
-| `run.mjs`       | Driver: `functional`, `perf`, `cycles` (start RoadPilot, need `--confirm-runtime`), `report` (offline) |
-| `report.mjs`    | Pure evaluation: thresholds and PASS / FAIL / INVALID / NOT_TESTED verdicts             |
-| `report.d.mts`  | Types of `report.mjs` for the unit tests                                               |
-| `openlab.mjs`   | Staged, bounded lab opening with failure diagnostics and safe retry (B1.5.1)           |
-| `openlab.d.mts` | Types of `openlab.mjs` for the unit tests                                              |
-| `cdp.mjs`       | App start and close, DevTools connection, request and worker instrumentation           |
-| `sampler.ps1`   | Read-only memory sampler (RoadPilot's own processes only)                              |
-| `workerorder.mjs` | B1.5.3: synthetic worker-ordering check in headless Edge against the dev server (no app, no WebView2) |
+| File                 | Role                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------ |
+| `run.mjs`            | Driver: `functional`, `perf`, `cycles` (one session each, need `--confirm-runtime`), `report` (offline) |
+| `report.mjs`         | Pure evaluation: thresholds and PASS / FAIL / INVALID / NOT_TESTED verdicts                             |
+| `lifecycle.mjs`      | B1.5.4B: one session, preflight → own dev server → measurement → RoadPilot closed → dev server stopped  |
+| `devserver.mjs`      | B1.5.4B: dev server readiness stages, ownership checks, graceful stop (pure)                            |
+| `devserver-node.mjs` | B1.5.4B: real fork, HTTP, port owner and process tree, by PID only; no kill function                    |
+| `viteserver.mjs`     | B1.5.4B: the forked dev server (Vite JS API, `vite.config.ts`), IPC `listening` / `shutdown` / `closed` |
+| `evidence.mjs`       | B1.5.4B: screenshot recorder: `<test>-<seq>-<scenario>-<view>-<tag>.png`, never overwrites             |
+| `openlab.mjs`        | Staged, bounded lab opening with failure diagnostics (B1.5.1); one attempt by default (B1.5.4B)        |
+| `cdp.mjs`            | App start and close, DevTools connection, request and worker instrumentation                           |
+| `*.d.mts`            | Types of the modules above for the unit tests in `src/dev/mapLibreLab/tests/`                          |
+| `sampler.ps1`        | Read-only memory sampler (RoadPilot's own processes only)                                              |
+| `workerorder.mjs`    | B1.5.3: synthetic worker-ordering check in headless Edge against a running dev server (no app)         |
 
-Results go to `out/<session>/` (ignored by Git; `--session=<name>`, default a new timestamped folder) unless `--out` names another folder. Existing results are never overwritten. The B1.5 evidence stays in the `out/` root.
+Port 1420 must be free: `run.mjs` starts and stops its own Vite dev server and refuses to start beside `npm run dev`.
+
+Results go to `out/<session>/` (ignored by Git; `--session=<name>`, by default a new timestamped folder) unless `--out` names another folder. Existing results are never overwritten. The B1.5 evidence stays in the `out/` root.

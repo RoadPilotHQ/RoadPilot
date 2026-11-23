@@ -4,16 +4,22 @@
  *
  *   node tools/maplibre-validation/run.mjs <mode> [options]
  *
- * Modes that start RoadPilot (need --confirm-runtime, an idle desktop, `npm run dev` and the debug
- * build): functional, perf, cycles. Without --confirm-runtime they only print what they would do.
+ * Modes that start RoadPilot (need --confirm-runtime, an idle desktop and the debug build):
+ * functional, perf, cycles. Without --confirm-runtime they only print what they would do.
  * Mode `report` reads saved results from --out (or --session) and writes report-<tag>.json; it
  * starts nothing.
+ *
+ * B1.5.4B: a runtime mode runs as one session (lifecycle.mjs): preflight (result files, idle
+ * desktop, RoadPilot not running), its OWN Vite dev server (devserver.mjs: started by this script,
+ * proven ready over HTTP before RoadPilot starts, stopped gracefully at the end), the measurement,
+ * then cleanup checks. Port 1420 must be free: a dev server started by hand (`npm run dev`) is
+ * refused, because its process and readiness cannot be verified.
  *
  * Options: --session=<name> (results go to out/<name>/; default: a new timestamped folder),
  * --out=<dir> (instead of a session folder), --nv (RTX via --force_high_performance_gpu),
  * --only=urban|stress, --kinds=maplibre,m3, --runs=3, --kind=maplibre (cycles),
- * --busy=<process,process> (extra processes that block a start), --attempts=2 (app starts per
- * lab opening, see openlab.mjs).
+ * --busy=<process,process> (extra processes that block a start), --attempts=1 (app starts per
+ * lab opening, see openlab.mjs; more than 1 makes the `startup` criterion INVALID on a retry).
  *
  * B1.5.1: results never overwrite earlier results. Runtime modes write into a session folder and
  * refuse to start when a result file they would write already exists there; every failed lab
@@ -27,6 +33,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   appIdentifier,
+  appPids,
+  assertDesktopIdle,
   closeApp,
   connect,
   cspLogEntries,
@@ -39,6 +47,10 @@ import {
   REPO,
   sleep,
 } from './cdp.mjs'
+import { startDevServer, stopDevServer } from './devserver.mjs'
+import { nodeDevServerDeps } from './devserver-node.mjs'
+import { createScreenshotRecorder } from './evidence.mjs'
+import { runSession } from './lifecycle.mjs'
 import { openLab as openLabStaged } from './openlab.mjs'
 import { buildReport, MIN_RUNS, THRESHOLDS, worstProbe } from './report.mjs'
 
@@ -53,7 +65,7 @@ const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').sl
 const SESSION = opt('session', mode === 'report' ? null : `run-${stamp}`)
 if (SESSION !== null && !/^[\w.-]+$/.test(SESSION)) throw new Error(`invalid --session ${SESSION}`)
 const OUT = resolve(opt('out', SESSION ? join(HERE, 'out', SESSION) : join(HERE, 'out')))
-const ATTEMPTS = Math.max(1, Number(opt('attempts', '2')) || 2)
+const ATTEMPTS = Math.max(1, Number(opt('attempts', '1')) || 1)
 const CONFIRMED = flag('confirm-runtime')
 const NV = flag('nv')
 const TAG = NV ? 'nv' : 'amd'
@@ -69,7 +81,12 @@ const FLAGS = [...KEEP_VISIBLE, ...(NV ? ['--force_high_performance_gpu'] : [])]
 const tauri = JSON.parse(readFileSync(join(REPO, 'src-tauri', 'tauri.conf.json'), 'utf8'))
 const DEV_URL = new URL(tauri.build.devUrl)
 const PAGE_ORIGIN = DEV_URL.origin
-const LAB = `${PAGE_ORIGIN}/src/dev/mapLibreLab/index.html`
+const LAB_PATH = '/src/dev/mapLibreLab/index.html'
+const LAB = `${PAGE_ORIGIN}${LAB_PATH}`
+/** Served by the dev server only for the lab page itself (not for Vite's SPA fallback). */
+const LAB_MARKER = 'RoadPilot MapLibre lab'
+/** Started by URL (setWorkerUrl), not imported: the module crawl must request it explicitly. */
+const WORKER_ENTRY = '/src/dev/mapLibreLab/scsWorkerEntry.mjs'
 const SCENARIO_SEGMENTS = { urban: THRESHOLDS.urban.segments, stress: THRESHOLDS.stress.segments }
 
 /** Writes a result; never replaces an existing file (`wx`). */
@@ -211,17 +228,31 @@ function networkInput(inst, navT, labState) {
   }
 }
 
-async function screenshot(page, name) {
-  const r = await page.send('Page.captureScreenshot', { format: 'png' })
-  mkdirSync(OUT, { recursive: true })
-  writeFileSync(join(OUT, `${name}.png`), Buffer.from(r.data, 'base64'), { flag: 'wx' })
+/**
+ * B1.5.4B (defect A): screenshots of one run, named `<test>-<seq>-<scenario>-<view>-<tag>.png`
+ * (evidence.mjs). A capture never throws into the step around it; its record goes into the result
+ * (`screenshots`) and report.mjs judges it separately.
+ */
+function screenshotRecorder(test) {
+  return createScreenshotRecorder({
+    test,
+    adapter: TAG,
+    exists: (name) => existsSync(join(OUT, name)),
+    write: (name, png) => {
+      mkdirSync(OUT, { recursive: true })
+      writeFileSync(join(OUT, name), png, { flag: 'wx' })
+    },
+    decode: (b64) => Buffer.from(b64, 'base64'),
+  })
 }
+const grabber = (page) => async () =>
+  (await page.send('Page.captureScreenshot', { format: 'png' }))?.data
 
 // ---------------------------------------------------------------- functional
 
 async function functional() {
   refuseExisting([`functional-${TAG}.json`])
-  const res = { tag: TAG, env: {}, steps: {}, failedSteps: [] }
+  const res = { tag: TAG, env: {}, steps: {}, failedSteps: [], screenshots: [] }
   let opened
   try {
     opened = await openLab(1, 'functional')
@@ -230,10 +261,11 @@ async function functional() {
     res.failedSteps.push({ name: 'openLab', ...openLabFailure(e) })
     res.network = null
     save(`functional-${TAG}.json`, res)
-    printReport(buildReport({ functional: res }))
-    return
+    return { functional: res }
   }
   const { app, page, inst, navT, initial } = opened
+  const shots = screenshotRecorder('functional')
+  const shot = (scenario, view) => shots.capture({ scenario, view }, grabber(page))
   res.env.openLab = {
     attempt: opened.attempt,
     failedAttempts: opened.failedAttempts,
@@ -257,7 +289,7 @@ async function functional() {
         '({w: screen.width, h: screen.height, dpr: devicePixelRatio, ua: navigator.userAgent})',
       ),
     )
-    await step('shot', () => screenshot(page, `A-basic-whole-${TAG}`))
+    await shot('basic', 'initial-whole')
 
     const accuracy = async (key, cfg, sizes) => {
       await lab(page, `L.configure(${JSON.stringify(cfg)})`)
@@ -294,7 +326,7 @@ async function functional() {
         if (x === null) await lab(page, 'L.whole()')
         else await lab(page, `L.setCamera({center:{x:${x},z:${z}},zoom:${zoom}})`)
         res.steps.labels.push({ name, ...(await lab(page, 'L.labelStats()')) })
-        await screenshot(page, `A-basic-${name}-${TAG}`)
+        await shot('basic', `labels-${name}`)
       })
 
     // 100 pan and zoom steps (ADR-003 criterion 1), then context loss and restore.
@@ -316,7 +348,7 @@ async function functional() {
       await lab(page, 'L.settle()')
     })
     res.steps.contextLoss = await step('contextLoss', () => lab(page, 'L.contextLoss()'))
-    await step('shot', () => screenshot(page, `A-basic-after-context-loss-${TAG}`))
+    await shot('basic', 'after-context-loss')
 
     res.steps.releaseRemount = await step('releaseRemount', async () => ({
       release: await lab(page, 'L.release()'),
@@ -338,13 +370,13 @@ async function functional() {
         await lab(page, `L.setCamera({center:{x:-98700,z:-68900},zoom:${zoom}})`)
         await lab(page, 'L.settle()')
         await sleep(150)
-        await screenshot(page, `D-thin-z${zoom}-${TAG}`)
+        await shot('thin', `maplibre-z${zoom}`)
       }
       await lab(page, `L.configure({renderer:'m3', scenario:'thin'})`)
       for (const zoom of [9, 11, 13]) {
         await lab(page, `L.setCamera({center:{x:-98700,z:-68900},zoom:${zoom}})`)
         await sleep(150)
-        await screenshot(page, `D-thin-m3-z${zoom}-${TAG}`)
+        await shot('thin', `m3-z${zoom}`)
       }
     })
 
@@ -353,12 +385,12 @@ async function functional() {
         page,
         `L.configure({renderer:'maplibre', scenario:'urban', segments:100000, crs:'scs', labels:true, probes:false})`,
       )
-      await screenshot(page, `B-urban-whole-${TAG}`)
+      await shot('urban', 'whole')
       await lab(page, `L.setCamera({center:{x:-100000,z:-70000},zoom:10})`)
       await lab(page, 'L.settle()')
       await sleep(400)
       res.steps.urbanLabelsZ10 = await lab(page, 'L.labelStats()')
-      await screenshot(page, `B-urban-z10-${TAG}`)
+      await shot('urban', 'labels-z10')
     })
 
     res.steps.accuracyScsDpr15 = await step('accuracyScsDpr15', async () => {
@@ -377,10 +409,11 @@ async function functional() {
     res.console = inst.log.console
     res.exceptions = inst.log.exceptions
     res.workers = inst.log.workers
+    res.screenshots = shots.records()
     res.close = await closeApp(app)
     save(`functional-${TAG}.json`, res)
   }
-  printReport(buildReport({ functional: res }))
+  return { functional: res }
 }
 
 // ---------------------------------------------------------------- perf
@@ -456,7 +489,8 @@ async function perfRun(kind, scenario, run) {
   return out
 }
 
-async function perf() {
+/** [kind, scenario, run] of every perf run, in run order. */
+function perfPlan() {
   const scenarios = ONLY ? [ONLY] : Object.keys(THRESHOLDS)
   const kinds = opt('kinds', 'maplibre,m3').split(',').filter(Boolean)
   const plan = []
@@ -471,19 +505,27 @@ async function perf() {
       plan.push([k, scenario, counts[k]])
     }
   }
-  refuseExisting(plan.map(([k, s, n]) => `perf-${k}-${s}-${n}-${TAG}.json`))
+  return plan
+}
+const perfFiles = () => perfPlan().map(([k, s, n]) => `perf-${k}-${s}-${n}-${TAG}.json`)
+
+async function perf() {
+  const plan = perfPlan()
+  refuseExisting(perfFiles())
   const all = []
   for (const [k, s, n] of plan) all.push(await perfRun(k, s, n))
-  printReport(buildReport({ perf: all }))
+  return { perf: all }
 }
 
 // ---------------------------------------------------------------- cycles
+
+const cyclesFiles = () => [`cycles-${opt('kind', 'maplibre')}-${ONLY ?? 'stress'}-${TAG}.json`]
 
 async function cycles() {
   const scenario = ONLY ?? 'stress'
   const kind = opt('kind', 'maplibre')
   const n = 8
-  refuseExisting([`cycles-${kind}-${scenario}-${TAG}.json`])
+  refuseExisting(cyclesFiles())
   const out = { tag: TAG, kind, scenario, cycles: [] }
   let opened = null
   let sampler = null
@@ -495,6 +537,7 @@ async function cycles() {
       out.openLab = openLabFailure(e)
       throw e
     }
+    out.openLabAttempt = { attempt: opened.attempt, failedAttempts: opened.failedAttempts }
     const { page } = opened
     sampler = startSampler(`cycles-${kind}-${scenario}-${TAG}`)
     await lab(
@@ -528,7 +571,7 @@ async function cycles() {
     }
     save(`cycles-${kind}-${scenario}-${TAG}.json`, { ...out, samples })
   }
-  printReport(buildReport({ cycles: [out] }))
+  return { cycles: [out] }
 }
 
 // ---------------------------------------------------------------- report
@@ -549,10 +592,13 @@ function report() {
       delete rest.samples
       return rest
     }
+    const lifecycles = files.filter((f) => f.startsWith('session-lifecycle-')).map(read)
     const rep = buildReport({
       functional: functionalFile ? read(functionalFile) : undefined,
       perf: files.filter((f) => f.startsWith('perf-')).map((f) => strip(read(f))),
       cycles: files.filter((f) => f.startsWith('cycles-')).map((f) => strip(read(f))),
+      // B1.5.4B session records (older sessions have none: no lifecycle criterion then).
+      lifecycle: lifecycles.length ? lifecycles : undefined,
     })
     console.log(saveReport(`report-${tag}.json`, { tag, files, ...rep }))
     printReport(rep)
@@ -573,10 +619,80 @@ function plan() {
   process.exitCode = 2
 }
 
-const RUNTIME = { functional, perf, cycles }
+const RUNTIME = {
+  functional: { run: functional, files: () => [`functional-${TAG}.json`] },
+  perf: { run: perf, files: perfFiles },
+  cycles: { run: cycles, files: cyclesFiles },
+}
+
+/**
+ * B1.5.4B: one runtime mode as one session (lifecycle.mjs) with the script's own dev server.
+ * Result files are refused before anything starts; the session record, the dev server log and
+ * any failure diagnostics go into the same session folder.
+ */
+async function session(name) {
+  const label = `${name}-${TAG}`
+  const logName = `vite-dev-${label}.log`
+  refuseExisting([...RUNTIME[name].files(), `session-lifecycle-${label}.json`, logName])
+  mkdirSync(OUT, { recursive: true })
+  const saveJson = (n, data) => {
+    save(`${n}.json`, data)
+    return join(OUT, `${n}.json`)
+  }
+  const devDeps = nodeDevServerDeps({
+    script: join(HERE, 'viteserver.mjs'),
+    args: [REPO, DEV_URL.hostname, DEV_URL.port],
+    cwd: REPO,
+    logFile: join(OUT, logName),
+    save: (n, data) => saveDiagnostics(n, data, null),
+  })
+  const devOptions = {
+    origin: PAGE_ORIGIN,
+    appPath: '/',
+    labPath: LAB_PATH,
+    labMarker: LAB_MARKER,
+    requiredModules: [WORKER_ENTRY],
+    label,
+  }
+  const rec = await runSession(
+    {
+      preflight: async () => {
+        const checks = { resultFiles: 'free' }
+        try {
+          assertDesktopIdle(BUSY)
+          checks.desktop = 'idle'
+        } catch (e) {
+          return { ok: false, checks: { ...checks, desktop: errorText(e) } }
+        }
+        const running = appPids()
+        checks.roadpilot = running.length ? `running (PID ${running.join(', ')})` : 'not running'
+        return { ok: running.length === 0, checks }
+      },
+      startDevServer: () => startDevServer(devDeps, devOptions),
+      stopDevServer: (server) => stopDevServer(devDeps, server),
+      appProcesses: () => processInfo(),
+      save: saveJson,
+      now: () => Date.now(),
+    },
+    { label },
+    () => RUNTIME[name].run(),
+  )
+  for (const s of rec.stages)
+    console.log(
+      `${s.verdict.padEnd(10)} session:${s.stage}${s.error ? ` (${s.error})` : s.reason ? ` (${s.reason})` : ''}`,
+    )
+  printReport(buildReport({ ...(rec.bodyResult ?? {}), lifecycle: rec }))
+  if (rec.verdict === 'FAIL') {
+    console.log(
+      `CLEANUP FAIL: ${JSON.stringify(rec.cleanup)}. Nothing was force-terminated; check the processes above before the next session.`,
+    )
+    process.exitCode = 3
+  }
+}
+
 if (mode === 'report') report()
 else if (RUNTIME[mode]) {
-  if (CONFIRMED) await RUNTIME[mode]()
+  if (CONFIRMED) await session(mode)
   else plan()
 } else {
   console.log(

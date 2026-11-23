@@ -365,10 +365,100 @@ export function evaluateMemoryCycles(result) {
   })
 }
 
+// ---------------------------------------------------------------- harness evidence (B1.5.4B)
+
+/**
+ * Screenshot records of one run (evidence.mjs). Judged on their own: a missing screenshot is
+ * missing evidence (INVALID), never a failure of the functional step it was taken in, and it does
+ * not touch any measured criterion.
+ */
+export function evaluateScreenshots(records) {
+  if (!Array.isArray(records)) return verdict('INVALID', 'no_screenshot_records')
+  if (records.length === 0) return verdict('NOT_TESTED', 'no_screenshots')
+  const missing = records.filter((r) => !isObj(r) || r.status !== 'saved')
+  const names = records.filter(isObj).map((r) => r.name)
+  const duplicates = names.filter((n, i) => n !== null && names.indexOf(n) !== i)
+  const metrics = { planned: records.length, saved: records.length - missing.length }
+  if (duplicates.length)
+    return verdict('INVALID', 'duplicate_screenshot_names', { metrics, detail: duplicates })
+  if (missing.length)
+    return verdict('INVALID', 'screenshots_missing', {
+      metrics,
+      detail: missing.map((r) => ({
+        seq: r?.seq,
+        name: r?.name ?? null,
+        stage: r?.stage ?? null,
+        error: r?.error ?? null,
+      })),
+    })
+  return verdict('PASS', 'all_saved', { metrics })
+}
+
+/**
+ * Lab openings of the runs (openlab.mjs). Each run must open the lab at its first attempt: a
+ * failed attempt is never hidden by a later successful one (INVALID `failed_attempt_before_success`),
+ * and a lab that never opened is INVALID (`lab_not_opened`).
+ * Input per run: { attempt, failedAttempts } or { failed: true, stage, error }.
+ */
+export function evaluateStartup(runs) {
+  if (!Array.isArray(runs) || runs.length === 0) return verdict('NOT_TESTED', 'no_runs')
+  const per = runs.map((r) => {
+    if (!isObj(r)) return verdict('INVALID', 'no_record')
+    if (r.failed) return verdict('INVALID', 'lab_not_opened', { detail: r })
+    if (!Number.isInteger(r.attempt) || !Array.isArray(r.failedAttempts))
+      return verdict('INVALID', 'malformed_record')
+    if (r.failedAttempts.length > 0 || r.attempt !== 1)
+      return verdict('INVALID', 'failed_attempt_before_success', {
+        detail: r.failedAttempts.map((a) => ({
+          attempt: a?.attempt,
+          stage: a?.stage,
+          error: a?.error,
+        })),
+      })
+    return verdict('PASS', 'first_attempt')
+  })
+  const v = combine(per.map((p) => p.verdict))
+  return verdict(v, v === 'PASS' ? 'first_attempt' : 'per_run', { perRun: per })
+}
+
+/**
+ * The session record of lifecycle.mjs: dev server readiness, RoadPilot closed, dev server
+ * stopped. FAIL when cleanup failed; INVALID when the session could not run completely.
+ */
+export function evaluateLifecycle(rec) {
+  if (!isObj(rec) || !Array.isArray(rec.stages)) return verdict('INVALID', 'no_lifecycle_record')
+  const stages = Object.fromEntries(rec.stages.map((s) => [s?.stage, s?.verdict]))
+  const failed = rec.stages.filter((s) => s?.verdict === 'FAIL').map((s) => s.stage)
+  const detail = { stages, cleanup: rec.cleanup ?? null }
+  if (stages.appClosed === 'FAIL' || stages.stopDevServer === 'FAIL')
+    return verdict('FAIL', 'cleanup_failed', detail)
+  if (failed.length) return verdict('INVALID', `stage_failed:${failed.join(',')}`, detail)
+  if (rec.stages.some((s) => s?.verdict !== 'PASS'))
+    return verdict('INVALID', 'stages_not_run', detail)
+  return verdict('PASS', 'complete', detail)
+}
+
+/** Lab-opening records of the runs in one report (older results without them are skipped). */
+function startupRecords(f, functional, perfRuns, cycleList) {
+  const out = []
+  const from = (ok, failed) => {
+    if (isObj(ok)) out.push({ attempt: ok.attempt, failedAttempts: ok.failedAttempts })
+    else if (isObj(failed)) out.push({ failed: true, stage: failed.stage, error: failed.error })
+  }
+  if (functional)
+    from(
+      f.env?.openLab,
+      (Array.isArray(f.failedSteps) ? f.failedSteps : []).find((s) => s?.name === 'openLab'),
+    )
+  for (const r of perfRuns) if (isObj(r)) from(r.openLabAttempt, r.openLab)
+  for (const c of cycleList) if (isObj(c)) from(c.openLabAttempt, c.openLab)
+  return out
+}
+
 // ---------------------------------------------------------------- whole report
 
 /** The report of one or more harness outputs; every criterion separately, plus an overall verdict. */
-export function buildReport({ functional, perf, cycles } = {}) {
+export function buildReport({ functional, perf, cycles, lifecycle } = {}) {
   const f = isObj(functional) ? functional : {}
   const steps = isObj(f.steps) ? f.steps : {}
   const criteria = {
@@ -417,6 +507,17 @@ export function buildReport({ functional, perf, cycles } = {}) {
   const cycleList = Array.isArray(cycles) ? cycles : []
   for (const c of cycleList) criteria[`memory:${c?.kind}:${c?.scenario}`] = evaluateMemoryCycles(c)
   if (cycleList.length === 0) criteria.memory = verdict('NOT_TESTED', 'no_cycles')
+  // B1.5.4B: harness evidence, each only when the results carry it (older results stay as they were).
+  if (functional && f.screenshots !== undefined)
+    criteria.screenshots = evaluateScreenshots(f.screenshots)
+  const starts = startupRecords(f, functional, perfRuns, cycleList)
+  if (starts.length) criteria.startup = evaluateStartup(starts)
+  // One session record (a run) or several (`report` over a folder): one criterion per session.
+  if (Array.isArray(lifecycle))
+    for (const [i, rec] of lifecycle.entries())
+      criteria[`sessionLifecycle:${isObj(rec) && rec.label ? rec.label : i + 1}`] =
+        evaluateLifecycle(rec)
+  else if (lifecycle !== undefined) criteria.sessionLifecycle = evaluateLifecycle(lifecycle)
   return {
     thresholds: THRESHOLDS,
     accuracyTolerancePx: ACCURACY_TOLERANCE_PX,

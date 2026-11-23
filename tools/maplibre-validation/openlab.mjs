@@ -20,9 +20,14 @@
  *
  * Every wait polls a condition with a short interval and a stage deadline (no fixed sleep decides
  * anything). A failure keeps its original error and stage; diagnostics are captured afterwards and
- * a capture problem is only added to the diagnostics, never thrown. A retry happens only after the
- * app was closed and none of its processes is left, so retries cannot create a second instance or
- * leave orphans. Refusals (no confirmation, busy desktop, app already running) are never retried.
+ * a capture problem is only added to the diagnostics, never thrown. A retry (only when `attempts`
+ * > 1 is passed; the default is one attempt) happens only after the app was closed and none of its
+ * processes is left, so retries cannot create a second instance or leave orphans. Refusals (no
+ * confirmation, busy desktop, app already running) are never retried.
+ *
+ * B1.5.4B: the dev server is no longer this module's assumption. lifecycle.mjs starts it and
+ * proves it ready (devserver.mjs) before `openLab` runs, so the `startup` stage never begins
+ * against a cold or foreign server.
  */
 
 export const STAGES = Object.freeze([
@@ -46,7 +51,12 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
   poll: 100,
 })
 
-export const DEFAULT_ATTEMPTS = 2
+/**
+ * B1.5.4B: one attempt unless a caller asks for more. A retry is a diagnostic tool only: every
+ * failed attempt stays in `failedAttempts`, and report.mjs (`startup`) makes a run with a failed
+ * attempt INVALID even when a later attempt opened the lab.
+ */
+export const DEFAULT_ATTEMPTS = 1
 
 /** Errors from `launch` that a retry cannot change. */
 const REFUSAL = /not confirmed|DESKTOP BUSY|already running|still running/i

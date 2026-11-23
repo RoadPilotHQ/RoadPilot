@@ -42,10 +42,14 @@ export declare function evaluateWorkerProjection(wp: unknown, consoleEntries?: u
 export declare function evaluatePerfRun(run: unknown, scenario: string): Evaluation
 export declare function aggregatePerf(runs: unknown, scenario: string): Evaluation
 export declare function evaluateMemoryCycles(result: unknown): Evaluation
+export declare function evaluateScreenshots(records: unknown): Evaluation
+export declare function evaluateStartup(runs: unknown): Evaluation
+export declare function evaluateLifecycle(record: unknown): Evaluation
 export declare function buildReport(input?: {
   functional?: unknown
   perf?: unknown
   cycles?: unknown
+  lifecycle?: unknown
 }): {
   thresholds: typeof THRESHOLDS
   accuracyTolerancePx: number

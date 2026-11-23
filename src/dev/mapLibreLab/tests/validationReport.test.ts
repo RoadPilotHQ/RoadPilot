@@ -574,7 +574,9 @@ describe('harness sources', () => {
       /if \(confirmed !== true\)\s*\n?\s*throw/,
     )
     const run = harness['/tools/maplibre-validation/run.mjs']!
-    expect(run).toMatch(/if \(CONFIRMED\) await RUNTIME\[mode\]\(\)/)
+    // B1.5.4B: a confirmed runtime mode runs as one session (own dev server, then the mode).
+    expect(run).toMatch(/if \(CONFIRMED\) await session\(mode\)/)
+    expect(run).toMatch(/\(\) => RUNTIME\[name\]\.run\(\)/)
     expect(run).toMatch(/confirmed: CONFIRMED/)
     expect(run).toContain('args.includes(`--${name}`)')
   })
@@ -587,8 +589,12 @@ describe('harness sources', () => {
     // Raw results, screenshots and diagnostics are written with `wx` (fail instead of replace).
     expect(run.match(/flag: 'wx'/g)?.length).toBeGreaterThanOrEqual(5)
     expect(run).toMatch(/refuseExisting\(\[`functional-\$\{TAG\}\.json`\]\)/)
-    expect(run).toMatch(/refuseExisting\(plan\.map/)
-    expect(run).toMatch(/refuseExisting\(\[`cycles-/)
+    expect(run).toMatch(/refuseExisting\(perfFiles\(\)\)/)
+    expect(run).toMatch(/refuseExisting\(cyclesFiles\(\)\)/)
+    // B1.5.4B: the session refuses every file it would write before it starts anything.
+    expect(run).toMatch(
+      /refuseExisting\(\[\.\.\.RUNTIME\[name\]\.files\(\), `session-lifecycle-\$\{label\}\.json`, logName\]\)/,
+    )
     // New runs go into a session folder, never into the out/ root that holds the B1.5 evidence.
     expect(run).toMatch(/join\(HERE, 'out', SESSION\)/)
     expect(run).toContain('report needs --session=<name> or --out=<dir>')

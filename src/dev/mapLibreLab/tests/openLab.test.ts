@@ -264,7 +264,7 @@ describe('openLab (staged, bounded)', () => {
 
   it('navigation timeout: both attempts fail at "navigation", each with diagnostics and cleanup', async () => {
     const w = new World({ ...base, labCommitMs: Infinity })
-    const { error } = await run(w)
+    const { error } = await run(w, { attempts: 2 }) // B1.5.4B: retries only when asked for
     expect(error).toBeInstanceOf(OpenLabError)
     const e = error as OpenLabError
     expect(e.stage).toBe('navigation')
@@ -352,9 +352,16 @@ describe('openLab (staged, bounded)', () => {
     expect(d.screenshot).toBe(false)
   })
 
-  it('retry after a failed startup: second launch only after cleanup, then success', async () => {
+  it('default: one attempt; a failed startup is not retried', async () => {
     const w = new World({ ...base, launchErrors: ['WebView2 did not open the debugging port'] })
-    const { value, error } = await run(w)
+    const { error } = await run(w)
+    expect((error as OpenLabError).attempts).toHaveLength(1)
+    expect(w.launches).toBe(1)
+  })
+
+  it('retry after a failed startup (explicit attempts: 2): second launch only after cleanup, then success', async () => {
+    const w = new World({ ...base, launchErrors: ['WebView2 did not open the debugging port'] })
+    const { value, error } = await run(w, { attempts: 2 })
     expect(error).toBeNull()
     expect(value!.attempt).toBe(2)
     expect(value!.failedAttempts).toEqual([
@@ -379,7 +386,7 @@ describe('openLab (staged, bounded)', () => {
       'launchApp: runtime validation not confirmed',
     ]) {
       const w = new World({ ...base, launchErrors: [msg, null] })
-      const { error } = await run(w)
+      const { error } = await run(w, { attempts: 2 }) // a refusal is not retried even when allowed
       const e = error as OpenLabError
       expect(e.message).toContain('start refused')
       expect(e.attempts).toHaveLength(1)
@@ -390,7 +397,7 @@ describe('openLab (staged, bounded)', () => {
 
   it('cleanup after failure: leftover processes stop any retry (no second instance)', async () => {
     const w = new World({ ...base, labReadyMs: Infinity, leftoverAfterClose: true })
-    const { error } = await run(w)
+    const { error } = await run(w, { attempts: 2 })
     const e = error as OpenLabError
     expect(e.message).toContain('cleanup incomplete')
     expect(e.attempts).toHaveLength(1)
