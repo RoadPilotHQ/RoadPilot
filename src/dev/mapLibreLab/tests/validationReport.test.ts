@@ -550,6 +550,7 @@ describe('harness sources', () => {
       'openlab.mjs',
       'openlab.d.mts',
       'cdp.mjs',
+      'workerorder.mjs',
       'sampler.ps1',
       'README.md',
       '.gitignore',

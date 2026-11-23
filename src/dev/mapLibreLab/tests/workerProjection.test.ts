@@ -1,45 +1,36 @@
 /**
- * B1.5.1 (defect A): registration of the projection handler in MapLibre's workers.
+ * B1.5.1 / B1.5.3: the projection handler in MapLibre's workers, main-thread side.
  *
  * The fake pool models what MapLibre 6.19.0's source does (see `workerProjection.ts`): workers are
- * created on first use, `importScript` replays every known url into new workers, a worker's
- * import is asynchronous, terminating workers aborts messages in flight, and a worker answers an
- * unknown message type with `null`. These tests check the registry's logic against that model;
- * they do NOT verify real MapLibre worker behaviour, which needs a runtime run.
+ * started from the configured worker URL on first use (`prewarm()` or the first message), new
+ * workers fire `workerscreate`, terminating workers aborts messages in flight, and a worker answers
+ * an unknown message type with `null`. A worker started from the lab's entry has the handler from
+ * its start (B1.5.3); one started from any other URL never gets it; one whose entry failed closed
+ * itself and never answers. These tests check the registry's logic against that model; they do
+ * NOT verify real MapLibre worker behaviour (see `scsWorkerEntry.test.ts` and the runtime runs).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AttemptTimeoutError,
   checkStatusAnswers,
   createWorkerProjection,
+  isWorkerProjectionStatus,
   PROJECTION_CRS,
+  PROJECTION_SOURCE,
   PROJECTION_STATUS_MESSAGE,
   WorkerProjectionError,
   type Timers,
   type WorkerPoolPort,
 } from '../workerProjection'
-import {
-  installScsProjection,
-  scsProjectionHandler,
-  STATUS_CRS,
-  STATUS_MESSAGE,
-} from '../scsProjection.worker.mjs'
 
-interface Deferred {
-  promise: Promise<void>
-  resolve: () => void
-  reject: (e: Error) => void
-}
-const deferred = (): Deferred => {
-  let resolve!: () => void
-  let reject!: (e: Error) => void
-  const promise = new Promise<void>((res, rej) => {
-    resolve = res
-    reject = rej
-  })
-  promise.catch(() => undefined)
-  return { promise, resolve, reject }
-}
+const ENTRY = 'http://127.0.0.1:1420/src/dev/mapLibreLab/scsWorkerEntry.mjs'
+const PACKAGE_WORKER = 'http://127.0.0.1:1420/node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs'
+const OK = Object.freeze({
+  crs: PROJECTION_CRS,
+  handler: true,
+  source: PROJECTION_SOURCE,
+  messagesBeforeInstall: 0,
+})
 
 const abortError = () => {
   const e = new Error('The workers were terminated while a message was in flight.')
@@ -47,71 +38,71 @@ const abortError = () => {
   return e
 }
 
-/** One fake worker: an asynchronous, deduplicated import per url (like `_importScript`). */
+type WorkerKind = 'entry' | 'other-url' | 'entry-failed' | 'late-install'
+
+/** One fake worker; what it answers depends on the script it was started from. */
 class FakeWorker {
-  handler = false
-  readonly imports = new Map<string, Deferred>()
   constructor(
     readonly id: number,
-    readonly canSetHandler: boolean,
+    readonly kind: WorkerKind,
   ) {}
-  import(url: string): Promise<void> {
-    let d = this.imports.get(url)
-    if (!d) {
-      d = deferred()
-      this.imports.set(url, d)
-      d.promise.then(
-        () => (this.handler = this.canSetHandler),
-        () => this.imports.delete(url),
-      )
-    }
-    return d.promise
+  answer(type: string): Promise<unknown> | 'never' {
+    if (this.kind === 'entry-failed') return 'never' // closed by bootstrapScsWorker
+    if (type !== PROJECTION_STATUS_MESSAGE || this.kind === 'other-url')
+      return Promise.resolve(null)
+    return Promise.resolve(this.kind === 'late-install' ? { ...OK, messagesBeforeInstall: 1 } : OK)
   }
 }
 
 /** The global pool and dispatcher as seen through `WorkerPoolPort`. */
 class FakePool {
   workers: FakeWorker[] = []
+  url: string | undefined = undefined
   private nextId = 1
   private readonly createListeners = new Set<() => void>()
-  readonly urls = new Set<string>()
+  private readonly errorListeners = new Set<(m: string) => void>()
+  private inflight: { reject: (e: Error) => void }[] = []
+  readonly calls: string[] = []
   keepAlive = 0
-  importCalls = 0
-  /** Imports finish only when the test resolves them, unless `autoImport` is set. */
-  autoImport = true
+  broadcasts = 0
   workerCount = 1
-  /** Workers created from now on lack `setProjectionHandler`. */
-  brokenWorkers = false
-  failImports = 0
+  /** Kind of the workers created from now on when started from the entry. */
+  entryKind: WorkerKind = 'entry'
+  /** `setWorkerUrl` is ignored (models a worker URL that cannot be set). */
+  ignoreSetUrl = false
+  failBroadcasts = 0
 
   readonly port: WorkerPoolPort = {
+    setWorkerUrl: (url) => {
+      this.calls.push('setWorkerUrl')
+      if (!this.ignoreSetUrl) this.url = url
+    },
+    getWorkerUrl: () => this.url,
     keepWorkersAlive: () => {
+      this.calls.push('keepWorkersAlive')
       this.keepAlive++
       this.ensureWorkers()
     },
-    importScript: (url) => {
-      this.importCalls++
-      this.urls.add(url)
+    broadcast: (type) => {
+      this.calls.push('broadcast')
+      this.broadcasts++
       this.ensureWorkers()
-      if (this.failImports > 0) {
-        this.failImports--
-        return Promise.reject(new Error('Failed to fetch dynamically imported module'))
+      if (this.failBroadcasts > 0) {
+        this.failBroadcasts--
+        return Promise.reject(new Error('broadcast failed'))
       }
-      const all = Promise.all(this.workers.map((w) => w.import(url)))
-      if (this.autoImport) this.finishImports()
-      return all
-    },
-    broadcast: async (type) => {
-      this.ensureWorkers()
-      return this.workers.map((w) =>
-        type === PROJECTION_STATUS_MESSAGE && w.handler
-          ? { crs: PROJECTION_CRS, handler: true }
-          : null,
-      )
+      const answers = this.workers.map((w) => w.answer(type))
+      if (answers.includes('never'))
+        return new Promise((_, reject) => this.inflight.push({ reject })) // until terminated
+      return Promise.all(answers as Promise<unknown>[])
     },
     onWorkersCreated: (l) => {
       this.createListeners.add(l)
       return () => this.createListeners.delete(l)
+    },
+    onWorkerError: (l) => {
+      this.errorListeners.add(l)
+      return () => this.errorListeners.delete(l)
     },
   }
 
@@ -120,24 +111,30 @@ class FakePool {
   }
 
   private createWorkers() {
+    const kind: WorkerKind = this.url === ENTRY ? this.entryKind : 'other-url'
     this.workers = Array.from(
       { length: this.workerCount },
-      () => new FakeWorker(this.nextId++, !this.brokenWorkers),
+      () => new FakeWorker(this.nextId++, kind),
     )
-    // MapLibre replays every imported url into new workers, asynchronously.
-    for (const url of this.urls) for (const w of this.workers) void w.import(url).catch(() => {})
+    if (kind === 'entry-failed')
+      for (const l of this.errorListeners)
+        l('Worker failed to load. Check that the worker URL is correct.')
     for (const l of [...this.createListeners]) l()
   }
 
-  /** `WorkerPool.restart` / release of the last unprewarmed map: abort in-flight, new workers. */
+  /** `WorkerPool.restart`, or a release of the last map while no `prewarm()` holds the pool. */
   recreate() {
-    for (const w of this.workers) for (const d of w.imports.values()) d.reject(abortError())
+    for (const f of this.inflight) f.reject(abortError())
+    this.inflight = []
     this.workers = []
     this.createWorkers()
   }
 
-  finishImports() {
-    for (const w of this.workers) for (const d of w.imports.values()) d.resolve()
+  /** Removing the last map: terminates the workers only if nothing keeps them (MapLibre). */
+  releaseLastMap() {
+    if (this.keepAlive === 0) {
+      this.workers = []
+    }
   }
 }
 
@@ -146,43 +143,46 @@ const idleTimers: Timers = { setTimeout: () => 0, clearTimeout: () => undefined 
 const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve()
 }
-const URL_ = 'http://127.0.0.1:1420/src/dev/mapLibreLab/scsProjection.worker.mjs'
 
-describe('workerProjection', () => {
+describe('workerProjection (B1.5.3 worker entry, secondary verification)', () => {
   afterEach(() => vi.useRealTimers())
 
-  it('initial worker creation: keeps the pool, imports, verifies every worker', async () => {
+  it('initial worker creation: entry URL first, then prewarm, then verification', async () => {
     const pool = new FakePool()
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
     expect(wp.isReady()).toBe(false)
     await expect(wp.ensureReady()).resolves.toEqual({ generation: 1, workers: 1 })
-    expect(pool.keepAlive).toBe(1)
-    expect(pool.importCalls).toBe(1)
+    // The worker URL is set before prewarm() starts the first worker.
+    expect(pool.calls).toEqual(['setWorkerUrl', 'keepWorkersAlive', 'broadcast'])
+    expect(pool.url).toBe(ENTRY)
     expect(wp.isReady()).toBe(true)
     expect(wp.status()).toMatchObject({
       state: 'ready',
       generation: 1,
       attempts: [],
       keepAlive: true,
+      workerUrl: ENTRY,
+      workerErrors: [],
     })
-    // Ready: further calls neither import nor prewarm again.
+    // Ready: further calls neither verify nor prewarm again.
     await wp.ensureReady()
-    expect(pool.importCalls).toBe(1)
+    expect(pool.broadcasts).toBe(1)
     expect(pool.keepAlive).toBe(1)
   })
 
   it('multiple workers: every one must report the handler', async () => {
     const pool = new FakePool()
     pool.workerCount = 3
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
     await expect(wp.ensureReady()).resolves.toEqual({ generation: 1, workers: 3 })
   })
 
-  it('a worker without setProjectionHandler is a failure, never a silent pass', async () => {
+  it('workers started from another script are a failure, never a silent (Mercator) pass', async () => {
     const pool = new FakePool()
     pool.workerCount = 2
-    pool.brokenWorkers = true
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers, attempts: 2 })
+    pool.url = PACKAGE_WORKER
+    pool.ensureWorkers() // workers existed before the registry ran
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers, attempts: 2 })
     const err = await wp.ensureReady().catch((e: unknown) => e)
     expect(err).toBeInstanceOf(WorkerProjectionError)
     expect((err as WorkerProjectionError).attempts).toHaveLength(2)
@@ -194,13 +194,53 @@ describe('workerProjection', () => {
     expect(wp.isReady()).toBe(false)
   })
 
-  it('worker pool recreation after registration: stale, listener, registers again', async () => {
+  it('a worker URL that cannot be set fails in the entry stage, before any worker starts', async () => {
     const pool = new FakePool()
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    pool.ignoreSetUrl = true
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers, attempts: 2 })
+    const err = await wp.ensureReady().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(WorkerProjectionError)
+    expect(wp.status().attempts.map((a) => a.stage)).toEqual(['entry', 'entry'])
+    expect(pool.keepAlive).toBe(0)
+    expect(pool.workers).toHaveLength(0)
+  })
+
+  it('failed registration in the worker: the closed worker never answers; bounded and loud', async () => {
+    vi.useFakeTimers()
+    const pool = new FakePool()
+    pool.entryKind = 'entry-failed'
+    const wp = createWorkerProjection(pool.port, ENTRY, { attempts: 2, attemptTimeoutMs: 1000 })
+    const p = wp.ensureReady().catch((e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(2000)
+    const err = await p
+    expect(err).toBeInstanceOf(WorkerProjectionError)
+    const attempts = (err as WorkerProjectionError).attempts
+    expect(attempts.map((a) => a.error)).toEqual([
+      expect.stringContaining('AttemptTimeoutError'),
+      expect.stringContaining('AttemptTimeoutError'),
+    ])
+    expect(attempts[0]!.error).toContain('worker errors: Worker failed to load')
+    expect(wp.status().workerErrors).toEqual([
+      'Worker failed to load. Check that the worker URL is correct.',
+    ])
+    expect(wp.status().state).toBe('failed')
+  })
+
+  it('a worker that received messages before its handler was installed is rejected', async () => {
+    const pool = new FakePool()
+    pool.entryKind = 'late-install'
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers, attempts: 1 })
+    await expect(wp.ensureReady()).rejects.toThrow(
+      '1 worker(s) received messages before the handler was installed',
+    )
+  })
+
+  it('worker termination and recreation after registration: stale, listener, verified again', async () => {
+    const pool = new FakePool()
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
     await wp.ensureReady()
     const seen: number[] = []
     wp.onRecreated((g) => seen.push(g))
-    pool.autoImport = false
     pool.recreate()
     expect(seen).toEqual([2])
     expect(wp.status()).toMatchObject({
@@ -210,88 +250,117 @@ describe('workerProjection', () => {
       ready: null,
     })
     expect(wp.isReady()).toBe(false)
-    const again = wp.ensureReady()
-    await flush()
-    pool.finishImports()
-    await expect(again).resolves.toEqual({ generation: 2, workers: 1 })
+    // The new worker started from the entry: it has the handler before anything else.
+    expect(await pool.port.broadcast(PROJECTION_STATUS_MESSAGE)).toEqual([OK])
+    await expect(wp.ensureReady()).resolves.toEqual({ generation: 2, workers: 1 })
     expect(pool.keepAlive).toBe(1) // prewarm only once
+    expect(pool.calls.filter((c) => c === 'setWorkerUrl')).toHaveLength(1)
   })
 
-  it('late worker creation after the first load: waits for the replayed import', async () => {
+  it('repeated worker generations: every one is verified, the entry is set once', async () => {
     const pool = new FakePool()
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    pool.workerCount = 2
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
     await wp.ensureReady()
-    pool.autoImport = false
-    pool.recreate() // new worker, replayed import still running
-    expect(await pool.port.broadcast(PROJECTION_STATUS_MESSAGE)).toEqual([null])
-    let settled = false
-    const p = wp.ensureReady().then((r) => {
-      settled = true
-      return r
-    })
-    await flush()
-    expect(settled).toBe(false) // never ready while the worker's import is pending
-    pool.finishImports()
-    await expect(p).resolves.toMatchObject({ generation: 2 })
+    for (let g = 2; g <= 6; g++) {
+      pool.recreate()
+      await expect(wp.ensureReady()).resolves.toEqual({ generation: g, workers: 2 })
+    }
+    expect(wp.status()).toMatchObject({ state: 'ready', generation: 6, recreations: 5 })
+    expect(pool.calls.filter((c) => c === 'setWorkerUrl')).toHaveLength(1)
+    expect(pool.keepAlive).toBe(1)
   })
 
-  it('worker termination during registration: the abort is recorded and retried', async () => {
+  it('late worker creation (no map yet, workers started later) gets the handler at start', async () => {
     const pool = new FakePool()
-    pool.autoImport = false
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
+    // Nothing started yet: the first broadcast starts the workers (after prewarm, from the entry).
+    expect(pool.workers).toHaveLength(0)
+    await wp.ensureReady()
+    expect(pool.workers.map((w) => w.kind)).toEqual(['entry'])
+  })
+
+  it('map removal and remount, reconfiguration, renderer switch: the kept pool stays verified', async () => {
+    const pool = new FakePool()
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
+    await wp.ensureReady() // mount
+    pool.releaseLastMap() // release (prewarm keeps the workers)
+    await wp.ensureReady() // remount
+    await wp.ensureReady() // reconfiguration (new map, same pool)
+    pool.releaseLastMap() // switch to M3 removes the MapLibre map
+    await wp.ensureReady() // back to MapLibre
+    expect(wp.status()).toMatchObject({ state: 'ready', generation: 1, recreations: 0 })
+    expect(pool.broadcasts).toBe(1)
+  })
+
+  it('without prewarm, a release would end the workers; the registry always keeps them', async () => {
+    const pool = new FakePool()
+    pool.ensureWorkers()
+    pool.releaseLastMap()
+    expect(pool.workers).toHaveLength(0) // MapLibre's default (the B1.5 defect A trigger)
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
+    await wp.ensureReady()
+    pool.releaseLastMap()
+    expect(pool.workers).toHaveLength(1)
+  })
+
+  it('worker termination during verification: the abort is recorded and retried', async () => {
+    const pool = new FakePool()
+    pool.entryKind = 'entry-failed' // the first workers never answer
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
     const p = wp.ensureReady()
     await flush()
-    pool.autoImport = true
-    pool.recreate() // aborts the first import
+    pool.entryKind = 'entry'
+    pool.recreate() // aborts the pending broadcast; new, healthy workers
     await expect(p).resolves.toEqual({ generation: 2, workers: 1 })
     expect(wp.status().attempts).toEqual([
       expect.objectContaining({
         attempt: 1,
-        stage: 'import',
+        stage: 'verify',
         error: expect.stringContaining('AbortError'),
       }),
     ])
   })
 
-  it('workers recreated between import and verification are not counted as ready', async () => {
+  it('workers recreated while the old ones answered are not counted as ready', async () => {
     const pool = new FakePool()
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
+    await wp.ensureReady()
+    pool.recreate() // generation 2, stale
     const realBroadcast = pool.port.broadcast
     let once = true
     pool.port.broadcast = async (type) => {
       const answers = await realBroadcast(type)
       if (once) {
         once = false
-        pool.recreate() // new generation after the old workers answered
+        pool.recreate() // generation 3 after the generation-2 workers answered
       }
       return answers
     }
-    await expect(wp.ensureReady()).resolves.toMatchObject({ generation: 2 })
+    await expect(wp.ensureReady()).resolves.toMatchObject({ generation: 3 })
     expect(wp.status().attempts[0]).toMatchObject({ stage: 'recreated' })
   })
 
-  it('concurrent initialisation shares one registration', async () => {
+  it('concurrent initialisation shares one verification', async () => {
     const pool = new FakePool()
-    pool.autoImport = false
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers })
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers })
     const calls = [wp.ensureReady(), wp.ensureReady(), wp.ensureReady()]
     expect(calls[1]).toBe(calls[0])
     expect(calls[2]).toBe(calls[0])
-    await flush()
-    pool.finishImports()
     const results = await Promise.all(calls)
     expect(results.every((r) => r === results[0])).toBe(true)
-    expect(pool.importCalls).toBe(1)
+    expect(pool.broadcasts).toBe(1)
     expect(pool.keepAlive).toBe(1)
+    expect(pool.calls.filter((c) => c === 'setWorkerUrl')).toHaveLength(1)
   })
 
   it('registration failure is not cached: the next call retries and succeeds', async () => {
     const pool = new FakePool()
-    pool.failImports = 3
-    const wp = createWorkerProjection(pool.port, URL_, { timers: idleTimers, attempts: 3 })
+    pool.failBroadcasts = 3
+    const wp = createWorkerProjection(pool.port, ENTRY, { timers: idleTimers, attempts: 3 })
     const err = await wp.ensureReady().catch((e: unknown) => e)
     expect(err).toBeInstanceOf(WorkerProjectionError)
-    expect((err as Error).message).toContain('Failed to fetch dynamically imported module')
+    expect((err as Error).message).toContain('broadcast failed')
     expect(wp.status()).toMatchObject({ state: 'failed' })
     expect(wp.status().attempts.map((a) => a.attempt)).toEqual([1, 2, 3])
     await expect(wp.ensureReady()).resolves.toMatchObject({ generation: 1 })
@@ -299,81 +368,36 @@ describe('workerProjection', () => {
     expect(wp.status().attempts).toHaveLength(3) // diagnostics of the failed call are kept
   })
 
-  it('a hanging import is bounded by the attempt timeout', async () => {
+  it('a hanging verification is bounded by the attempt timeout', async () => {
     vi.useFakeTimers()
     const pool = new FakePool()
-    pool.autoImport = false
-    const wp = createWorkerProjection(pool.port, URL_, { attempts: 2, attemptTimeoutMs: 1000 })
+    const wp = createWorkerProjection(pool.port, ENTRY, { attempts: 2, attemptTimeoutMs: 1000 })
+    pool.port.broadcast = () => new Promise(() => undefined)
     const p = wp.ensureReady().catch((e: unknown) => e)
-    await vi.advanceTimersByTimeAsync(1000)
-    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(2000)
     const err = await p
     expect(err).toBeInstanceOf(WorkerProjectionError)
-    expect((err as WorkerProjectionError).attempts.map((a) => a.error)).toEqual([
-      expect.stringContaining('AttemptTimeoutError'),
-      expect.stringContaining('AttemptTimeoutError'),
+    expect((err as WorkerProjectionError).attempts.map((a) => a.stage)).toEqual([
+      'verify',
+      'verify',
     ])
-    expect(new AttemptTimeoutError('import', 5).message).toContain('5 ms')
+    expect(new AttemptTimeoutError('verify', 5).message).toContain('5 ms')
   })
 
-  it('checkStatusAnswers accepts only a status from every worker', () => {
-    const ok = { crs: PROJECTION_CRS, handler: true }
-    expect(checkStatusAnswers([ok, ok])).toBeNull()
+  it('checkStatusAnswers accepts only an entry-installed status from every worker', () => {
+    expect(checkStatusAnswers([OK, OK])).toBeNull()
     expect(checkStatusAnswers([])).toBe('no worker answered')
-    expect(checkStatusAnswers([ok, null])).toBe('1 of 2 worker(s) without the handler')
-    expect(checkStatusAnswers([{ crs: 'EPSG:3857', handler: true }])).not.toBeNull()
+    expect(checkStatusAnswers([OK, null])).toBe('1 of 2 worker(s) without the handler')
+    expect(checkStatusAnswers([{ ...OK, crs: 'EPSG:3857' }])).not.toBeNull()
     expect(checkStatusAnswers(undefined)).not.toBeNull()
-  })
-})
-
-describe('scsProjection.worker.mjs', () => {
-  it('uses the same message and CRS as the registry', () => {
-    expect(STATUS_MESSAGE).toBe(PROJECTION_STATUS_MESSAGE)
-    expect(STATUS_CRS).toBe(PROJECTION_CRS)
-  })
-
-  it('installs the handler and the status answer through the worker actor', async () => {
-    const handlers = new Map<string, () => Promise<unknown>>()
-    let installed: unknown = null
-    const scope = {
-      setProjectionHandler: (h: unknown) => (installed = h),
-      worker: {
-        actor: {
-          registerMessageHandler: (t: string, h: () => Promise<unknown>) => handlers.set(t, h),
-        },
-      },
-    }
-    expect(installScsProjection(scope)).toEqual({ handler: true, status: true })
-    expect(installed).toBe(scsProjectionHandler)
-    await expect(handlers.get(STATUS_MESSAGE)!()).resolves.toEqual({
-      crs: PROJECTION_CRS,
-      handler: true,
-    })
-  })
-
-  it('without setProjectionHandler it registers nothing, so verification fails', () => {
-    const handlers = new Map<string, unknown>()
-    const scope = {
-      worker: { actor: { registerMessageHandler: (t: string, h: unknown) => handlers.set(t, h) } },
-    }
-    expect(installScsProjection(scope)).toEqual({ handler: false, status: false })
-    expect(handlers.size).toBe(0)
-    expect(installScsProjection(undefined)).toEqual({ handler: false, status: false })
-  })
-
-  it('falls back to self.actor; without any actor there is no status answer', () => {
-    const handlers = new Map<string, unknown>()
-    expect(
-      installScsProjection({
-        setProjectionHandler: () => undefined,
-        actor: {
-          registerMessageHandler: (t: string, h: () => Promise<unknown>) => handlers.set(t, h),
-        },
-      }),
-    ).toEqual({ handler: true, status: true })
-    expect(installScsProjection({ setProjectionHandler: () => undefined })).toEqual({
-      handler: true,
-      status: false,
-    })
+    // The B1.5.1 answer (handler installed by a later import) no longer passes.
+    expect(checkStatusAnswers([{ crs: PROJECTION_CRS, handler: true }])).toBe(
+      '1 worker(s) whose handler was not installed by the worker entry',
+    )
+    expect(checkStatusAnswers([OK, { ...OK, messagesBeforeInstall: 3 }, null])).toBe(
+      '1 of 3 worker(s) without the handler; 1 worker(s) received messages before the handler was installed',
+    )
+    expect(isWorkerProjectionStatus(OK)).toBe(true)
+    expect(isWorkerProjectionStatus({ ...OK, handler: 'yes' })).toBe(false)
   })
 })

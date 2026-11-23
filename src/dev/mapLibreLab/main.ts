@@ -13,7 +13,7 @@ import {
   addProjection,
   getGlobalDispatcher,
   getVersion,
-  importScriptInWorkers,
+  getWorkerUrl,
   Map as MapLibreMap,
   NavigationControl,
   prewarm,
@@ -23,8 +23,7 @@ import {
   type MapEventType,
   type MapGeoJSONFeature,
 } from 'maplibre-gl'
-import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
-import projectionWorkerUrl from './scsProjection.worker.mjs?url'
+import workerEntryUrl from './scsWorkerEntry.mjs?url'
 import { fitBounds } from '@/domain/mapViewport'
 import type { MapTile } from '@/domain/mapTile'
 import {
@@ -219,35 +218,42 @@ const waitOptions = (label: string) => ({
 // ---------------------------------------------------------------- MapLibre setup
 
 /**
- * Once per page: same-origin module workers from the package's own worker file (no `blob:`) and
- * the registered CRS. B1.2 (F4): concurrent callers share one attempt; a failure is not cached,
- * and a retry repeats only the steps that did not succeed, so the CRS is registered once
- * (MapLibre throws on a second registration).
- *
- * B1.5.1 (defect A): the workers' projection handler is no longer a one-time step. B1.5 showed
- * that MapLibre's worker pool does not live as long as the page: removing the last map terminates
- * the workers, and new workers can tile GeoJSON before the replayed handler import has finished.
- * `workerProjection` keeps the pool (`prewarm()`), verifies the handler in every current worker,
- * and registers again whenever MapLibre creates workers. Every map mount and data load waits for
- * it; a failure is an error of that load, never a silent fallback.
+ * Once per page: the registered CRS. B1.2 (F4): concurrent callers share one attempt; a failure
+ * is not cached, and a retry repeats only the steps that did not succeed, so the CRS is
+ * registered once (MapLibre throws on a second registration).
  */
 const ensureMapLibreGlobals = createRetryableInit([
-  { name: 'workerUrl', run: () => setWorkerUrl(new URL(maplibreWorkerUrl, location.href).href) },
   { name: 'projection', run: () => addProjection(scsCrs) },
 ])
 
+/**
+ * B1.5.3: MapLibre starts every worker from the lab's own entry `scsWorkerEntry.mjs` (same-origin
+ * module worker, no `blob:`), which installs the projection handler before the worker can handle
+ * any message. `workerProjection` sets that worker URL before the first worker exists, keeps the
+ * pool (`prewarm()`), and verifies the handler in every worker of every generation (secondary
+ * check). Every map mount and data load waits for it; a failure is an error of that load, never a
+ * silent fallback.
+ */
 const workerProjection = createWorkerProjection(
   {
+    setWorkerUrl: (url) => setWorkerUrl(url),
+    getWorkerUrl: () => getWorkerUrl(),
     keepWorkersAlive: () => prewarm(),
-    importScript: (url) => importScriptInWorkers(url),
     broadcast: (type) => getGlobalDispatcher().broadcast<null, unknown>(type, null),
     onWorkersCreated: (listener) => {
       const dispatcher = getGlobalDispatcher()
       dispatcher.on('workerscreate', listener)
       return () => void dispatcher.off('workerscreate', listener)
     },
+    onWorkerError: (listener) => {
+      const dispatcher = getGlobalDispatcher()
+      const l = (e: { error?: unknown }) =>
+        listener(e.error instanceof Error ? e.error.message : String(e.error))
+      dispatcher.on('error', l)
+      return () => void dispatcher.off('error', l)
+    },
   },
-  new URL(projectionWorkerUrl, location.href).href,
+  new URL(workerEntryUrl, location.href).href,
 )
 
 /** Worker projection events since page load (recreations, re-registrations, failures). */
@@ -255,8 +261,9 @@ const projectionEvents: { t: number; event: string; generation: number; detail?:
 
 /**
  * Workers recreated after a registration (only `WorkerPool.restart` can do that while `prewarm()`
- * holds the pool): register again, then reload the mounted map's road and city data, so tiles
- * built in the new workers before the handler arrived are replaced. A load that saw a recreation
+ * holds the pool): verify again, then reload the mounted map's road and city data. With the
+ * B1.5.3 worker entry the new workers have the handler from their start, so the reload is a
+ * safety net (MapLibre reloads the sources itself after a restart). A load that saw a recreation
  * is marked in its result (`workerProjection.recreatedDuringLoad`); the harness treats such runs
  * as invalid. A failed re-registration becomes the lab's error.
  */

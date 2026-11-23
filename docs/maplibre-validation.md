@@ -188,7 +188,7 @@ Static corrections of the two defects found in B1.5. Nothing was run; the tests 
 **Correction (`src/dev/mapLibreLab/workerProjection.ts`, `scsProjection.worker.mjs`, `main.ts`):**
 
 1. `prewarm()` (public, documented) holds the pool, so removing a map no longer terminates the workers.
-2. Registration awaits `importScriptInWorkers` (resolves after every current worker finished the import), then broadcasts a status message through `getGlobalDispatcher().broadcast` (public). The worker script answers it only after `setProjectionHandler` was really called. Every current worker must answer; a `null`, an empty answer list, or workers recreated during the check fail the attempt.
+2. _(Superseded in [B1.5.3](#b153-worker-entry-correction): the handler is no longer imported; workers start from the lab's own worker entry.)_ Registration awaits `importScriptInWorkers` (resolves after every current worker finished the import), then broadcasts a status message through `getGlobalDispatcher().broadcast` (public). The worker script answers it only after `setProjectionHandler` was really called. Every current worker must answer; a `null`, an empty answer list, or workers recreated during the check fail the attempt.
 3. Attempts are bounded (3 × 15 s), concurrent callers share one registration, a failure is not cached, and every failed attempt (stage, generation, error) stays in `state().workerProjection.attempts`.
 4. Every `workerscreate` increases the worker generation. Workers recreated after registration (with `prewarm()` only possible through `WorkerPool.restart`) make the state `stale`; the lab registers again and reloads its road and city data.
 5. Every map mount and every data load waits for the registration. A failure fails that load with `WorkerProjectionError`; there is no fallback. Each MapLibre load result carries `workerProjection: {verified, generation, workers, recreatedDuringLoad}`.
@@ -221,6 +221,110 @@ Static corrections of the two defects found in B1.5. Nothing was run; the tests 
 - A DevTools connection that closes rejects every pending and later command (`TargetClosedError`) instead of leaving it waiting.
 
 **Not verified:** the real start-up timing of RoadPilot's WebView2 and whether the `appNavigation` stage removes the B1.5 failures. This needs the next runtime run; its diagnostics would now show the failure stage if it happens again.
+
+## B1.5.2 revalidation (stopped)
+
+2026-11-22, HEAD `892e16f`, WebView2 158.0.4370.33, AMD iGPU, evidence in `out/b152-20261122-175040/` (not in Git). **MEASUREMENT.**
+
+- **Test A, lab opening:** PASS, 5 of 5 app starts (8.2–8.8 s each). The page target was already at the dev URL in every start, so the wry race window of defect B did not occur and the B1.5 cause stays unproven.
+- **Test B, worker projection:** FAIL. Release, remount, four reconfigurations and the M3 round trip ran on one worker (generation 1) with no warning and every load verified. After a forced `GlobalDispatcher.workerPool.restart()` with a concurrent reconfiguration, the new worker logged MapLibre's "no projection handler" warning once. The lab detected the recreation and registered again 89 ms later, and its own reload was verified (generation 2), but the geometry MapLibre itself had sent to the new worker in between was tiled without the handler.
+- Tests C–F were not run (stop rule).
+
+## B1.5.3 worker entry correction
+
+Correction of the B1.5.2 Test B failure. Not a runtime validation: B1.5.4 must prove it in RoadPilot's WebView2.
+
+### Root cause
+
+**FACT (MapLibre 6.19.0 source):** `WorkerPool.restart()` terminates the workers, starts new ones and fires `restart`, after which every map reloads its sources into the new workers on its own (`Map._handleWorkersRestarted`). B1.5.1 put the handler into a worker with `importScriptInWorkers`: the dispatcher sends the url as an `IS` message to every new worker, and the worker loads it with an asynchronous `import()` (`_importScript`) while it keeps handling other messages. MapLibre's own reload is not ordered after that import. A tile message handled first finds no handler (`createWorkerCRSHelper`: warning, no CRS helper). The lab cannot hold MapLibre's internal reload back, so no amount of waiting on the main thread (`prewarm()`, verification, data reload) can close this window; those only detect it and repair the lab's own data afterwards.
+
+### Architecture
+
+| Part                                           | Role                                                                                                                                                                                                                                                                         |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/dev/mapLibreLab/scsWorkerEntry.mjs`       | The worker script MapLibre starts (`setWorkerUrl`). Static imports: `scsWorkerProbe.mjs`, then `/node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs`, then `scsProjection.worker.mjs`; its body is the single call `bootstrapScsWorker(self, probe)`                       |
+| `src/dev/mapLibreLab/scsProjection.worker.mjs` | Handler and status answer; no side effect any more. `installScsProjection` is idempotent; `bootstrapScsWorker` closes the worker and throws when it cannot install (never a silent fallback)                                                                                 |
+| `src/dev/mapLibreLab/scsWorkerProbe.mjs`       | First `message` listener of the worker; counts message events before the installation (runtime evidence for the ordering), reported as `messagesBeforeInstall`                                                                                                               |
+| `src/dev/mapLibreLab/workerProjection.ts`      | Sets the entry as MapLibre's worker URL before the first worker starts, then `prewarm()`; secondary verification of every worker of every generation; generation tracking, recreation listener, bounded retried attempts, worker errors; no `importScriptInWorkers` any more |
+| `src/dev/mapLibreLab/main.ts`                  | Binds the port (`setWorkerUrl`, `getWorkerUrl`, `prewarm`, `getGlobalDispatcher().broadcast / on('workerscreate') / on('error')`); data reload after a recreation kept as a safety net                                                                                       |
+
+### MapLibre APIs used
+
+| API                                                                       | Status in 6.19.0 (FACT, `maplibre-gl.d.ts` and source)                                                                                                                                                                             |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setWorkerUrl(url)`, `getWorkerUrl()`                                     | Public, exported. Only set `config.WORKER_URL`. `workerFactory` reads it each time it creates a worker: a same-origin URL not ending in `.cjs` becomes `new Worker(url, {type: 'module'})`, no `blob:`                             |
+| `prewarm()`                                                               | Public. Starts the pool and holds it across map removal                                                                                                                                                                            |
+| `getGlobalDispatcher()` `broadcast`, `on('workerscreate')`, `on('error')` | Public, typed (`GlobalDispatcherEventType`). `error` fires "Worker failed to load" on a worker `error` event                                                                                                                       |
+| `dist/maplibre-gl-worker.mjs` as an importable module                     | **Not a documented API.** The package exports `./dist/*`. The file has no imports, no top-level `await`, exports only `default` (the worker class), and its last statement is `if (isWorker(self)) self.worker = new Worker(self)` |
+| `self.setProjectionHandler`                                               | Documented for scripts in the workers (custom CRS guide); typed `@experimental` on `WorkerGlobalScopeInterface`. **Not exported** by the worker module; set by the worker class constructor                                        |
+| `self.worker.actor.registerMessageHandler`                                | Internal (B1.5.1 justification unchanged; used only for the status answer)                                                                                                                                                         |
+| `GlobalDispatcher.workerPool.restart()`                                   | Internal; used only by the browser check below to force the B1.5.2 failure path, never by the lab                                                                                                                                  |
+
+The pinned worker bundle is held by a unit test to SHA-256 `c8564c4a…3d5b2` (the inspected file): a MapLibre update fails the test until the facts above are inspected again.
+
+### Ordering guarantee
+
+**No message can be handled by a worker before its handler is installed**, for these reasons:
+
+1. **Module evaluation (FACT, ECMAScript):** an entry's static imports are evaluated depth first in order, then its body. Without a top-level `await` in the graph, the whole evaluation is one synchronous job: no event of the worker can be dispatched in it. **Checked by parsing (acorn) the files actually served by the Vite dev server:** the entry, the probe, the projection module, the served MapLibre worker bundle, `/@vite/client` (which Vite injects into the bundle, see below) and its `env.mjs`: zero top-level `await` in all of them.
+2. **MapLibre's actor (FACT, source):** in a worker, `Actor.receive` only queues a message and handles it in a later task (`ThrottledInvoker`: `MessageChannel` and `setTimeout(0)`). Even a message event dispatched right after the actor exists would not be handled in the same task.
+3. **Messages posted before the worker script ran** (MapLibre posts to new workers at once) are not dispatched before the script has been evaluated. This is the browser's behaviour for module workers (HTML "run a worker"); **verified in Chromium 158 by the browser check below**, not proven for other engines.
+
+Every worker started from the entry therefore has the handler in every generation: first pool, `prewarm()`, `WorkerPool.restart`, and a new pool after a release.
+
+**Secondary verification (main thread):** a status answer counts only with `source: 'worker-entry'` and `messagesBeforeInstall: 0`. A worker started from another script answers `null`; a worker whose entry failed closed itself and never answers (the attempt times out, and MapLibre's "Worker failed to load" is recorded in `workerErrors`). Both fail the registration loudly; the B1.5.1 answer format (no `source`) no longer passes.
+
+### Vite dev server findings (MEASUREMENT, Vite 8.3.5)
+
+- A bare `import 'maplibre-gl/dist/maplibre-gl-worker.mjs'` in the entry made Vite pre-bundle the worker at request time (`[optimizer] bundling dependencies...`, then "dependency optimized"): a 2.3 MB re-bundled file instead of the inspected 550 KB one, plus a dependency re-optimisation that can reload the lab page. The entry therefore imports the root-absolute dev-server path, the same URL `maplibre-gl/dist/maplibre-gl-worker.mjs?url` yields (unit test). `optimizeDeps.exclude` was not used: `vite.config.ts` must not name MapLibre (isolation test).
+- Vite serves the package file with one added first line, `import { injectQuery } from "/@vite/client"` (the bundle contains a dynamic `import()`), and an inline source map; the code is otherwise unchanged. This also explains the `[vite] connecting...` lines in the B1.5.2 worker consoles. `/@vite/client` has no top-level `await` (see above).
+- **Production builds: not applicable and NOT TESTED.** The lab is not a build input; the root-absolute `/node_modules/...` import exists only on the dev server. A production integration (not part of B1) would have to bundle the entry (for example Vite `?worker&url` with an ES worker format) and repeat this inspection.
+
+### CSP and offline (FACT unless marked)
+
+- Same-origin module worker started directly from its URL; no `blob:`, no `data:`, no `fetch`, no `eval`. Allowed by `script-src 'self'` (no `worker-src`). Production CSP unchanged; the lab page still carries it verbatim (test).
+- The entry and its imports are same-origin; no external host in any lab or harness source (tests).
+- **MEASUREMENT (headless Edge, below):** 0 CSP violations, 0 requests to another origin, 0 `blob:`/`data:` workers.
+
+### Test coverage
+
+| Level                                 | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tests/scsWorkerEntry.test.ts` (13)   | Import order and a body that is one synchronous call (no `await`, `import()`, `then`, timers); the MapLibre import equals the package's `?url`; the pinned bundle hash and its last statement; **the real MapLibre 6.19.0 worker bundle evaluated through the entry** in a simulated worker scope (jsdom posing as `WorkerGlobalScope`): handler installed once during evaluation, probe count 0, and the first message handled through MapLibre's own `Actor` answers the entry status; install/bootstrap: duplicate install changes nothing, failures close the worker and throw, late install is reported and rejected; `(X, −Z)` and the `/2048` carrier |
+| `tests/workerProjection.test.ts` (17) | Entry URL set before `prewarm()` and before any worker; multiple workers; workers from another script, an unsettable worker URL, a failed entry (timeout + worker error) and a late install all fail loudly; recreation, five repeated generations, late creation, release/remount, reconfiguration, renderer switch, termination during verification, recreation during verification, concurrent initialisation, retry after failure, attempt timeout, answer validation                                                                                                                                                                                    |
+| Unchanged                             | `coordinates.test.ts` (transform and carrier), `isolation.test.ts`, `lifecycle.test.ts`, `validationReport.test.ts` (adds `workerorder.mjs` to the harness file list); acceptance thresholds unchanged                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+### Browser check (synthetic, not B1.5.4)
+
+`tools/maplibre-validation/workerorder.mjs`: headless Microsoft Edge with a throwaway profile against the dev server's lab page (production CSP). It does not start RoadPilot, WebView2, a game or any input simulation. It runs the initial load, release/remount and the M3 round trip, then _n_ cycles of MapLibre's own `WorkerPool.restart()`. In the same synchronous turn it sends a status broadcast, which reaches the new worker before its module script has loaded, and starts a concurrent lab reconfiguration: the B1.5.2 failure path.
+
+**MEASUREMENT, 2026-11-23, Edge `Edg/158.0.4370.33` (the Chromium build of the B1.5.2 WebView2), headless:**
+
+| Run                                      | Result                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| B1.5.3 code, 10 cycles (twice)           | **PASS.** 11 workers, all from `scsWorkerEntry.mjs`. Every early broadcast was answered by the entry status with `messagesBeforeInstall: 0` (73–88 ms after the restart). Generation +1 per cycle, every load verified, no `recreatedDuringLoad`. 0 projection warnings, 0 CSP violations, 0 foreign requests, 0 exceptions |
+| Negative control: B1.5.1 code, 10 cycles | 10 of 10 early broadcasts answered `null`: each new worker handled a message while it had no handler. This is the race window of B1.5.2, reproduced every time. MapLibre's projection warning did **not** appear in this run, so the warning alone is a weak detector; the early status probe is the sensitive check        |
+
+### Verification status
+
+| Statement                                                                                      | Status                                                                                                                  |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Root cause (asynchronous import vs. MapLibre's own reload)                                     | Verified by source inspection; race window reproduced in Chromium (negative control)                                    |
+| `setWorkerUrl` makes every worker generation start from the entry                              | Source inspection; automated tests (fake pool); Chromium (11 of 11 workers)                                             |
+| Handler installed before any message is handled                                                | Source inspection (module semantics, actor queue); real bundle in a simulated scope; Chromium (10 of 10 early messages) |
+| Messages posted before a module worker's script ran are not dispatched before it               | Chromium 158 only                                                                                                       |
+| No CSP violation, offline, no `blob:`                                                          | Source inspection; Chromium under the production CSP                                                                    |
+| RoadPilot's WebView2 runtime (Tauri app), the RTX 3080, real worker termination by the browser | **Still unverified (B1.5.4)**                                                                                           |
+| Production bundling of the entry                                                               | **Not applicable to B1; unverified**                                                                                    |
+
+### Remaining runtime risks
+
+- WebView2 inside RoadPilot could differ from headless Edge of the same build (process model, GPU, start-up), although the worker and module code paths are the same Chromium.
+- The B1.5.2 warning came from one restart; the browser check shows the window closed under the same path, not under every possible pool event (for example a browser-initiated worker kill on return to the foreground, which MapLibre handles through the same `restart`).
+- The internal pieces (`dist/maplibre-gl-worker.mjs` as a module, `self.worker.actor`) can change with any MapLibre release; the pinned hash forces a re-inspection.
+- The Vite dev server's injection of `/@vite/client` into the worker could change with a Vite update (it would need a top-level `await` to matter; the probe would then report it and verification would fail loudly).
+
+**B1 runtime validation is not PASS.** B1.5.4 must repeat B1.5.2 Test B (and continue with C–F) in RoadPilot's WebView2.
 
 ## Open runtime questions
 
