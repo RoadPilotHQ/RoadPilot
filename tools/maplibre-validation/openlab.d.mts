@@ -9,6 +9,7 @@ export declare const DEFAULT_TIMEOUTS: Readonly<{
   navigation: number
   labReady: number
   initialConfig: number
+  appRender: number
   command: number
   poll: number
 }>
@@ -65,7 +66,19 @@ export interface OpenLabOptions {
   timeouts?: Partial<typeof DEFAULT_TIMEOUTS>
   /** B1.5.4E: the committed app page must carry this placeholder marker (else no retry). */
   appPlaceholderMarker?: string
+  /** B1.5.4G: wait for the REAL app page to render, probe it, no marker; excludes the marker. */
+  negativeControl?: boolean
 }
+
+/** B1.5.4G: the app page's rendered state before the lab navigation (negative control). */
+export interface AppRender {
+  rendered: boolean
+  ms: number
+  rootChildren?: number
+  href?: string
+}
+
+export declare const APP_RENDER_EXPRESSION: string
 
 /** B1.5.4E: the outgoing app page right before the lab navigation. */
 export interface AppProbe {
@@ -86,6 +99,7 @@ export interface AttemptFailure {
   /** B1.5.4E: the app page was not the placeholder; never retried. */
   noRetry?: boolean
   appProbe?: AppProbe | null
+  appRender?: AppRender
   diagnosticsFile: string | null
   diagnosticsSaveError?: string
   cleanup: {
@@ -129,6 +143,8 @@ export declare function openLab<App extends LabApp, Page extends LabPage>(
   initial: Record<string, unknown>
   /** B1.5.4E: null unless `appPlaceholderMarker` was given. */
   appProbe: AppProbe | null
+  /** B1.5.4G: null unless `negativeControl` was given. */
+  appRender: AppRender | null
   stages: { stage: string; ms: number }[]
   events: { t: number; event: string; [k: string]: unknown }[]
   attempt: number

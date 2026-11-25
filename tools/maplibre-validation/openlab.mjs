@@ -19,6 +19,12 @@
  *                    reads its marker and its resource list (`appProbe`, returned for report.mjs
  *                    `appPageIsolation`). A missing or different marker fails this stage, and that
  *                    failure is never retried: the dev server would serve the same page again.
+ *                    B1.5.4G (`negativeControl`, negativecontrol.mjs; excludes the marker): the
+ *                    REAL app page is expected. The stage waits until it has rendered
+ *                    (`APP_RENDER_EXPRESSION`: `#root` has element children, so `main.tsx` ran and
+ *                    made its IPC calls), then takes the same probe without requiring a marker,
+ *                    and only then navigates. No render within the deadline fails the stage,
+ *                    never retried (the control would be inconclusive).
  * 4. `navigation`    `Page.navigate` to the lab; the main frame commits the lab URL.
  * 5. `labReady`      the lab page is complete and exposes `window.mapLibreLab`, on the lab URL.
  * 6. `initialConfig` the page's own first configuration finished (result or error).
@@ -52,6 +58,12 @@ export const APP_PROBE_EXPRESSION = `(() => {
   }
 })()`
 
+/** B1.5.4G (negative control): has the RoadPilot app page rendered (React root populated)? */
+export const APP_RENDER_EXPRESSION = `(() => {
+  const r = document.getElementById('root')
+  return { href: location.href, ready: document.readyState, rootChildren: r ? r.childElementCount : null }
+})()`
+
 export const STAGES = Object.freeze([
   'startup',
   'target',
@@ -67,6 +79,8 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
   navigation: 20_000,
   labReady: 30_000,
   initialConfig: 80_000,
+  /** B1.5.4G (negative control): app page committed until its React root has children. */
+  appRender: 30_000,
   /** One DevTools command (frame tree, evaluate, screenshot) during the stages and the capture. */
   command: 5_000,
   /** Poll interval of every stage. */
@@ -166,6 +180,11 @@ async function waitFor(stage, timeoutMs, check, deps, poll) {
 export async function openLab(deps, options) {
   const timeouts = { ...DEFAULT_TIMEOUTS, ...(options.timeouts ?? {}) }
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS
+  // B1.5.4G: refused before anything starts.
+  if (options.negativeControl === true && options.appPlaceholderMarker !== undefined)
+    throw new Error('openLab: negativeControl and appPlaceholderMarker exclude each other')
+  if (options.negativeControl === true && attempts !== 1)
+    throw new Error('openLab: a negative control runs exactly one attempt')
   const failures = []
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const r = await openOnce(deps, options, timeouts, attempt)
@@ -292,7 +311,40 @@ async function openOnce(deps, options, timeouts, attempt) {
     )
     mark('app-navigation-committed', { url: appUrl })
     let appProbe = null
-    if (options.appPlaceholderMarker !== undefined) {
+    let appRender = null
+    if (options.negativeControl === true) {
+      const r0 = deps.now()
+      try {
+        const r = await waitFor(
+          'appNavigation',
+          t.appRender,
+          async () => {
+            const s = await cmd('Runtime.evaluate', {
+              expression: APP_RENDER_EXPRESSION,
+              returnByValue: true,
+            })
+            const v = s?.result?.value
+            return v && v.rootChildren > 0 ? v : undefined
+          },
+          deps,
+          t.poll,
+        )
+        appRender = {
+          rendered: true,
+          ms: deps.now() - r0,
+          rootChildren: r.rootChildren,
+          href: r.href,
+        }
+      } catch (e) {
+        throw new StageError(
+          'appNavigation',
+          `negative control: the app page did not render (${errorText(e)})`,
+          { noRetry: true, appRender: { rendered: false, ms: deps.now() - r0 } },
+        )
+      }
+      mark('app-rendered', { ms: appRender.ms, rootChildren: appRender.rootChildren })
+    }
+    if (options.appPlaceholderMarker !== undefined || options.negativeControl === true) {
       appProbe = await waitFor(
         'appNavigation',
         t.appNavigation,
@@ -312,7 +364,10 @@ async function openOnce(deps, options, timeouts, attempt) {
         marker: appProbe.marker,
         resources: Array.isArray(appProbe.resources) ? appProbe.resources.length : null,
       })
-      if (appProbe.marker !== options.appPlaceholderMarker)
+      if (
+        options.appPlaceholderMarker !== undefined &&
+        appProbe.marker !== options.appPlaceholderMarker
+      )
         throw new StageError(
           'appNavigation',
           `the app page is not the harness placeholder (marker ${JSON.stringify(appProbe.marker ?? null)}, expected ${JSON.stringify(options.appPlaceholderMarker)})`,
@@ -370,7 +425,17 @@ async function openOnce(deps, options, timeouts, attempt) {
     enter('done')
     return {
       ok: true,
-      value: { app, page, inst, navT, initial, appProbe, stages: log.stages, events: log.events },
+      value: {
+        app,
+        page,
+        inst,
+        navT,
+        initial,
+        appProbe,
+        appRender,
+        stages: log.stages,
+        events: log.events,
+      },
     }
   } catch (error) {
     // The original failure, kept as it is; everything below only adds to the diagnostics.
@@ -386,6 +451,7 @@ async function openOnce(deps, options, timeouts, attempt) {
     if (error instanceof StageError && error.detail?.noRetry === true) {
       failure.noRetry = true
       failure.appProbe = error.detail.appProbe ?? null
+      if (error.detail.appRender !== undefined) failure.appRender = error.detail.appRender
     }
     if (failure.refusal) {
       failure.cleanup = { clean: true, note: 'nothing was started' }
@@ -420,6 +486,7 @@ async function captureDiagnostics(deps, options, t, { failure, log, app, page, t
   const data = {
     failure: { attempt: failure.attempt, stage: failure.stage, error: failure.error },
     appProbe: failure.appProbe ?? null,
+    appRender: failure.appRender ?? null,
     labUrl: options.labUrl,
     devOrigin: options.devOrigin,
     capturedAt: deps.now(),

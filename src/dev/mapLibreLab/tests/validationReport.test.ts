@@ -554,6 +554,8 @@ describe('harness sources', () => {
       'openlab.d.mts',
       'placeholder.mjs',
       'placeholder.d.mts',
+      'negativecontrol.mjs',
+      'negativecontrol.d.mts',
       'cdp.mjs',
       'workerorder.mjs',
       'sampler.ps1',

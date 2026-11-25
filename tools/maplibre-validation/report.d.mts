@@ -59,12 +59,21 @@ export interface AppPageIsolationEvidence {
   console: { type?: string; text?: string; session?: string }[]
 }
 export declare function evaluateAppPageIsolation(evidence: unknown): Evaluation
+/** B1.5.4G */
+export declare const CONTAMINATION_REASONS: readonly string[]
+export declare function evaluateNegativeControl(result: unknown): Evaluation & {
+  verdict: 'INVALID'
+  control: true
+  outcome: 'detected' | 'inconclusive' | 'detector_failed'
+}
 export declare function buildReport(input?: {
   functional?: unknown
   perf?: unknown
   cycles?: unknown
   lifecycle?: unknown
+  negativeControl?: unknown
 }): {
+  control?: true
   thresholds: typeof THRESHOLDS
   accuracyTolerancePx: number
   minRuns: number

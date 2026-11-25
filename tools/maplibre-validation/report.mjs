@@ -14,6 +14,7 @@
  * passes and at least `MIN_RUNS` runs are valid; any invalid run makes the criterion INVALID.
  */
 
+import { CONTROL_KIND } from './negativecontrol.mjs'
 import { PLACEHOLDER_MARKER } from './placeholder.mjs'
 
 export const VERDICTS = Object.freeze(['PASS', 'FAIL', 'INVALID', 'NOT_TESTED'])
@@ -544,6 +545,58 @@ function isolationOfRun(run) {
   return verdict('INVALID', 'app_page_not_isolated', { detail: iso.reason, reasons: iso.reasons })
 }
 
+/** B1.5.4G: `appPageIsolation` reasons that are contamination (not missing evidence or marker). */
+export const CONTAMINATION_REASONS = Object.freeze([
+  'ipc_requests',
+  'app_resources_requested',
+  'ipc_in_app_page_resources',
+  'app_resources_in_app_page',
+  'callback_warnings',
+])
+
+/**
+ * B1.5.4G: the result of a negative-control session (run.mjs `control --negative-control`).
+ *
+ * A control is never a measurement, so its verdict is always INVALID. What it shows is in
+ * `outcome`:
+ * - `detected`: the app page demonstrably rendered (`appRender.rendered`, so `main.tsx` ran) AND
+ *   `appPageIsolation` is INVALID with at least one contamination reason. Only this outcome shows
+ *   that the detector works at runtime.
+ * - `inconclusive`: anything else: no control record, the placeholder was active, the lab never
+ *   opened, the render was not confirmed, the isolation evidence is incomplete, or no contamination
+ *   was found. A clean control proves nothing; the test stops there.
+ * - `detector_failed`: the render was confirmed but `appPageIsolation` is PASS.
+ */
+export function evaluateNegativeControl(result) {
+  const out = (reason, outcome, extra = {}) => ({
+    verdict: 'INVALID',
+    reason,
+    control: true,
+    outcome,
+    ...extra,
+  })
+  if (!isObj(result) || !isObj(result.control) || result.control.kind !== CONTROL_KIND)
+    return out('no_control_record', 'inconclusive')
+  if (result.control.placeholder !== false) return out('control_was_isolated', 'inconclusive')
+  if (!Array.isArray(result.failedSteps)) return out('incomplete_control_record', 'inconclusive')
+  const openFail = result.failedSteps.find((s) => s?.name === 'openLab')
+  if (openFail)
+    return out('control_lab_not_opened', 'inconclusive', {
+      detail: { stage: openFail.stage ?? null, error: openFail.error ?? null },
+    })
+  if (!isObj(result.appRender) || result.appRender.rendered !== true)
+    return out('app_render_not_confirmed', 'inconclusive')
+  const isolation = evaluateAppPageIsolation(result.appPageIsolation)
+  if (isolation.verdict === 'PASS')
+    return out('detector_missed_contamination', 'detector_failed', { isolation })
+  if (!Array.isArray(isolation.reasons))
+    return out('control_evidence_incomplete', 'inconclusive', { isolation })
+  const contamination = isolation.reasons.filter((r) => CONTAMINATION_REASONS.includes(r))
+  if (contamination.length === 0)
+    return out('contamination_not_reproduced', 'inconclusive', { isolation })
+  return out('contamination_detected', 'detected', { isolation, contamination })
+}
+
 /** Lab-opening records of the runs in one report (older results without them are skipped). */
 function startupRecords(f, functional, perfRuns, cycleList) {
   const out = []
@@ -564,7 +617,7 @@ function startupRecords(f, functional, perfRuns, cycleList) {
 // ---------------------------------------------------------------- whole report
 
 /** The report of one or more harness outputs; every criterion separately, plus an overall verdict. */
-export function buildReport({ functional, perf, cycles, lifecycle } = {}) {
+export function buildReport({ functional, perf, cycles, lifecycle, negativeControl } = {}) {
   const f = isObj(functional) ? functional : {}
   const steps = isObj(f.steps) ? f.steps : {}
   const criteria = {
@@ -631,6 +684,19 @@ export function buildReport({ functional, perf, cycles, lifecycle } = {}) {
     criteria.appPageIsolation = verdict(combine(isoRuns.map((r) => r.verdict)), 'per_run', {
       perRun: isoRuns,
     })
+  // B1.5.4G: a negative control is judged only as a control (always INVALID as a measurement).
+  if (negativeControl !== undefined) {
+    criteria.negativeControl = evaluateNegativeControl(negativeControl)
+    criteria.appPageIsolation ??= evaluateAppPageIsolation(
+      isObj(negativeControl) ? negativeControl.appPageIsolation : undefined,
+    )
+  }
+  // Any measurement result that carries a control marker can never count.
+  const controlled = [...(functional ? [f] : []), ...perfRuns, ...cycleList].filter(
+    (r) => isObj(r) && r.control !== undefined,
+  )
+  if (controlled.length)
+    criteria.controlSession = verdict('INVALID', 'negative_control_result_in_measurement')
   // One session record (a run) or several (`report` over a folder): one criterion per session.
   if (Array.isArray(lifecycle))
     for (const [i, rec] of lifecycle.entries())
@@ -643,6 +709,8 @@ export function buildReport({ functional, perf, cycles, lifecycle } = {}) {
     minRuns: MIN_RUNS,
     memoryRule: MEMORY,
     criteria,
+    // B1.5.4G: marks a report that contains a negative control (never a validation result).
+    ...(negativeControl !== undefined || controlled.length ? { control: true } : {}),
     overall: combine(Object.values(criteria).map((c) => c.verdict)),
   }
 }

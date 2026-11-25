@@ -21,6 +21,12 @@
  * --busy=<process,process> (extra processes that block a start), --attempts=1 (app starts per
  * lab opening, see openlab.mjs; more than 1 makes the `startup` criterion INVALID on a retry).
  *
+ * B1.5.4G: `control --negative-control` (negativecontrol.mjs) runs ONE negative-control session:
+ * no placeholder, the real app page renders before the lab navigation, evidence only, never a
+ * measurement. Both tokens are required; any other mode with the flag, and every measurement
+ * option with it, is refused before anything starts (exit code 2). A control whose outcome is not
+ * `detected` ends with exit code 4.
+ *
  * B1.5.1: results never overwrite earlier results. Runtime modes write into a session folder and
  * refuse to start when a result file they would write already exists there; every failed lab
  * opening saves its own `openlab-failure-*` diagnostics.
@@ -51,6 +57,13 @@ import { startDevServer, stopDevServer } from './devserver.mjs'
 import { nodeDevServerDeps } from './devserver-node.mjs'
 import { createScreenshotRecorder } from './evidence.mjs'
 import { runSession } from './lifecycle.mjs'
+import {
+  CONTROL_HOLD_MS,
+  CONTROL_KIND,
+  CONTROL_MODE,
+  controlSessionName,
+  validateRunArgs,
+} from './negativecontrol.mjs'
 import { openLab as openLabStaged } from './openlab.mjs'
 import { PLACEHOLDER_MARKER } from './placeholder.mjs'
 import { buildReport, MIN_RUNS, THRESHOLDS, worstProbe } from './report.mjs'
@@ -63,7 +76,13 @@ const opt = (name, fallback) =>
 const flag = (name) => args.includes(`--${name}`)
 
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
-const SESSION = opt('session', mode === 'report' ? null : `run-${stamp}`)
+// B1.5.4G: checked before anything else; a refused command line starts nothing.
+const ARGS_CHECK = validateRunArgs(mode, args)
+const NEGATIVE_CONTROL = ARGS_CHECK.ok && ARGS_CHECK.negativeControl
+const SESSION = opt(
+  'session',
+  mode === 'report' ? null : NEGATIVE_CONTROL ? controlSessionName(stamp) : `run-${stamp}`,
+)
 if (SESSION !== null && !/^[\w.-]+$/.test(SESSION)) throw new Error(`invalid --session ${SESSION}`)
 const OUT = resolve(opt('out', SESSION ? join(HERE, 'out', SESSION) : join(HERE, 'out')))
 const ATTEMPTS = Math.max(1, Number(opt('attempts', '1')) || 1)
@@ -214,7 +233,10 @@ function openLab(dpr = 1, label = 'lab') {
       label: `${label}-${TAG}`,
       attempts: ATTEMPTS,
       // B1.5.4E: the session's dev server serves the placeholder at `/` (devserver.mjs).
-      appPlaceholderMarker: PLACEHOLDER_MARKER,
+      // B1.5.4G: a negative control has no placeholder; it waits for the real app page instead.
+      ...(NEGATIVE_CONTROL
+        ? { negativeControl: true }
+        : { appPlaceholderMarker: PLACEHOLDER_MARKER }),
     },
   )
 }
@@ -450,6 +472,66 @@ async function functional() {
   return { functional: res }
 }
 
+// ---------------------------------------------------------------- negative control (B1.5.4G)
+
+/**
+ * One negative-control session (negativecontrol.mjs): opens the lab after the REAL app page has
+ * rendered, holds it for CONTROL_HOLD_MS and records the isolation evidence. Runs no test step and
+ * takes no screenshot; report.mjs judges the result only with `evaluateNegativeControl`.
+ */
+async function negativeControl() {
+  const file = `${CONTROL_KIND}-${TAG}.json`
+  refuseExisting([file])
+  const res = {
+    tag: TAG,
+    control: {
+      kind: CONTROL_KIND,
+      placeholder: false,
+      waitForAppRender: true,
+      holdMs: CONTROL_HOLD_MS,
+      note: 'Deliberately NOT isolated. Never a valid measurement.',
+    },
+    env: {},
+    failedSteps: [],
+  }
+  let opened
+  try {
+    opened = await openLab(1, CONTROL_KIND)
+  } catch (e) {
+    res.failedSteps.push({ name: 'openLab', ...openLabFailure(e) })
+    res.appRender = e?.attempts?.[0]?.appRender ?? null
+    res.appPageIsolation = null
+    save(file, res)
+    return { negativeControl: res }
+  }
+  const { app, page, inst, navT } = opened
+  try {
+    res.env.version = app.version
+    res.env.openLab = {
+      attempt: opened.attempt,
+      failedAttempts: opened.failedAttempts,
+      stages: opened.stages,
+    }
+    res.appRender = opened.appRender
+    res.env.gpu = await lab(page, 'L.gpuInfo()').catch((e) => ({ error: errorText(e) }))
+    // Several `control:status` emissions (every 200 ms) reach the lab in this time.
+    await sleep(CONTROL_HOLD_MS)
+    res.finalState = await lab(page, 'L.state()').catch((e) => {
+      res.failedSteps.push({ name: 'finalState', error: errorText(e) })
+      return null
+    })
+  } finally {
+    res.appPageIsolation = isolationInput(opened)
+    res.network = networkInput(inst, navT, res.finalState ?? null)
+    res.console = inst.log.console
+    res.exceptions = inst.log.exceptions
+    res.workers = inst.log.workers
+    res.close = await closeApp(app)
+    save(file, res)
+  }
+  return { negativeControl: res }
+}
+
 // ---------------------------------------------------------------- perf
 
 const CONFIGS = {
@@ -629,7 +711,10 @@ function report() {
       return rest
     }
     const lifecycles = files.filter((f) => f.startsWith('session-lifecycle-')).map(read)
+    const controlFile = files.find((f) => f === `${CONTROL_KIND}-${tag}.json`)
     const rep = buildReport({
+      // B1.5.4G: a negative control is judged only as a control.
+      negativeControl: controlFile ? read(controlFile) : undefined,
       functional: functionalFile ? read(functionalFile) : undefined,
       perf: files.filter((f) => f.startsWith('perf-')).map((f) => strip(read(f))),
       cycles: files.filter((f) => f.startsWith('cycles-')).map((f) => strip(read(f))),
@@ -658,6 +743,8 @@ function plan() {
 const RUNTIME = {
   functional: { run: functional, files: () => [`functional-${TAG}.json`] },
   perf: { run: perf, files: perfFiles },
+  // B1.5.4G: reachable only with --negative-control (validateRunArgs).
+  [CONTROL_MODE]: { run: negativeControl, files: () => [`${CONTROL_KIND}-${TAG}.json`] },
   cycles: { run: cycles, files: cyclesFiles },
 }
 
@@ -667,8 +754,14 @@ const RUNTIME = {
  * any failure diagnostics go into the same session folder.
  */
 async function session(name) {
-  const label = `${name}-${TAG}`
+  // B1.5.4G: a control's files are named `negative-control-*`, never like a measurement.
+  const label = `${name === CONTROL_MODE ? CONTROL_KIND : name}-${TAG}`
   const logName = `vite-dev-${label}.log`
+  // B1.5.4G: a control gets its own, new evidence folder; it never joins a measurement folder.
+  if (NEGATIVE_CONTROL && existsSync(OUT) && readdirSync(OUT).length)
+    throw new Error(
+      `negative control needs a new, empty session folder; ${OUT} is not empty. Nothing was started.`,
+    )
   refuseExisting([...RUNTIME[name].files(), `session-lifecycle-${label}.json`, logName])
   mkdirSync(OUT, { recursive: true })
   const saveJson = (n, data) => {
@@ -690,7 +783,8 @@ async function session(name) {
     requiredModules: [WORKER_ENTRY],
     label,
     // B1.5.4E: after readiness, `/` becomes the placeholder before RoadPilot starts.
-    placeholder: true,
+    // B1.5.4G: except in a negative control, which needs the real app page.
+    placeholder: !NEGATIVE_CONTROL,
   }
   const rec = await runSession(
     {
@@ -719,7 +813,20 @@ async function session(name) {
     console.log(
       `${s.verdict.padEnd(10)} session:${s.stage}${s.error ? ` (${s.error})` : s.reason ? ` (${s.reason})` : ''}`,
     )
-  printReport(buildReport({ ...(rec.bodyResult ?? {}), lifecycle: rec }))
+  const rep = buildReport({ ...(rec.bodyResult ?? {}), lifecycle: rec })
+  printReport(rep)
+  if (NEGATIVE_CONTROL) {
+    // A control whose body never ran (dev server failed) has no result: inconclusive as well.
+    const nc = rep.criteria.negativeControl ?? {
+      outcome: 'inconclusive',
+      reason: 'no_control_record',
+    }
+    console.log(`NEGATIVE CONTROL outcome: ${nc.outcome} (${nc.reason}). Not a measurement.`)
+    if (nc.outcome !== 'detected') {
+      console.log('NEGATIVE CONTROL NOT DETECTED: stop; this proves nothing about the detector.')
+      process.exitCode = 4
+    }
+  }
   if (rec.verdict === 'FAIL') {
     console.log(
       `CLEANUP FAIL: ${JSON.stringify(rec.cleanup)}. Nothing was force-terminated; check the processes above before the next session.`,
@@ -728,13 +835,17 @@ async function session(name) {
   }
 }
 
-if (mode === 'report') report()
+if (!ARGS_CHECK.ok) {
+  // B1.5.4G: refused before any file, process or server is touched.
+  console.log(`REFUSED: ${ARGS_CHECK.error}. Nothing was started.`)
+  process.exitCode = 2
+} else if (mode === 'report') report()
 else if (RUNTIME[mode]) {
   if (CONFIRMED) await session(mode)
   else plan()
 } else {
   console.log(
-    'usage: node tools/maplibre-validation/run.mjs <functional|perf|cycles|report> [--confirm-runtime] [--out=dir] [--nv] [--only=urban|stress] [--kinds=a,b] [--runs=3] [--kind=k] [--busy=a,b] [--tag=amd|nv]',
+    'usage: node tools/maplibre-validation/run.mjs <functional|perf|cycles|report> [--confirm-runtime] [--out=dir] [--nv] [--only=urban|stress] [--kinds=a,b] [--runs=3] [--kind=k] [--busy=a,b] [--tag=amd|nv]\n       node tools/maplibre-validation/run.mjs control --negative-control [--confirm-runtime] [--session=name] [--nv]',
   )
   process.exitCode = 1
 }

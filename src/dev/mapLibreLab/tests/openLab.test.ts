@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   APP_PROBE_EXPRESSION,
+  APP_RENDER_EXPRESSION,
   OpenLabError,
   openLab,
   STAGES,
@@ -54,6 +55,8 @@ interface Scenario {
   appMarker: string | null
   /** B1.5.4E: the app page's Resource Timing entries. */
   appResources: string[]
+  /** B1.5.4G: ms after wry's app navigation until the React root has children; Infinity: never. */
+  appRenderMs: number
 }
 
 const base: Scenario = {
@@ -72,6 +75,7 @@ const base: Scenario = {
   hang: [],
   appMarker: null,
   appResources: [],
+  appRenderMs: 400,
 }
 
 class World {
@@ -82,6 +86,8 @@ class World {
   navigateAt: number[] = []
   /** B1.5.4E: times of the outgoing-page probe. */
   probes: number[] = []
+  /** B1.5.4G: times of the rendered-state checks. */
+  renderChecks: number[] = []
   appNavCommittedAt: number[] = []
   private launchedAt = 0
   private labNavAt = Infinity
@@ -203,6 +209,15 @@ class World {
         this.labNavAt = Date.now()
         return { loaderId: 'L1' }
       case 'Runtime.evaluate': {
+        if (params.expression === APP_RENDER_EXPRESSION) {
+          this.renderChecks.push(this.since())
+          const rendered = this.since() >= this.s.appNavMs + this.s.appRenderMs
+          return {
+            result: {
+              value: { href: this.url(), ready: 'complete', rootChildren: rendered ? 1 : 0 },
+            },
+          }
+        }
         if (params.expression === APP_PROBE_EXPRESSION) {
           this.probes.push(this.since())
           return {
@@ -504,5 +519,81 @@ describe('openLab with the app-page placeholder (B1.5.4E)', () => {
     const { value } = await run(w)
     expect(value!.appProbe).toBeNull()
     expect(w.probes).toHaveLength(0)
+  })
+})
+
+describe('openLab negative control (B1.5.4G)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  const control = { negativeControl: true }
+  const appResources = [
+    `${DEV}/src/app/main.tsx`,
+    'http://ipc.localhost/telemetry_snapshot',
+    'http://ipc.localhost/control_status',
+  ]
+
+  it('waits until the real app page has rendered, then probes it without a marker, then navigates', async () => {
+    const w = new World({ ...base, appRenderMs: 2_500, appResources })
+    const { value, error } = await run(w, control)
+    expect(error).toBeNull()
+    expect(value!.appRender).toMatchObject({ rendered: true, rootChildren: 1 })
+    expect(value!.appRender!.ms).toBeGreaterThanOrEqual(2_000)
+    // The probe is kept although there is no placeholder marker.
+    expect(value!.appProbe).toMatchObject({ marker: null, resources: appResources })
+    expect(w.navigateAt).toHaveLength(1)
+    expect(w.navigateAt[0]).toBeGreaterThanOrEqual(base.appNavMs + 2_500)
+    expect(w.probes[0]).toBeGreaterThanOrEqual(base.appNavMs + 2_500)
+    const events = value!.events.map((e) => e.event)
+    expect(events.indexOf('app-rendered')).toBeGreaterThan(
+      events.indexOf('app-navigation-committed'),
+    )
+    expect(events.indexOf('app-probe')).toBeGreaterThan(events.indexOf('app-rendered'))
+    expect(events.indexOf('navigate-sent')).toBeGreaterThan(events.indexOf('app-probe'))
+    expect(value!.stages.map((s) => s.stage)).toEqual(STAGES)
+  })
+
+  it('a page that never renders fails closed at appNavigation: diagnostics, cleanup, no retry, no navigation', async () => {
+    const w = new World({ ...base, appRenderMs: Infinity })
+    const { value, error } = await run(w, control)
+    expect(value).toBeNull()
+    const e = error as OpenLabError
+    expect(e.stage).toBe('appNavigation')
+    expect(e.attempts).toHaveLength(1)
+    expect(e.attempts[0]).toMatchObject({
+      noRetry: true,
+      appRender: { rendered: false },
+      cleanup: { clean: true },
+    })
+    expect(e.attempts[0]!.error).toMatch(/negative control: the app page did not render/)
+    expect(w.launches).toBe(1)
+    expect(w.navigateAt).toHaveLength(0)
+    expect(w.probes).toHaveLength(0)
+    expect(w.saved[0]!.data).toMatchObject({ appRender: { rendered: false } })
+  })
+
+  it('is refused before launch together with a placeholder marker or more than one attempt', async () => {
+    for (const extra of [
+      { ...control, appPlaceholderMarker: PLACEHOLDER_MARKER },
+      { ...control, attempts: 2 },
+    ]) {
+      const w = new World(base)
+      const { error } = await run(w, extra)
+      expect(String(error)).toMatch(/exclude each other|exactly one attempt/)
+      expect(w.launches).toBe(0)
+    }
+  })
+
+  it('default runs never wait for the app page to render', async () => {
+    const plain = new World(base)
+    await run(plain)
+    expect(plain.renderChecks).toHaveLength(0)
+    const isolated = new World({ ...base, appMarker: PLACEHOLDER_MARKER })
+    const { value } = await run(isolated, { appPlaceholderMarker: PLACEHOLDER_MARKER })
+    expect(isolated.renderChecks).toHaveLength(0)
+    expect(value!.appRender).toBeNull()
   })
 })

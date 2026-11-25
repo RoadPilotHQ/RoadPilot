@@ -7,28 +7,31 @@ How the runtime criteria of the MapLibre prototype ([maplibre-prototype.md](mapl
 > **B1.5.4B (harness reliability):** the three harness defects of B1.5.4 / B1.5.4A (screenshot name collision, Vite cold start, Vite shutdown) are corrected and covered by automated tests, see [B1.5.4B harness reliability correction](#b154b-harness-reliability-correction). The corrected harness has **not** run against RoadPilot's WebView2 yet; a later runtime phase must validate it.
 >
 > **B1.5.4E (app-page isolation):** the harness-owned dev server serves an empty, marked placeholder at `/` once readiness has passed, so RoadPilot's app page no longer loads before the lab, and `report.mjs` judges every run with `appPageIsolation`. See [B1.5.4E app-page isolation](#b154e-app-page-isolation). Covered by automated tests only; it has not run in WebView2.
+>
+> **B1.5.4G (negative control):** `run.mjs control --negative-control` reproduces the app-page race on purpose so that a runtime test can show the detector works; it is never a measurement. See [B1.5.4G negative-control mode](#b154g-negative-control-mode). It has not run in WebView2.
 
 ## Location
 
 `tools/maplibre-validation/` in this repository:
 
-| File                 | Role                                                                                                                        |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `run.mjs`            | Driver. Collects data only; every verdict comes from `report.mjs`                                                           |
-| `report.mjs`         | Pure evaluation: thresholds and verdict rules (no I/O). Unit-tested in `src/dev/mapLibreLab/tests/validationReport.test.ts` |
-| `report.d.mts`       | Types of `report.mjs` for the tests                                                                                         |
-| `openlab.mjs`        | B1.5.1: staged, bounded lab opening with failure diagnostics and safe retry. Unit-tested in `tests/openLab.test.ts`         |
-| `openlab.d.mts`      | Types of `openlab.mjs` for the tests                                                                                        |
-| `cdp.mjs`            | Starts and closes RoadPilot's debug build, DevTools connection, request / console / worker instrumentation, heaps           |
-| `lifecycle.mjs`      | B1.5.4B: one session, preflight to cleanup (`tests/sessionLifecycle.test.ts`)                                               |
-| `devserver.mjs`      | B1.5.4B: the session's own Vite dev server: readiness stages, ownership, graceful stop (`tests/devServer.test.ts`)          |
-| `devserver-node.mjs` | B1.5.4B: its real process, HTTP, port-owner and process-tree access, by PID only (`tests/devServerProcess.test.ts`)         |
-| `viteserver.mjs`     | B1.5.4B: the forked dev server (Vite JS API, `vite.config.ts`), IPC `listening` / `shutdown` / `closed`                     |
-| `evidence.mjs`       | B1.5.4B: screenshot recorder, unique deterministic names, never overwrites (`tests/screenshotEvidence.test.ts`)             |
-| `placeholder.mjs`    | B1.5.4E: the app-page placeholder switch of the harness-owned dev server (`tests/placeholder.test.ts`)                      |
-| `*.d.mts`            | Types of the modules above for the tests                                                                                    |
-| `sampler.ps1`        | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
-| `out/`               | Results (ignored by Git). B1.5 evidence in the root; every later run in its own session folder `out/<session>/`             |
+| File                  | Role                                                                                                                        |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `run.mjs`             | Driver. Collects data only; every verdict comes from `report.mjs`                                                           |
+| `report.mjs`          | Pure evaluation: thresholds and verdict rules (no I/O). Unit-tested in `src/dev/mapLibreLab/tests/validationReport.test.ts` |
+| `report.d.mts`        | Types of `report.mjs` for the tests                                                                                         |
+| `openlab.mjs`         | B1.5.1: staged, bounded lab opening with failure diagnostics and safe retry. Unit-tested in `tests/openLab.test.ts`         |
+| `openlab.d.mts`       | Types of `openlab.mjs` for the tests                                                                                        |
+| `cdp.mjs`             | Starts and closes RoadPilot's debug build, DevTools connection, request / console / worker instrumentation, heaps           |
+| `lifecycle.mjs`       | B1.5.4B: one session, preflight to cleanup (`tests/sessionLifecycle.test.ts`)                                               |
+| `devserver.mjs`       | B1.5.4B: the session's own Vite dev server: readiness stages, ownership, graceful stop (`tests/devServer.test.ts`)          |
+| `devserver-node.mjs`  | B1.5.4B: its real process, HTTP, port-owner and process-tree access, by PID only (`tests/devServerProcess.test.ts`)         |
+| `viteserver.mjs`      | B1.5.4B: the forked dev server (Vite JS API, `vite.config.ts`), IPC `listening` / `shutdown` / `closed`                     |
+| `evidence.mjs`        | B1.5.4B: screenshot recorder, unique deterministic names, never overwrites (`tests/screenshotEvidence.test.ts`)             |
+| `placeholder.mjs`     | B1.5.4E: the app-page placeholder switch of the harness-owned dev server (`tests/placeholder.test.ts`)                      |
+| `negativecontrol.mjs` | B1.5.4G: the explicit negative-control mode: command-line checks and names (`tests/negativeControl.test.ts`)                |
+| `*.d.mts`             | Types of the modules above for the tests                                                                                    |
+| `sampler.ps1`         | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
+| `out/`                | Results (ignored by Git). B1.5 evidence in the root; every later run in its own session folder `out/<session>/`             |
 
 All paths derive from the repository. The app identifier and the dev-server URL are read from `src-tauri/tauri.conf.json`.
 
@@ -473,6 +476,38 @@ Harness only. RoadPilot's application code, its Tauri configuration, the product
 - Not run against RoadPilot's WebView2. A runtime phase must show that the probe finds the marker, that no IPC request or callback warning appears over many starts, and (as a negative control) that the detector flags the race when the placeholder is off.
 - Tauri's initialization scripts still run in the placeholder document. In B1.5.4C they made no IPC call on their own (lab pages 1–4: none).
 - `/src/app/` and `/src/backend/` as app-only paths depend on the lab's imports. A lab import from those folders would make every run INVALID, which is loud rather than silent.
+
+## B1.5.4G negative-control mode
+
+Harness only. This mode lets a separately authorized runtime test reproduce the app-page race on purpose and show that `appPageIsolation` classifies it as INVALID. The race reproduced in only 1 of 5 normal starts (B1.5.4C), so one normal run could not prove the detector.
+
+```
+node tools/maplibre-validation/run.mjs control --negative-control --confirm-runtime --session=<new-name>
+```
+
+- **Command line** (`negativecontrol.mjs` `validateRunArgs`):
+  - Both tokens are required: mode `control` and the flag `--negative-control`.
+  - Refused, with exit code 2, before any file, process or server is touched:
+    - the flag with any other mode (`functional`, which includes labels; `perf`; `cycles`, which is memory; `report`);
+    - mode `control` without the flag;
+    - the flag with `--kinds`, `--only`, `--runs`, `--kind`, `--out`, or with `--attempts` other than 1.
+  - The session folder defaults to `out/negative-control-<timestamp>/`. A folder that is not empty is refused.
+- **Session:** the normal lifecycle (preflight, the harness's own dev server with every readiness stage, body, app closed, graceful stop), with two differences:
+  1. the dev server does **not** switch to the placeholder (`placeholder: !NEGATIVE_CONTROL`);
+  2. `openlab.mjs` runs with `negativeControl` instead of `appPlaceholderMarker`. It waits until the real app page has rendered (`APP_RENDER_EXPRESSION`: `#root` has element children, so `main.tsx` ran and made its IPC calls), takes the same outgoing-page probe without requiring a marker, and only then navigates. If the page doesn't render within 30 s, `appNavigation` fails with diagnostics and is never retried.
+- **Body:** it opens the lab, records the GPU, holds the lab for 2 s (about ten `control:status` emissions), reads `L.state()` and closes RoadPilot. There is no functional, label, accuracy, perf, memory or cycles step, and no screenshot.
+- **Evidence:** the same `appPageIsolation` evidence as every run (probe, every request, every console entry), plus `appRender`, `network`, `console`, `exceptions` and `workers`.
+- **Files:** the result goes to `negative-control-<tag>.json` with `control: { kind: 'negative-control', placeholder: false, waitForAppRender: true, holdMs }`. The session record is `session-lifecycle-negative-control-<tag>.json` and the server log `vite-dev-negative-control-<tag>.log`.
+- **Evaluation** (`report.mjs` `evaluateNegativeControl`): the verdict is always INVALID (`control: true`), because a control is never a measurement. Its `outcome` is:
+  - `detected` only when `appRender.rendered` is true **and** `appPageIsolation` is INVALID with at least one contamination reason (`CONTAMINATION_REASONS`: IPC requests, app resources requested, IPC or app resources in the outgoing page, callback warnings). A missing marker alone is not contamination.
+  - `inconclusive` for everything else: no or incomplete control record, placeholder active, lab not opened, render not confirmed, isolation evidence missing or incomplete, contamination not reproduced. A clean control proves nothing.
+  - `detector_failed` if the render was confirmed but isolation is PASS.
+  - `run.mjs` prints the outcome and ends with exit code 4 unless it is `detected`.
+- **Report:** a report with a control carries `control: true`, the `negativeControl` criterion and `appPageIsolation`, and its overall verdict is INVALID. A result that carries a `control` field but is passed as a functional, perf or cycles measurement adds `controlSession` INVALID.
+- **Unchanged:** default runs (placeholder and marker check), `appPageIsolation`, `network` and every threshold.
+- **Tests:**
+  - `negativeControl.test.ts`: command-line acceptance and refusals; detected, inconclusive and INVALID outcomes; a control can never pass; the report guards; unchanged `appPageIsolation` and `network`; source checks of the `run.mjs` wiring.
+  - `openLab.test.ts`: waits for the render before the probe and the navigation; a page that never renders fails closed without a retry; conflicting options are refused before launch; default runs never wait for a render.
 
 ## Open runtime questions
 

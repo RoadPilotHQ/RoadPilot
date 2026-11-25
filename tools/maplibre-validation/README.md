@@ -12,6 +12,7 @@ Development tooling for Phase 2.4D B1. **B1.5 and B1.5.2 were run and stopped (N
 | `viteserver.mjs`     | B1.5.4B: the forked dev server (Vite JS API, `vite.config.ts`), IPC `listening` / `shutdown` / `closed` |
 | `evidence.mjs`       | B1.5.4B: screenshot recorder: `<test>-<seq>-<scenario>-<view>-<tag>.png`, never overwrites             |
 | `placeholder.mjs`    | B1.5.4E: empty, marked placeholder at `/` after readiness, so the app page never loads before the lab  |
+| `negativecontrol.mjs` | B1.5.4G: `control --negative-control`: reproduces the app-page race on purpose; never a measurement |
 | `openlab.mjs`        | Staged, bounded lab opening with failure diagnostics (B1.5.1); one attempt by default (B1.5.4B)        |
 | `cdp.mjs`            | App start and close, DevTools connection, request and worker instrumentation                           |
 | `*.d.mts`            | Types of the modules above for the unit tests in `src/dev/mapLibreLab/tests/`                          |
