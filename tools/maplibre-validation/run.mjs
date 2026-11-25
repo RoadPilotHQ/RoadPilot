@@ -52,6 +52,7 @@ import { nodeDevServerDeps } from './devserver-node.mjs'
 import { createScreenshotRecorder } from './evidence.mjs'
 import { runSession } from './lifecycle.mjs'
 import { openLab as openLabStaged } from './openlab.mjs'
+import { PLACEHOLDER_MARKER } from './placeholder.mjs'
 import { buildReport, MIN_RUNS, THRESHOLDS, worstProbe } from './report.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -206,8 +207,39 @@ function openLab(dpr = 1, label = 'lab') {
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (id) => clearTimeout(id),
     },
-    { labUrl: LAB, devOrigin: PAGE_ORIGIN, dpr, label: `${label}-${TAG}`, attempts: ATTEMPTS },
+    {
+      labUrl: LAB,
+      devOrigin: PAGE_ORIGIN,
+      dpr,
+      label: `${label}-${TAG}`,
+      attempts: ATTEMPTS,
+      // B1.5.4E: the session's dev server serves the placeholder at `/` (devserver.mjs).
+      appPlaceholderMarker: PLACEHOLDER_MARKER,
+    },
   )
+}
+
+/**
+ * B1.5.4E: evidence for report.mjs `appPageIsolation`: the outgoing-page probe and EVERY logged
+ * request and console entry of the run (not only those after the lab navigation). `null` when the
+ * lab never opened (the criterion is then INVALID).
+ */
+function isolationInput(opened) {
+  if (!opened) return null
+  return {
+    expectedMarker: PLACEHOLDER_MARKER,
+    pageOrigin: PAGE_ORIGIN,
+    navT: opened.navT,
+    probe: opened.appProbe ?? null,
+    requests: opened.inst.log.requests
+      .filter((r) => r.url)
+      .map((r) => ({ url: String(r.url).slice(0, 400), t: r.t, session: r.session, type: r.type })),
+    console: opened.inst.log.console.map((c) => ({
+      type: c.type,
+      session: c.session,
+      text: String(c.text ?? '').slice(0, 300),
+    })),
+  }
 }
 
 /** What a failed lab opening leaves in a result file. */
@@ -260,6 +292,7 @@ async function functional() {
     // B1.5.1: a lab that never opened is an INVALID functional run, not a crash without a record.
     res.failedSteps.push({ name: 'openLab', ...openLabFailure(e) })
     res.network = null
+    res.appPageIsolation = null
     save(`functional-${TAG}.json`, res)
     return { functional: res }
   }
@@ -406,6 +439,7 @@ async function functional() {
     res.steps.finalState = await step('finalState', () => lab(page, 'L.state()'))
   } finally {
     res.network = networkInput(inst, navT, res.steps.finalState)
+    res.appPageIsolation = isolationInput(opened)
     res.console = inst.log.console
     res.exceptions = inst.log.exceptions
     res.workers = inst.log.workers
@@ -469,6 +503,7 @@ async function perfRun(kind, scenario, run) {
     const samples = sampler ? await sampler.stop() : []
     out.memory = memSummary(samples)
     out.memoryAfterLoad = memSummary(samples, marks.load1 ?? 0, marks.pan0 ?? Infinity)
+    out.appPageIsolation = isolationInput(opened)
     if (opened) {
       out.network = networkInput(opened.inst, opened.navT, out.state ?? null)
       out.exceptions = opened.inst.log.exceptions
@@ -563,6 +598,7 @@ async function cycles() {
   } finally {
     const samples = sampler ? await sampler.stop() : []
     for (const c of out.cycles) c.mem = memSummary(samples, c.t1 - 2000, c.t1).last
+    out.appPageIsolation = isolationInput(opened)
     if (opened) {
       out.exceptions = opened.inst.log.exceptions
       out.warnings = opened.inst.log.console.filter((c) => /warn/.test(c.type))
@@ -653,6 +689,8 @@ async function session(name) {
     labMarker: LAB_MARKER,
     requiredModules: [WORKER_ENTRY],
     label,
+    // B1.5.4E: after readiness, `/` becomes the placeholder before RoadPilot starts.
+    placeholder: true,
   }
   const rec = await runSession(
     {

@@ -143,6 +143,16 @@ export function spawnServer({ script, args = [], cwd, logFile = null, env = proc
         return false
       }
     },
+    /** B1.5.4E: sends `placeholder`; false if the IPC channel is already closed. */
+    requestPlaceholder: () => {
+      if (!child.connected) return false
+      try {
+        child.send({ type: 'placeholder' })
+        return true
+      } catch {
+        return false
+      }
+    },
   }
 }
 

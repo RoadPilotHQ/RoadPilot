@@ -6,11 +6,16 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  PLACEHOLDER_STAGE,
   startDevServer,
   stopDevServer,
   type DevServerDeps,
   type ServerHandle,
 } from '../../../../tools/maplibre-validation/devserver.mjs'
+import {
+  PLACEHOLDER_HTML,
+  PLACEHOLDER_MARKER,
+} from '../../../../tools/maplibre-validation/placeholder.mjs'
 import {
   descendants,
   httpGet,
@@ -101,6 +106,42 @@ describe.runIf(IS_WINDOWS)('dev server processes (real, Windows)', { timeout: 90
     })
     expect(isAlive(server.pid)).toBe(false)
     await expect(httpGet(`http://127.0.0.1:${port}/`, 1000)).rejects.toThrow()
+  })
+
+  it('B1.5.4E: the real IPC switch replaces `/` after readiness; lab and modules unchanged; graceful stop', async () => {
+    const port = testPort()
+    const base = `http://127.0.0.1:${port}`
+    const d = deps('normal', port)
+    const server = await startDevServer(d, {
+      origin: base,
+      labPath: '/lab.html',
+      labMarker: 'FIXTURE LAB',
+      requiredModules: ['/worker.js'],
+      label: 'process-test',
+      placeholder: true,
+    })
+    owned.push(server.pid)
+    expect(server.stages.map((s) => s.stage).at(-1)).toBe(PLACEHOLDER_STAGE)
+    expect(server.placeholder).toMatchObject({ active: true, marker: PLACEHOLDER_MARKER })
+    const ack = server.handle.messages().find((m) => m.type === 'placeholder-active')
+    expect(ack).toMatchObject({ pid: server.pid, marker: PLACEHOLDER_MARKER })
+    const root = await httpGet(`${base}/`, 2000)
+    expect(root.status).toBe(200)
+    expect(root.text).toBe(PLACEHOLDER_HTML)
+    expect((await httpGet(`${base}/index.html`, 2000)).text).toBe(PLACEHOLDER_HTML)
+    const lab = await httpGet(`${base}/lab.html`, 2000)
+    expect(lab.text).toContain('FIXTURE LAB')
+    expect(lab.text).toContain('./lab.js')
+    for (const p of ['/main.js', '/lab.js', '/dep.js', '/worker.js'])
+      expect((await httpGet(`${base}${p}`, 2000)).status).toBe(200)
+    const stop = await stopDevServer(d, server, fast)
+    expect(stop).toMatchObject({
+      verdict: 'PASS',
+      reason: 'graceful',
+      httpDown: true,
+      portFree: true,
+    })
+    expect(isAlive(server.pid)).toBe(false)
   })
 
   it('wrong process or port: a second start on a port owned by another PID is refused, the first untouched', async () => {

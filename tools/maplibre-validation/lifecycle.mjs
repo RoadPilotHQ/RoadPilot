@@ -7,7 +7,8 @@
  * `body` is the measurement: it starts RoadPilot, opens the lab (openlab.mjs: startup, target,
  * appNavigation, navigation, labReady, initialConfig), runs the tests and closes RoadPilot. It
  * runs only after the dev server passed every readiness stage, so RoadPilot never starts against
- * a server that is not ready.
+ * a server that is not ready. B1.5.4E: run.mjs's dev server stage also includes the switch of
+ * `/` to the app-page placeholder, so RoadPilot never starts against the real app page.
  *
  * Rules:
  * - a failed stage stops every dependent stage (recorded NOT_TESTED with the blocking stage);
@@ -106,6 +107,8 @@ export async function runSession(deps, options, body) {
     stages: server.stages,
     descendants: server.descendants,
     modules: server.modules && { count: server.modules.count, passes: server.modules.passes },
+    // B1.5.4E: the app-page placeholder switch (devserver.mjs stage `placeholder`), if requested.
+    placeholder: server.placeholder ?? null,
   }
   stage('devServer', 'PASS', { ms: dev.ms, pid: server.pid })
 

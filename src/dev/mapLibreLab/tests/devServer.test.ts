@@ -5,16 +5,22 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  activatePlaceholder,
   DEV_STAGES,
   DevServerError,
   moduleImports,
   moduleScripts,
+  PLACEHOLDER_STAGE,
   startDevServer,
   stopDevServer,
   type DevServerDeps,
   type HttpAnswer,
   type ServerHandle,
 } from '../../../../tools/maplibre-validation/devserver.mjs'
+import {
+  PLACEHOLDER_HTML,
+  PLACEHOLDER_MARKER,
+} from '../../../../tools/maplibre-validation/placeholder.mjs'
 
 const ORIGIN = 'http://127.0.0.1:1420'
 const LAB_PATH = '/src/dev/mapLibreLab/index.html'
@@ -56,6 +62,12 @@ interface Scenario {
   shutdownExitCode: number
   /** The endpoint keeps answering after the process exited (another server on the port). */
   endpointStaysUp: boolean
+  /** B1.5.4E: the server's answer to the IPC `placeholder`; 'none': never answers. */
+  placeholderAck: 'active' | 'refused' | 'none' | 'wrong-pid' | 'wrong-marker'
+  /** B1.5.4E: after acknowledging, `/` really serves the placeholder. */
+  placeholderServes: boolean
+  /** B1.5.4E: the lab page gains a module script after the switch. */
+  labChangesAfterSwitch: boolean
 }
 
 const base: Scenario = {
@@ -79,7 +91,13 @@ const base: Scenario = {
   sendsClosed: true,
   shutdownExitCode: 0,
   endpointStaysUp: false,
+  placeholderAck: 'active',
+  placeholderServes: true,
+  labChangesAfterSwitch: false,
 }
+
+/** B1.5.4E: ms after the IPC `placeholder` until the fake server answers it. */
+const PLACEHOLDER_ACK_MS = 50
 
 const APP_HTML =
   '<!doctype html><html><head><script type="module" src="/@vite/client"></script></head><body><div id="root"></div><script type="module" src="/src/app/main.tsx"></script></body></html>'
@@ -88,6 +106,10 @@ const LAB_HTML = `<!doctype html><html><head><title>${MARKER} (B1 prototype)</ti
 class World {
   spawnedAt = Infinity
   shutdownAt = Infinity
+  placeholderAt = Infinity
+  placeholderRequests = 0
+  /** What `/` answered, in order ('app' or 'placeholder'). */
+  appAnswers: string[] = []
   hash = 'a1'
   spawns = 0
   requests: string[] = []
@@ -149,17 +171,34 @@ class World {
     return table[p!] !== undefined ? js(table[p!]!) : null
   }
 
+  /** B1.5.4E: the server has acknowledged the switch. */
+  switched() {
+    return Date.now() >= this.placeholderAt + PLACEHOLDER_ACK_MS
+  }
+
   answer(url: string): HttpAnswer {
     const u = new URL(url)
     const path = u.pathname + u.search
-    if (u.pathname === '/' || u.pathname === '/index.html')
-      return { status: 200, contentType: 'text/html', text: APP_HTML }
+    if (u.pathname === '/' || u.pathname === '/index.html') {
+      const placeholder =
+        this.switched() && this.s.placeholderAck !== 'refused' && this.s.placeholderServes
+      this.appAnswers.push(placeholder ? 'placeholder' : 'app')
+      return {
+        status: 200,
+        contentType: 'text/html',
+        text: placeholder ? PLACEHOLDER_HTML : APP_HTML,
+      }
+    }
     if (u.pathname === LAB_PATH) {
       if (this.s.labFallback) return { status: 200, contentType: 'text/html', text: APP_HTML }
+      const extra =
+        this.switched() && this.s.labChangesAfterSwitch
+          ? '<script type="module" src="./extra.ts"></script>'
+          : ''
       return {
         status: this.s.labStatus,
         contentType: 'text/html',
-        text: this.s.labStatus === 200 ? LAB_HTML : '',
+        text: this.s.labStatus === 200 ? LAB_HTML.replace('</body>', `${extra}</body>`) : '',
       }
     }
     return this.module(path) ?? { status: 404, contentType: 'text/plain', text: 'not found' }
@@ -185,6 +224,16 @@ class World {
           this.exitAt() === this.shutdownAt + this.s.shutdownMs
         )
           m.push({ type: 'closed', reason: 'ipc' })
+        if (this.switched() && !this.exited()) {
+          const a = this.s.placeholderAck
+          if (a === 'refused') m.push({ type: 'placeholder-refused', pid: PID, reason: 'test' })
+          else if (a !== 'none')
+            m.push({
+              type: 'placeholder-active',
+              pid: a === 'wrong-pid' ? PID + 1 : PID,
+              marker: a === 'wrong-marker' ? 'something-else' : PLACEHOLDER_MARKER,
+            })
+        }
         return m
       },
       output: () => 'VITE ready',
@@ -196,6 +245,12 @@ class World {
       requestShutdown: () => {
         if (this.exited()) return false
         this.shutdownAt = Date.now()
+        return true
+      },
+      requestPlaceholder: () => {
+        if (this.exited()) return false
+        this.placeholderRequests++
+        if (this.placeholderAt === Infinity) this.placeholderAt = Date.now()
         return true
       },
     }
@@ -585,5 +640,150 @@ describe('dev server shutdown (defect C)', () => {
     expect([...w.unrelatedAlive]).toEqual(UNRELATED)
     // The dependency surface has no way to terminate anything.
     expect(Object.keys(w.deps()).some((k) => /kill|terminate|stop/i.test(k))).toBe(false)
+  })
+})
+
+describe('app-page placeholder (B1.5.4E)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  const withPlaceholder = { placeholder: true }
+
+  it('serves the app page before the switch and the marked, empty placeholder after it', async () => {
+    const w = new World(base)
+    const { value, error } = await start(w, withPlaceholder)
+    expect(error).toBeNull()
+    expect(value!.stages.map((s) => s.stage)).toEqual([...DEV_STAGES, PLACEHOLDER_STAGE])
+    expect(value!.ready).toBe(true)
+    expect(value!.placeholder).toMatchObject({
+      active: true,
+      marker: PLACEHOLDER_MARKER,
+      app: { status: 200, marker: PLACEHOLDER_MARKER, scripts: 0 },
+    })
+    // Readiness (`http`, module crawl) saw the real app page; only the check after the switch
+    // saw the placeholder.
+    expect(w.appAnswers[0]).toBe('app')
+    expect(w.appAnswers.at(-1)).toBe('placeholder')
+    expect(w.appAnswers.indexOf('placeholder')).toBe(w.appAnswers.length - 1)
+    const after = await w.deps().fetch(`${ORIGIN}/`, 1000)
+    expect(after.text).toContain(`content="${PLACEHOLDER_MARKER}"`)
+    expect(after.text).not.toMatch(/<script\b/i)
+    expect(after.text).not.toContain('/@vite/client')
+    expect(after.text).not.toContain('/src/app/')
+    expect(w.placeholderRequests).toBe(1)
+    expect(w.spawns).toBe(1)
+  })
+
+  it('the lab route and its module responses are unchanged after the switch', async () => {
+    const w = new World(base)
+    const { value } = await start(w, withPlaceholder)
+    const labPass = value!.placeholder!.lab
+    expect(labPass.scripts).toBe(moduleScripts(LAB_HTML, `${ORIGIN}${LAB_PATH}`).length)
+    expect(labPass.modules).toBeGreaterThan(0)
+    const lab = await w.deps().fetch(`${ORIGIN}${LAB_PATH}`, 1000)
+    expect(lab.text).toBe(LAB_HTML)
+    const entry = await w.deps().fetch(`${ORIGIN}/src/dev/mapLibreLab/scsWorkerEntry.mjs`, 1000)
+    expect(entry).toMatchObject({ status: 200, contentType: 'text/javascript' })
+    // The app modules themselves are not blocked: only the app document is replaced.
+    expect((await w.deps().fetch(`${ORIGIN}/src/app/main.tsx`, 1000)).status).toBe(200)
+  })
+
+  it('without `placeholder` nothing is switched (B1.5.4B behaviour)', async () => {
+    const w = new World(base)
+    const { value } = await start(w)
+    expect(value!.stages.map((s) => s.stage)).toEqual(DEV_STAGES)
+    expect(value!.placeholder).toBeUndefined()
+    expect(w.placeholderRequests).toBe(0)
+    expect(w.appAnswers.every((a) => a === 'app')).toBe(true)
+  })
+
+  it('the switch is refused before readiness, and nothing is sent', async () => {
+    const w = new World(base)
+    const handle = w.handle()
+    const p = activatePlaceholder(w.deps(), {
+      pid: PID,
+      origin: ORIGIN,
+      appUrl: `${ORIGIN}/`,
+      labUrl: `${ORIGIN}${LAB_PATH}`,
+      handle,
+      ready: false,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    await vi.runAllTimersAsync()
+    const e = (await p) as DevServerError
+    expect(e).toBeInstanceOf(DevServerError)
+    expect(e.stage).toBe(PLACEHOLDER_STAGE)
+    expect(e.refused).toBe(true)
+    expect(e.message).toMatch(/has not passed readiness/)
+    expect(w.placeholderRequests).toBe(0)
+    // A server object without `ready` (e.g. built by hand) is refused the same way.
+    const q = activatePlaceholder(w.deps(), { pid: PID, handle }).catch((x: unknown) => x)
+    await vi.runAllTimersAsync()
+    expect(((await q) as DevServerError).refused).toBe(true)
+    expect(w.placeholderRequests).toBe(0)
+  })
+
+  it('a missing acknowledgement fails the stage once, keeps diagnostics and stops the server gracefully', async () => {
+    const w = new World({ ...base, placeholderAck: 'none' })
+    const { value, error } = await start(w, withPlaceholder)
+    expect(value).toBeNull()
+    const e = error as DevServerError
+    expect(e.stage).toBe(PLACEHOLDER_STAGE)
+    expect(e.message).toMatch(/no placeholder acknowledgement within 5000 ms/)
+    expect(e.cleanup).toMatchObject({ verdict: 'PASS', reason: 'graceful' })
+    expect(w.saved.map((s) => s.name)).toEqual(['devserver-failure-functional-amd'])
+    expect(w.placeholderRequests).toBe(1)
+    expect(w.spawns).toBe(1)
+  })
+
+  it.each([
+    ['refused', /server refused the switch/],
+    ['wrong-pid', /acknowledgement from PID 7002, not 7001/],
+    ['wrong-marker', /acknowledged marker "something-else" is not expected/],
+  ] as const)('acknowledgement %s fails the stage; no retry', async (ack, message) => {
+    const w = new World({ ...base, placeholderAck: ack })
+    const { error } = await start(w, withPlaceholder)
+    const e = error as DevServerError
+    expect(e.stage).toBe(PLACEHOLDER_STAGE)
+    expect(e.message).toMatch(message)
+    expect(e.cleanup?.verdict).toBe('PASS')
+    expect(w.placeholderRequests).toBe(1)
+  })
+
+  it('an acknowledged switch that still serves the app page is not accepted', async () => {
+    const w = new World({ ...base, placeholderServes: false })
+    const { error } = await start(w, withPlaceholder)
+    const e = error as DevServerError
+    expect(e.stage).toBe(PLACEHOLDER_STAGE)
+    expect(e.message).toMatch(/is not the placeholder \(marker missing\)/)
+    expect(w.placeholderRequests).toBe(1)
+  })
+
+  it('a lab page that changed with the switch is not accepted', async () => {
+    const w = new World({ ...base, labChangesAfterSwitch: true })
+    const { error } = await start(w, withPlaceholder)
+    const e = error as DevServerError
+    expect(e.stage).toBe(PLACEHOLDER_STAGE)
+    expect(e.message).toMatch(/module scripts changed after the switch/)
+  })
+
+  it('graceful shutdown still works after the switch', async () => {
+    const w = new World({ ...base, children: [7002] })
+    const { value } = await start(w, withPlaceholder)
+    const p = stopDevServer(w.deps(), value!)
+    await vi.runAllTimersAsync()
+    expect(await p).toMatchObject({
+      verdict: 'PASS',
+      reason: 'graceful',
+      graceful: true,
+      httpDown: true,
+      portFree: true,
+      leftoverDescendants: [],
+    })
   })
 })

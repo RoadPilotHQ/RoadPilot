@@ -5,12 +5,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  APP_PROBE_EXPRESSION,
   OpenLabError,
   openLab,
   STAGES,
   type CdpMessage,
   type OpenLabDeps,
 } from '../../../../tools/maplibre-validation/openlab.mjs'
+import { PLACEHOLDER_MARKER } from '../../../../tools/maplibre-validation/placeholder.mjs'
 
 const DEV = 'http://127.0.0.1:1420'
 const LAB = `${DEV}/src/dev/mapLibreLab/index.html`
@@ -48,6 +50,10 @@ interface Scenario {
   exitAfterMs: number
   /** Commands that never answer. */
   hang: string[]
+  /** B1.5.4E: the app page's placeholder marker (null: the real app page). */
+  appMarker: string | null
+  /** B1.5.4E: the app page's Resource Timing entries. */
+  appResources: string[]
 }
 
 const base: Scenario = {
@@ -64,6 +70,8 @@ const base: Scenario = {
   leftoverAfterClose: false,
   exitAfterMs: Infinity,
   hang: [],
+  appMarker: null,
+  appResources: [],
 }
 
 class World {
@@ -72,6 +80,8 @@ class World {
   running = false
   saved: { name: string; data: Record<string, unknown>; png: string | null }[] = []
   navigateAt: number[] = []
+  /** B1.5.4E: times of the outgoing-page probe. */
+  probes: number[] = []
   appNavCommittedAt: number[] = []
   private launchedAt = 0
   private labNavAt = Infinity
@@ -193,6 +203,20 @@ class World {
         this.labNavAt = Date.now()
         return { loaderId: 'L1' }
       case 'Runtime.evaluate': {
+        if (params.expression === APP_PROBE_EXPRESSION) {
+          this.probes.push(this.since())
+          return {
+            result: {
+              value: {
+                href: this.url(),
+                ready: 'complete',
+                marker: this.s.appMarker,
+                scripts: this.s.appMarker ? 0 : 2,
+                resources: this.s.appResources,
+              },
+            },
+          }
+        }
         const st = this.labState()
         if (String(params.expression).includes('state()'))
           return {
@@ -406,5 +430,79 @@ describe('openLab (staged, bounded)', () => {
       processes: { app: [4242], webview: [5000, 5001] },
     })
     expect(w.launches).toBe(1)
+  })
+})
+
+describe('openLab with the app-page placeholder (B1.5.4E)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  const isolated = { appPlaceholderMarker: PLACEHOLDER_MARKER }
+
+  it('the placeholder marker is confirmed by a probe right before the lab navigation', async () => {
+    const w = new World({ ...base, appMarker: PLACEHOLDER_MARKER })
+    const { value, error } = await run(w, isolated)
+    expect(error).toBeNull()
+    expect(value!.appProbe).toMatchObject({
+      href: `${DEV}/`,
+      marker: PLACEHOLDER_MARKER,
+      resources: [],
+    })
+    expect(w.probes).toHaveLength(1)
+    expect(w.probes[0]).toBeLessThanOrEqual(w.navigateAt[0]!)
+    const events = value!.events.map((e) => e.event)
+    expect(events.indexOf('app-probe')).toBeGreaterThan(events.indexOf('app-navigation-committed'))
+    expect(events.indexOf('app-probe')).toBeLessThan(events.indexOf('navigate-sent'))
+    expect(value!.stages.map((s) => s.stage)).toEqual(STAGES)
+  })
+
+  it('the probe reports the resource list as found (judged by report.mjs, not here)', async () => {
+    const resources = [`${DEV}/src/app/main.tsx`, 'http://ipc.localhost/control_status']
+    const w = new World({ ...base, appMarker: PLACEHOLDER_MARKER, appResources: resources })
+    const { value } = await run(w, isolated)
+    expect(value!.appProbe!.resources).toEqual(resources)
+  })
+
+  it('a missing placeholder marker fails appNavigation once: structured, diagnostics kept, no retry', async () => {
+    const w = new World({ ...base, appMarker: null })
+    const { value, error } = await run(w, { ...isolated, attempts: 3 })
+    expect(value).toBeNull()
+    const e = error as OpenLabError
+    expect(e).toBeInstanceOf(OpenLabError)
+    expect(e.stage).toBe('appNavigation')
+    expect(e.message).toMatch(/app page not isolated, not retried/)
+    expect(e.attempts).toHaveLength(1)
+    expect(e.attempts[0]).toMatchObject({
+      attempt: 1,
+      stage: 'appNavigation',
+      noRetry: true,
+      appProbe: { marker: null, href: `${DEV}/` },
+      cleanup: { clean: true },
+    })
+    expect(e.attempts[0]!.error).toMatch(/not the harness placeholder/)
+    expect(w.launches).toBe(1)
+    expect(w.navigateAt).toHaveLength(0)
+    expect(w.saved).toHaveLength(1)
+    expect(w.saved[0]!.data).toMatchObject({
+      failure: { stage: 'appNavigation' },
+      appProbe: { marker: null },
+    })
+  })
+
+  it('a different marker is not accepted either', async () => {
+    const w = new World({ ...base, appMarker: 'roadpilot-some-other-marker' })
+    const { error } = await run(w, isolated)
+    expect((error as OpenLabError).stage).toBe('appNavigation')
+    expect(w.navigateAt).toHaveLength(0)
+  })
+
+  it('without the option nothing is probed (B1.5.4B behaviour)', async () => {
+    const w = new World(base)
+    const { value } = await run(w)
+    expect(value!.appProbe).toBeNull()
+    expect(w.probes).toHaveLength(0)
   })
 })

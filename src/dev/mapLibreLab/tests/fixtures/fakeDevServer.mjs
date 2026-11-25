@@ -2,7 +2,8 @@
 /**
  * B1.5.4B test fixture: a tiny HTTP server that speaks the IPC protocol of
  * tools/maplibre-validation/viteserver.mjs (`listening`, `closed`; `shutdown`). Used only by
- * devServerProcess.test.ts, on a random local port.
+ * devServerProcess.test.ts, on a random local port. B1.5.4E: also `placeholder` (answered with
+ * `placeholder-active` / `placeholder-refused`), through the same switch as viteserver.mjs.
  *
  *   node fakeDevServer.mjs <mode> <port>
  *   modes: normal | child (has a child process) | slow (closes after 1.5 s) | hang (ignores
@@ -11,6 +12,7 @@
 import { fork } from 'node:child_process'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
+import { createPlaceholderSwitch } from '../../../../../tools/maplibre-validation/placeholder.mjs'
 
 const [mode, portArg] = process.argv.slice(2)
 const send = (m) => {
@@ -39,14 +41,18 @@ if (mode === 'grandchild') {
     '/dep.js': [js, 'export const dep = 1'],
     '/worker.js': [js, 'self.x = 1'],
   }
-  const server = createServer((req, res) => {
-    const page = pages[new URL(req.url, 'http://x').pathname]
-    if (!page) {
-      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found')
-      return
-    }
-    res.writeHead(200, { 'content-type': page[0] }).end(page[1])
-  })
+  const placeholder = createPlaceholderSwitch()
+  let listening = false
+  const server = createServer((req, res) =>
+    placeholder.middleware(req, res, () => {
+      const page = pages[new URL(req.url, 'http://x').pathname]
+      if (!page) {
+        res.writeHead(404, { 'content-type': 'text/plain' }).end('not found')
+        return
+      }
+      res.writeHead(200, { 'content-type': page[0] }).end(page[1])
+    }),
+  )
   const child =
     mode === 'child'
       ? fork(fileURLToPath(import.meta.url), ['grandchild'], { stdio: 'ignore' })
@@ -67,11 +73,14 @@ if (mode === 'grandchild') {
     } else finish()
   }
   process.on('message', (m) => {
+    if (placeholder.handleMessage(m, { listening: listening && !closing, pid: process.pid, send }))
+      return
     if (m?.type !== 'shutdown' || mode === 'hang') return
     if (mode === 'slow') setTimeout(close, 1500)
     else close()
   })
   server.listen(port, '127.0.0.1', () => {
+    listening = true
     send({ type: 'listening', pid: process.pid, urls: { local: [`http://127.0.0.1:${port}/`] } })
     if (mode === 'exit-early')
       setTimeout(() => {

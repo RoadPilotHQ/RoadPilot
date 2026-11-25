@@ -45,6 +45,20 @@ export declare function evaluateMemoryCycles(result: unknown): Evaluation
 export declare function evaluateScreenshots(records: unknown): Evaluation
 export declare function evaluateStartup(runs: unknown): Evaluation
 export declare function evaluateLifecycle(record: unknown): Evaluation
+/** B1.5.4E: paths only the RoadPilot app page loads. */
+export declare const APP_ONLY_PATHS: readonly string[]
+export declare const IPC_ORIGIN: string
+export declare const CALLBACK_WARNING: string
+/** B1.5.4E: input as recorded by run.mjs (`appPageIsolation` of a result file). */
+export interface AppPageIsolationEvidence {
+  expectedMarker: string
+  pageOrigin: string
+  navT?: number
+  probe: { marker: string | null; resources: string[]; [k: string]: unknown } | null
+  requests: { url: string; t?: number; session?: string; type?: string }[]
+  console: { type?: string; text?: string; session?: string }[]
+}
+export declare function evaluateAppPageIsolation(evidence: unknown): Evaluation
 export declare function buildReport(input?: {
   functional?: unknown
   perf?: unknown

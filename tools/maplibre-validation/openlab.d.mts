@@ -63,13 +63,29 @@ export interface OpenLabOptions {
   label?: string
   attempts?: number
   timeouts?: Partial<typeof DEFAULT_TIMEOUTS>
+  /** B1.5.4E: the committed app page must carry this placeholder marker (else no retry). */
+  appPlaceholderMarker?: string
 }
+
+/** B1.5.4E: the outgoing app page right before the lab navigation. */
+export interface AppProbe {
+  href: string
+  ready: string
+  marker: string | null
+  scripts: number
+  resources: string[]
+}
+
+export declare const APP_PROBE_EXPRESSION: string
 
 export interface AttemptFailure {
   attempt: number
   stage: Stage | string
   error: string
   refusal: boolean
+  /** B1.5.4E: the app page was not the placeholder; never retried. */
+  noRetry?: boolean
+  appProbe?: AppProbe | null
   diagnosticsFile: string | null
   diagnosticsSaveError?: string
   cleanup: {
@@ -111,6 +127,8 @@ export declare function openLab<App extends LabApp, Page extends LabPage>(
   inst: unknown
   navT: number
   initial: Record<string, unknown>
+  /** B1.5.4E: null unless `appPlaceholderMarker` was given. */
+  appProbe: AppProbe | null
   stages: { stage: string; ms: number }[]
   events: { t: number; event: string; [k: string]: unknown }[]
   attempt: number

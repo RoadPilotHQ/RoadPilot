@@ -11,8 +11,15 @@
  *   { type: 'listening', pid, urls, vite }   after `server.listen()` resolved
  *   { type: 'error', stage, error }          listen failed (e.g. port taken); the process exits 1
  *   { type: 'closed', reason }               after `server.close()` resolved, right before exiting
+ *   { type: 'placeholder-active', pid, marker }   B1.5.4E: `/` now serves the placeholder
+ *   { type: 'placeholder-refused', pid, reason }  B1.5.4E: not switched (server not listening)
  * harness → this process:
  *   { type: 'shutdown' }                     close the server and exit
+ *   { type: 'placeholder' }                  B1.5.4E: switch `/` to the empty, marked placeholder
+ *                                            (placeholder.mjs); one-way. The harness sends it
+ *                                            only after every readiness stage passed
+ *                                            (devserver.mjs), and starts RoadPilot only after
+ *                                            `placeholder-active` and its own HTTP checks.
  *
  * Shutdown is `server.close()` (closes the HTTP and WebSocket servers, the file watcher and the
  * dependency optimiser), then the IPC channel is closed and the process exits on its own once its
@@ -21,6 +28,7 @@
  * behind as an orphan.
  */
 import { createServer, version } from 'vite'
+import { createPlaceholderSwitch } from './placeholder.mjs'
 
 const [root, host, portArg] = process.argv.slice(2)
 const port = Number(portArg)
@@ -36,6 +44,8 @@ if (!root || !host || !Number.isInteger(port)) throw new Error('usage: <root> <h
 
 let server = null
 let closing = null
+let listening = false
+const placeholder = createPlaceholderSwitch()
 
 function shutdown(reason) {
   closing ??= (async () => {
@@ -54,6 +64,7 @@ function shutdown(reason) {
 
 process.on('message', (m) => {
   if (m?.type === 'shutdown') void shutdown('ipc')
+  else placeholder.handleMessage(m, { listening: listening && !closing, pid: process.pid, send })
 })
 process.on('disconnect', () => void shutdown('harness-disconnected'))
 
@@ -62,8 +73,20 @@ try {
   server = await createServer({
     root,
     server: { host, port, strictPort: true },
+    // B1.5.4E: inactive until the IPC message `placeholder`; then it answers only the app document
+    // (`/`, `/index.html`) and runs before Vite's own middlewares. Merged with vite.config.ts.
+    plugins: [
+      {
+        name: 'roadpilot-harness-placeholder',
+        apply: 'serve',
+        configureServer(s) {
+          s.middlewares.use(placeholder.middleware)
+        },
+      },
+    ],
   })
   await server.listen()
+  listening = true
   send({ type: 'listening', pid: process.pid, urls: server.resolvedUrls, vite: version })
 } catch (e) {
   send({ type: 'error', stage: 'listen', error: String(e?.message ?? e) })

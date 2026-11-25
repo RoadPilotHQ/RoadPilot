@@ -4,8 +4,10 @@ import {
   ACCURACY_TOLERANCE_PX,
   aggregatePerf,
   buildReport,
+  CALLBACK_WARNING,
   combine,
   evaluateAccuracy,
+  evaluateAppPageIsolation,
   evaluateContextLoss,
   evaluateMemoryCycles,
   evaluateNetwork,
@@ -17,6 +19,7 @@ import {
   THRESHOLDS,
   worstProbe,
 } from '../../../../tools/maplibre-validation/report.mjs'
+import { PLACEHOLDER_MARKER } from '../../../../tools/maplibre-validation/placeholder.mjs'
 
 import gitignore from '../../../../tools/maplibre-validation/.gitignore?raw'
 
@@ -549,6 +552,8 @@ describe('harness sources', () => {
       'report.d.mts',
       'openlab.mjs',
       'openlab.d.mts',
+      'placeholder.mjs',
+      'placeholder.d.mts',
       'cdp.mjs',
       'workerorder.mjs',
       'sampler.ps1',
@@ -607,5 +612,214 @@ describe('harness sources', () => {
       '/src/dev/mapLibreLab/index.html',
     )
     expect(harness['/tools/maplibre-validation/.gitignore']).toMatch(/^out\/$/m)
+  })
+})
+
+// ---------------------------------------------------------------- app-page isolation (B1.5.4E)
+
+/** The six IPC calls of the outgoing app page in B1.5.4C session 5 (src/app/main.tsx). */
+const S5_IPC = [
+  'plugin%3Aevent%7Clisten',
+  'telemetry_snapshot',
+  'plugin%3Aevent%7Clisten',
+  'control_status',
+  'plugin%3Aevent%7Clisten',
+  'map_status',
+].map((c) => page(`http://ipc.localhost/${c}`))
+const s5Console = [
+  ...Array.from({ length: 6 }, () => ({
+    type: 'warning',
+    text: 'IPC custom protocol failed, Tauri will now use the postMessage interface instead',
+  })),
+  ...Array.from({ length: 144 }, (_, i) => ({
+    type: 'warning',
+    text: `[TAURI] ${CALLBACK_WARNING} ${i < 6 ? 900 + i : 1970318621}. This might happen when the app is reloaded while Rust is running an asynchronous operation.`,
+  })),
+]
+const probe = (o: Record<string, unknown> = {}) => ({
+  href: `${origin}/`,
+  ready: 'complete',
+  marker: PLACEHOLDER_MARKER,
+  scripts: 0,
+  resources: [],
+  ...o,
+})
+/** B1.5.4C session 1: clean (only Vite's messages and the favicon 404). */
+const iso = (o: Record<string, unknown> = {}) => ({
+  expectedMarker: PLACEHOLDER_MARKER,
+  pageOrigin: origin,
+  navT: 1000,
+  probe: probe(),
+  requests: labRequests,
+  console: [
+    { type: 'debug', text: '[vite] connected.' },
+    { type: 'log-error', text: 'network: Failed to load resource: 404 (Not Found)' },
+  ],
+  ...o,
+})
+const s5 = () =>
+  iso({ requests: [labRequests[0], ...S5_IPC, ...labRequests.slice(1)], console: s5Console })
+const withRequests = (...extra: { url: string; session: string }[]) =>
+  iso({ requests: [...labRequests, ...extra] })
+const withResources = (...resources: string[]) => iso({ probe: probe({ resources }) })
+
+describe('appPageIsolation (B1.5.4E)', () => {
+  it('a clean session (s1-like) is isolated', () => {
+    expect(evaluateAppPageIsolation(iso())).toMatchObject({
+      verdict: 'PASS',
+      reason: 'isolated',
+      metrics: { marker: PLACEHOLDER_MARKER, callbackWarnings: 0, ipcRequests: { count: 0 } },
+    })
+  })
+
+  it('an s5-like session (IPC calls and callback warnings) is INVALID', () => {
+    const e = evaluateAppPageIsolation(s5())
+    expect(e.verdict).toBe('INVALID')
+    expect(e.reasons).toEqual(['ipc_requests', 'callback_warnings'])
+    expect(e.metrics).toMatchObject({ callbackWarnings: 144, ipcRequests: { count: 6 } })
+  })
+
+  it('IPC requests without any console warning are INVALID (not console-dependent)', () => {
+    const e = evaluateAppPageIsolation(withRequests(S5_IPC[1]!))
+    expect(e).toMatchObject({ verdict: 'INVALID', reason: 'ipc_requests' })
+    expect(e.metrics).toMatchObject({ callbackWarnings: 0 })
+    expect(evaluateAppPageIsolation(withRequests(page('ipc://localhost/x'))).reason).toBe(
+      'ipc_requests',
+    )
+  })
+
+  it('app resources in the outgoing page resource list are INVALID', () => {
+    expect(evaluateAppPageIsolation(withResources(`${origin}/src/app/main.tsx`))).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'app_resources_in_app_page',
+    })
+    // The placeholder loads nothing: any same-origin resource there is foreign.
+    expect(evaluateAppPageIsolation(withResources(`${origin}/@vite/client`)).reason).toBe(
+      'app_resources_in_app_page',
+    )
+    expect(evaluateAppPageIsolation(withResources('http://ipc.localhost/map_status')).reason).toBe(
+      'ipc_in_app_page_resources',
+    )
+  })
+
+  it('app-only modules in the request log are INVALID; lab modules from shared folders are not', () => {
+    for (const p of ['/src/app/main.tsx', '/src/backend/controlSource.ts'])
+      expect(evaluateAppPageIsolation(withRequests(page(`${origin}${p}`))).reason).toBe(
+        'app_resources_requested',
+      )
+    const shared = [
+      '/src/state/x.ts',
+      '/src/i18n/x.ts',
+      '/src/ui/navigation/roadPainter.ts',
+      '/src/domain/mapTile.ts',
+    ].map((p) => page(`${origin}${p}`))
+    expect(evaluateAppPageIsolation(withRequests(...shared)).verdict).toBe('PASS')
+  })
+
+  it('a missing or wrong placeholder marker is INVALID', () => {
+    for (const marker of [null, 'other'])
+      expect(evaluateAppPageIsolation(iso({ probe: probe({ marker }) })).reason).toBe(
+        'placeholder_not_confirmed',
+      )
+  })
+
+  it('the callback warning alone is INVALID too (corroborating signal)', () => {
+    expect(evaluateAppPageIsolation(iso({ console: [s5Console[10]] }))).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'callback_warnings',
+    })
+  })
+
+  it.each([
+    ['undefined', undefined, 'no_isolation_evidence'],
+    ['null (lab never opened)', null, 'no_isolation_evidence'],
+    [
+      'no expected marker',
+      iso({ expectedMarker: undefined }),
+      'incomplete_evidence:expectedMarker',
+    ],
+    ['another expected marker', iso({ expectedMarker: 'x' }), 'incomplete_evidence:expectedMarker'],
+    ['no page origin', iso({ pageOrigin: undefined }), 'incomplete_evidence:pageOrigin'],
+    ['no request log', iso({ requests: undefined }), 'no_request_log'],
+    ['no console log', iso({ console: undefined }), 'no_console_log'],
+    ['no probe', iso({ probe: null }), 'no_app_probe'],
+    ['no resource list', iso({ probe: probe({ resources: undefined }) }), 'no_resource_list'],
+    ['no lab request', iso({ requests: [] }), 'instrumentation_saw_no_lab_request'],
+  ])('missing or incomplete evidence (%s) is INVALID', (_name, input, reason) => {
+    expect(evaluateAppPageIsolation(input)).toMatchObject({ verdict: 'INVALID', reason })
+  })
+
+  it('the network criterion is unchanged: RoadPilot IPC stays allowed there', () => {
+    const requests = [labRequests[0], ...S5_IPC, ...labRequests.slice(1)]
+    expect(evaluateNetwork(net({ requests }))).toMatchObject({ verdict: 'PASS', reason: 'offline' })
+    const r = buildReport({
+      functional: {
+        steps: {},
+        failedSteps: [],
+        network: net({ requests }),
+        appPageIsolation: s5(),
+      },
+    })
+    expect(r.criteria.network!.verdict).toBe('PASS')
+    expect(r.criteria.appPageIsolation).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'ipc_requests',
+    })
+    expect(r.overall).not.toBe('PASS')
+  })
+
+  it('a contaminated perf run is INVALID; an isolated one is judged as before', () => {
+    expect(evaluatePerfRun(perfRun({ appPageIsolation: iso() }), 'urban').verdict).toBe('PASS')
+    expect(evaluatePerfRun(perfRun(), 'urban').verdict).toBe('PASS') // older results: unchanged
+    expect(evaluatePerfRun(perfRun({ appPageIsolation: s5() }), 'urban')).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'app_page_not_isolated',
+      detail: 'ipc_requests',
+    })
+    expect(evaluatePerfRun(perfRun({ appPageIsolation: null }), 'urban').reason).toBe(
+      'app_page_not_isolated',
+    )
+    const runs = [iso(), s5(), iso()].map((e) => perfRun({ appPageIsolation: e }))
+    expect(aggregatePerf(runs, 'urban')).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'invalid_runs',
+      invalidRuns: 1,
+    })
+  })
+
+  it('a contaminated cycles run is INVALID; an isolated one keeps its NOT_TESTED diagnostic', () => {
+    const cycles = [500, 500, 500, 500, 500, 500, 500, 500].map(cycle)
+    expect(evaluateMemoryCycles({ cycles, appPageIsolation: iso() })).toMatchObject({
+      verdict: 'NOT_TESTED',
+      reason: 'provisional_threshold_not_approved',
+    })
+    expect(evaluateMemoryCycles({ cycles, appPageIsolation: s5() })).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'app_page_not_isolated',
+    })
+    const r = buildReport({
+      cycles: [{ kind: 'maplibre', scenario: 'stress', cycles, appPageIsolation: s5() }],
+    })
+    expect(r.criteria['memory:maplibre:stress']!.verdict).toBe('INVALID')
+    expect(r.criteria.appPageIsolation!.verdict).toBe('INVALID')
+  })
+
+  it('buildReport: per run over perf runs; a session run without evidence is INVALID; older results get no criterion', () => {
+    const perf = [iso(), iso()].map((e) => perfRun({ appPageIsolation: e }))
+    expect(buildReport({ perf }).criteria.appPageIsolation).toMatchObject({
+      verdict: 'PASS',
+      reason: 'per_run',
+    })
+    const mixed = buildReport({ perf: [...perf, perfRun({ appPageIsolation: s5() })] })
+    expect(mixed.criteria.appPageIsolation!.verdict).toBe('INVALID')
+    const functional = { steps: {}, failedSteps: [], network: net() }
+    const lifecycle = { stages: [{ stage: 'preflight', verdict: 'PASS' }] }
+    expect(buildReport({ functional, lifecycle }).criteria.appPageIsolation).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'no_isolation_evidence',
+    })
+    expect(buildReport({ functional }).criteria.appPageIsolation).toBeUndefined()
+    const isolated = { ...functional, appPageIsolation: iso() }
+    expect(buildReport({ functional: isolated }).criteria.appPageIsolation!.verdict).toBe('PASS')
   })
 })

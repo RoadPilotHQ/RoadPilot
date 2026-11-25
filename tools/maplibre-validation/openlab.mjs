@@ -14,6 +14,11 @@
  *                    A lab navigation sent in that window is replaced by wry's own navigation. B1.5
  *                    did not record the final URL of its failed starts, so it is not proven that
  *                    this caused them; waiting here removes the window either way.
+ *                    B1.5.4E (`appPlaceholderMarker`): the committed app page must be the
+ *                    harness placeholder (placeholder.mjs). Right before `Page.navigate`, a probe
+ *                    reads its marker and its resource list (`appProbe`, returned for report.mjs
+ *                    `appPageIsolation`). A missing or different marker fails this stage, and that
+ *                    failure is never retried: the dev server would serve the same page again.
  * 4. `navigation`    `Page.navigate` to the lab; the main frame commits the lab URL.
  * 5. `labReady`      the lab page is complete and exposes `window.mapLibreLab`, on the lab URL.
  * 6. `initialConfig` the page's own first configuration finished (result or error).
@@ -29,6 +34,23 @@
  * proves it ready (devserver.mjs) before `openLab` runs, so the `startup` stage never begins
  * against a cold or foreign server.
  */
+
+import { PLACEHOLDER_META } from './placeholder.mjs'
+
+/**
+ * B1.5.4E: the outgoing app page right before the lab navigation: its marker and every resource
+ * it loaded (Resource Timing; the placeholder loads none).
+ */
+export const APP_PROBE_EXPRESSION = `(() => {
+  const m = document.querySelector('meta[name="${PLACEHOLDER_META}"]')
+  return {
+    href: location.href,
+    ready: document.readyState,
+    marker: m ? m.getAttribute('content') : null,
+    scripts: document.scripts.length,
+    resources: performance.getEntriesByType('resource').map((e) => e.name).slice(0, 500),
+  }
+})()`
 
 export const STAGES = Object.freeze([
   'startup',
@@ -150,6 +172,7 @@ export async function openLab(deps, options) {
     if (r.ok) return { ...r.value, attempt, failedAttempts: failures }
     failures.push(r.failure)
     if (r.failure.refusal) throw new OpenLabError(failures, 'start refused')
+    if (r.failure.noRetry) throw new OpenLabError(failures, 'app page not isolated, not retried')
     if (!r.failure.cleanup?.clean)
       throw new OpenLabError(failures, 'cleanup incomplete, not retried')
   }
@@ -268,6 +291,34 @@ async function openOnce(deps, options, timeouts, attempt) {
       t.poll,
     )
     mark('app-navigation-committed', { url: appUrl })
+    let appProbe = null
+    if (options.appPlaceholderMarker !== undefined) {
+      appProbe = await waitFor(
+        'appNavigation',
+        t.appNavigation,
+        async () => {
+          const r = await cmd('Runtime.evaluate', {
+            expression: APP_PROBE_EXPRESSION,
+            returnByValue: true,
+          })
+          const v = r?.result?.value
+          return v && v.ready === 'complete' ? v : undefined
+        },
+        deps,
+        t.poll,
+      )
+      mark('app-probe', {
+        url: appProbe.href,
+        marker: appProbe.marker,
+        resources: Array.isArray(appProbe.resources) ? appProbe.resources.length : null,
+      })
+      if (appProbe.marker !== options.appPlaceholderMarker)
+        throw new StageError(
+          'appNavigation',
+          `the app page is not the harness placeholder (marker ${JSON.stringify(appProbe.marker ?? null)}, expected ${JSON.stringify(options.appPlaceholderMarker)})`,
+          { noRetry: true, appProbe },
+        )
+    }
 
     enter('navigation')
     const navT = deps.now()
@@ -319,7 +370,7 @@ async function openOnce(deps, options, timeouts, attempt) {
     enter('done')
     return {
       ok: true,
-      value: { app, page, inst, navT, initial, stages: log.stages, events: log.events },
+      value: { app, page, inst, navT, initial, appProbe, stages: log.stages, events: log.events },
     }
   } catch (error) {
     // The original failure, kept as it is; everything below only adds to the diagnostics.
@@ -330,6 +381,11 @@ async function openOnce(deps, options, timeouts, attempt) {
       refusal: error?.refusal === true,
       diagnosticsFile: null,
       cleanup: null,
+    }
+    // B1.5.4E: a page that is not the placeholder would be served again on a retry.
+    if (error instanceof StageError && error.detail?.noRetry === true) {
+      failure.noRetry = true
+      failure.appProbe = error.detail.appProbe ?? null
     }
     if (failure.refusal) {
       failure.cleanup = { clean: true, note: 'nothing was started' }
@@ -363,6 +419,7 @@ async function captureDiagnostics(deps, options, t, { failure, log, app, page, t
   }
   const data = {
     failure: { attempt: failure.attempt, stage: failure.stage, error: failure.error },
+    appProbe: failure.appProbe ?? null,
     labUrl: options.labUrl,
     devOrigin: options.devOrigin,
     capturedAt: deps.now(),

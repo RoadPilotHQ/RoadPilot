@@ -5,6 +5,8 @@ How the runtime criteria of the MapLibre prototype ([maplibre-prototype.md](mapl
 > **Status: B1.5 run stopped (NO-GO); B1.5.1 corrections made statically, not runtime-tested.** B1.5 (2026-11-22, AMD only) ran the harness and found two defects: MapLibre workers without the projection handler (lab) and lab pages that did not open after app start (harness). Both are corrected in B1.5.1 (see [B1.5.1 corrections](#b151-corrections)), verified by unit tests against fakes only. The B1.5 results stay in `out/` unchanged. Every runtime criterion needs a new run, which needs a separate approval.
 >
 > **B1.5.4B (harness reliability):** the three harness defects of B1.5.4 / B1.5.4A (screenshot name collision, Vite cold start, Vite shutdown) are corrected and covered by automated tests, see [B1.5.4B harness reliability correction](#b154b-harness-reliability-correction). The corrected harness has **not** run against RoadPilot's WebView2 yet; a later runtime phase must validate it.
+>
+> **B1.5.4E (app-page isolation):** the harness-owned dev server serves an empty, marked placeholder at `/` once readiness has passed, so RoadPilot's app page no longer loads before the lab, and `report.mjs` judges every run with `appPageIsolation`. See [B1.5.4E app-page isolation](#b154e-app-page-isolation). Covered by automated tests only; it has not run in WebView2.
 
 ## Location
 
@@ -23,6 +25,7 @@ How the runtime criteria of the MapLibre prototype ([maplibre-prototype.md](mapl
 | `devserver-node.mjs` | B1.5.4B: its real process, HTTP, port-owner and process-tree access, by PID only (`tests/devServerProcess.test.ts`)         |
 | `viteserver.mjs`     | B1.5.4B: the forked dev server (Vite JS API, `vite.config.ts`), IPC `listening` / `shutdown` / `closed`                     |
 | `evidence.mjs`       | B1.5.4B: screenshot recorder, unique deterministic names, never overwrites (`tests/screenshotEvidence.test.ts`)             |
+| `placeholder.mjs`    | B1.5.4E: the app-page placeholder switch of the harness-owned dev server (`tests/placeholder.test.ts`)                      |
 | `*.d.mts`            | Types of the modules above for the tests                                                                                    |
 | `sampler.ps1`        | Read-only memory sampler of RoadPilot's own processes (matched by the app identifier)                                       |
 | `out/`               | Results (ignored by Git). B1.5 evidence in the root; every later run in its own session folder `out/<session>/`             |
@@ -415,6 +418,61 @@ The real Vite path (`viteserver.mjs` with the repository's config, through `devs
 - A cold start now takes about 40 s before RoadPilot starts. The 120 s `modules` deadline leaves margin on this machine only.
 - `Get-NetTCPConnection` and `Get-CimInstance` (PowerShell) are needed for ownership checks, and each call takes about 1–2 s.
 - A cleanup `FAIL` leaves a process for a person to check. That is intended, and the next session refuses to start while the port is taken.
+
+## B1.5.4E app-page isolation
+
+Harness only. RoadPilot's application code, its Tauri configuration, the production build, `npm run dev`, the lab and every acceptance threshold are unchanged.
+
+**Race (B1.5.4C session 5, investigated in B1.5.4D).** RoadPilot's debug build always opens the app page (`/`) first; `openlab.mjs` then navigates the same webview to the lab. `src/app/main.tsx` creates its telemetry, control and map sources at module level, and each one calls `listen` and `invoke` at once. When `main.tsx` ran before the lab committed, the outgoing page made six IPC calls (three `plugin:event|listen`, `telemetry_snapshot`, `control_status`, `map_status`). Tauri 2.12.5 keeps JavaScript event listeners per webview label and removes them only when the webview is destroyed, so the `control:status` listener (emitted every 200 ms) called a dead callback in the lab: 138 "[TAURI] Couldn't find callback id" warnings. Sessions 1–4 had none. `network` stayed PASS because it allows RoadPilot's IPC by design.
+
+### Containment: placeholder at `/` (`placeholder.mjs`)
+
+- After every readiness stage passed, `devserver.mjs` runs one more stage, `placeholder` (only with `options.placeholder`, which `run.mjs` sets):
+  1. IPC `placeholder` to the forked server;
+  2. `placeholder-active` from the server's own PID with the expected marker;
+  3. one GET of `/`: 200 HTML with the marker `<meta name="roadpilot-harness-placeholder" content="roadpilot-b154e-app-page-isolation-v1">` and no script;
+  4. one GET of the lab page: still the lab, with the same module scripts;
+  5. one pass over the lab modules and the worker entry: every URL answers 200 with JavaScript and belongs to the stable readiness set.
+- The placeholder has no script, stylesheet or other resource: neither the app, nor Vite's client, nor any module loads. Only `/` and `/index.html` are replaced; every other URL, including the app modules themselves, is served unchanged.
+- The switch is one-way for the life of the server process.
+- `activatePlaceholder` refuses before readiness (`refused: true`, nothing sent). The server refuses before it listens (`placeholder-refused`).
+- A failed stage saves `devserver-failure-<label>.json`, stops the server gracefully and fails the session's `devServer` stage, so RoadPilot never starts. Nothing is retried, and there is no fallback to the real app page.
+- `openlab.mjs` (`appPlaceholderMarker`) checks the committed app page right before `Page.navigate` (`APP_PROBE_EXPRESSION`: marker, `document.readyState`, script count, Resource Timing entries). A missing or different marker fails `appNavigation` with diagnostics, and that failure is never retried (`noRetry`), whatever `--attempts` says.
+- The session record keeps the switch result in `devServer.placeholder`.
+
+### Detection: `appPageIsolation` (`report.mjs`)
+
+`run.mjs` records `appPageIsolation` in every functional, perf and cycles result: the probe and every request and console entry the instrumentation logged in the run, before and after the lab navigation. `null` means the lab never opened.
+
+| Verdict | Reason                                                                                                                                                         | Condition                                                                                                                    |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| INVALID | `no_isolation_evidence`, `incomplete_evidence:*`, `no_request_log`, `no_console_log`, `no_app_probe`, `no_resource_list`, `instrumentation_saw_no_lab_request` | Evidence missing or incomplete                                                                                               |
+| INVALID | `placeholder_not_confirmed`                                                                                                                                    | The probe did not find the placeholder marker                                                                                |
+| INVALID | `ipc_requests`                                                                                                                                                 | Any request to `http://ipc.localhost` (or `ipc:`) in the run; the lab and the placeholder make none                          |
+| INVALID | `app_resources_requested`                                                                                                                                      | A request for an app-only module (`/src/app/`, `/src/backend/`; B1.5.4C: the lab never requests these)                       |
+| INVALID | `ipc_in_app_page_resources`, `app_resources_in_app_page`                                                                                                       | The outgoing page's resource list has an IPC entry or any same-origin resource (the placeholder loads none)                  |
+| INVALID | `callback_warnings`                                                                                                                                            | Tauri's "Couldn't find callback id" in the console; corroborating only, since the request and probe checks decide without it |
+| PASS    | `isolated`                                                                                                                                                     | None of the above                                                                                                            |
+
+- **perf and cycles:** a run with isolation evidence that is not `isolated` is INVALID (`app_page_not_isolated`). That makes its perf aggregate INVALID, and its memory criterion INVALID instead of NOT_TESTED. Results without the field (before B1.5.4E) are judged as before.
+- **When the criterion appears:** for every run of a report that has a session record, or whose results carry the field. A B1.5.4B or B1.5.4C session therefore reports it as INVALID (`no_isolation_evidence`); older results get no criterion.
+- **`network`:** unchanged.
+
+### Regression tests
+
+| File                       | Covers                                                                                                                                                                                                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `placeholder.test.ts`      | The placeholder is empty and marked; inactive until switched; refused before listening; only `/` and `/index.html` replaced (GET, HEAD), lab, modules, POST and favicon pass through; other IPC messages ignored                                                                                                                    |
+| `devServer.test.ts`        | App page before the switch, placeholder after it; lab route and modules unchanged; no switch without the option; refused before readiness (nothing sent); missing, refused, foreign-PID and wrong-marker acknowledgements; an acknowledged switch that still serves the app; a lab that changed; graceful shutdown after the switch |
+| `devServerProcess.test.ts` | Real processes: readiness, the real IPC switch through `spawnServer`, `/` and `/index.html` are the placeholder, lab and modules served, graceful stop                                                                                                                                                                              |
+| `openLab.test.ts`          | Probe right before `Page.navigate`; resource list passed on; missing or different marker fails `appNavigation` once, with diagnostics and cleanup, no retry even with `attempts: 3`; no probe without the option                                                                                                                    |
+| `validationReport.test.ts` | s1-like PASS; s5-like INVALID; IPC without warnings INVALID; app resources in the resource list or the request log INVALID, shared lab folders not; marker missing; warning alone; ten missing-evidence cases; `network` unchanged; perf, aggregate and cycles invalidation; criterion presence rules                               |
+
+### Remaining runtime risks
+
+- Not run against RoadPilot's WebView2. A runtime phase must show that the probe finds the marker, that no IPC request or callback warning appears over many starts, and (as a negative control) that the detector flags the race when the placeholder is off.
+- Tauri's initialization scripts still run in the placeholder document. In B1.5.4C they made no IPC call on their own (lab pages 1–4: none).
+- `/src/app/` and `/src/backend/` as app-only paths depend on the lab's imports. A lab import from those folders would make every run INVALID, which is loud rather than silent.
 
 ## Open runtime questions
 

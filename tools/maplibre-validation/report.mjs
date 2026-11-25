@@ -14,6 +14,8 @@
  * passes and at least `MIN_RUNS` runs are valid; any invalid run makes the criterion INVALID.
  */
 
+import { PLACEHOLDER_MARKER } from './placeholder.mjs'
+
 export const VERDICTS = Object.freeze(['PASS', 'FAIL', 'INVALID', 'NOT_TESTED'])
 
 /** B1 brief, section 9 (acceptance targets), unchanged. */
@@ -255,6 +257,8 @@ export function evaluatePerfRun(run, scenario) {
   if (!th) return verdict('INVALID', 'unknown_scenario')
   if (!isObj(run)) return verdict('INVALID', 'no_result')
   if (run.error) return verdict('INVALID', 'step_failed', { detail: run.error })
+  const iso = isolationOfRun(run)
+  if (iso) return iso
   if (run.datasetSegments !== th.segments) return verdict('INVALID', 'wrong_dataset')
   const cold = run.cold
   if (!isObj(cold) || !finite(cold.firstMs)) return verdict('INVALID', 'no_first_visible')
@@ -340,6 +344,8 @@ const SERIES = Object.freeze({
 export function evaluateMemoryCycles(result) {
   if (!isObj(result) || !Array.isArray(result.cycles)) return verdict('NOT_TESTED', 'no_cycles')
   if (result.error) return verdict('INVALID', 'step_failed', { detail: result.error })
+  const iso = isolationOfRun(result)
+  if (iso) return iso
   const cycles = result.cycles
   if (cycles.length < MEMORY.cycles) return verdict('INVALID', 'too_few_cycles')
   const from = cycles[MEMORY.steadyFrom - 1]
@@ -438,6 +444,106 @@ export function evaluateLifecycle(rec) {
   return verdict('PASS', 'complete', detail)
 }
 
+/** B1.5.4E: paths only the RoadPilot app page loads; the lab never requests them (B1.5.4C). */
+export const APP_ONLY_PATHS = Object.freeze(['/src/app/', '/src/backend/'])
+/** Tauri's IPC endpoint on Windows (`http://ipc.localhost`); the lab makes no IPC call. */
+export const IPC_ORIGIN = 'http://ipc.localhost'
+/** Tauri's warning when Rust calls a callback that the current document does not know. */
+export const CALLBACK_WARNING = "Couldn't find callback id"
+
+const originOf = (url) => {
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
+}
+const pathnameOf = (url) => {
+  try {
+    return new URL(url).pathname
+  } catch {
+    return ''
+  }
+}
+const isIpcUrl = (url) =>
+  typeof url === 'string' && (url.startsWith('ipc:') || originOf(url) === IPC_ORIGIN)
+
+/**
+ * B1.5.4E (B1.5.4D race): was the measurement webview free of the RoadPilot app page?
+ *
+ * Input (run.mjs): { expectedMarker, pageOrigin, probe: { marker, resources }, requests, console }
+ * - `requests`: every request DevTools logged in the session (page and workers, before and after
+ *   the lab navigation); `console`: every console entry; `probe`: the outgoing app page right
+ *   before the lab navigation (openlab.mjs).
+ *
+ * INVALID (the run must be repeated) when the evidence is missing or incomplete, or when any of:
+ * - `placeholder_not_confirmed`: the probe did not find the placeholder marker;
+ * - `ipc_requests`: any request to Tauri's IPC endpoint in the session (the lab and the
+ *   placeholder make none, so every one came from the app page);
+ * - `app_resources_requested`: any request for an app-only module (`APP_ONLY_PATHS`);
+ * - `ipc_in_app_page_resources` / `app_resources_in_app_page`: the outgoing page's resource list
+ *   has IPC entries or ANY same-origin resource (the placeholder loads none);
+ * - `callback_warnings`: Tauri's "Couldn't find callback id" in the console. A corroborating
+ *   signal only: the request and probe checks decide without it.
+ * PASS (`isolated`) only when none applies. The `network` criterion is unaffected (it allows
+ * RoadPilot's IPC by design).
+ */
+export function evaluateAppPageIsolation(iso) {
+  if (!isObj(iso)) return verdict('INVALID', 'no_isolation_evidence')
+  if (typeof iso.expectedMarker !== 'string' || iso.expectedMarker !== PLACEHOLDER_MARKER)
+    return verdict('INVALID', 'incomplete_evidence:expectedMarker')
+  const origin = typeof iso.pageOrigin === 'string' ? originOf(iso.pageOrigin) : null
+  if (!origin) return verdict('INVALID', 'incomplete_evidence:pageOrigin')
+  if (!Array.isArray(iso.requests)) return verdict('INVALID', 'no_request_log')
+  if (!Array.isArray(iso.console)) return verdict('INVALID', 'no_console_log')
+  if (!isObj(iso.probe)) return verdict('INVALID', 'no_app_probe')
+  if (!Array.isArray(iso.probe.resources)) return verdict('INVALID', 'no_resource_list')
+  const urls = iso.requests.filter((r) => isObj(r) && typeof r.url === 'string').map((r) => r.url)
+  if (!urls.some((u) => u.startsWith(`${origin}/src/dev/mapLibreLab/`)))
+    return verdict('INVALID', 'instrumentation_saw_no_lab_request')
+  const resources = iso.probe.resources.filter((u) => typeof u === 'string')
+  const appOnly = (u) =>
+    originOf(u) === origin && APP_ONLY_PATHS.some((p) => pathnameOf(u).startsWith(p))
+  const found = {
+    ipcRequests: urls.filter(isIpcUrl),
+    appRequests: urls.filter(appOnly),
+    probeIpcResources: resources.filter(isIpcUrl),
+    probeAppResources: resources.filter((u) => originOf(u) === origin),
+  }
+  const callbackWarnings = iso.console.filter(
+    (c) => isObj(c) && String(c.text ?? '').includes(CALLBACK_WARNING),
+  ).length
+  const metrics = {
+    marker: iso.probe.marker ?? null,
+    requests: urls.length,
+    callbackWarnings,
+    ...Object.fromEntries(
+      Object.entries(found).map(([k, v]) => [k, { count: v.length, first: v.slice(0, 10) }]),
+    ),
+  }
+  const reasons = []
+  if (iso.probe.marker !== iso.expectedMarker) reasons.push('placeholder_not_confirmed')
+  if (found.ipcRequests.length) reasons.push('ipc_requests')
+  if (found.appRequests.length) reasons.push('app_resources_requested')
+  if (found.probeIpcResources.length) reasons.push('ipc_in_app_page_resources')
+  if (found.probeAppResources.length) reasons.push('app_resources_in_app_page')
+  if (callbackWarnings) reasons.push('callback_warnings')
+  if (reasons.length) return verdict('INVALID', reasons[0], { reasons, metrics })
+  return verdict('PASS', 'isolated', { metrics })
+}
+
+/**
+ * B1.5.4E: a perf or cycles run that recorded isolation evidence counts only when it is isolated;
+ * returns the INVALID verdict for such a run, or null (no evidence field: older results, or
+ * isolated).
+ */
+function isolationOfRun(run) {
+  if (run.appPageIsolation === undefined) return null
+  const iso = evaluateAppPageIsolation(run.appPageIsolation)
+  if (iso.verdict === 'PASS') return null
+  return verdict('INVALID', 'app_page_not_isolated', { detail: iso.reason, reasons: iso.reasons })
+}
+
 /** Lab-opening records of the runs in one report (older results without them are skipped). */
 function startupRecords(f, functional, perfRuns, cycleList) {
   const out = []
@@ -512,6 +618,19 @@ export function buildReport({ functional, perf, cycles, lifecycle } = {}) {
     criteria.screenshots = evaluateScreenshots(f.screenshots)
   const starts = startupRecords(f, functional, perfRuns, cycleList)
   if (starts.length) criteria.startup = evaluateStartup(starts)
+  // B1.5.4E: every run of a session (lifecycle record) or with isolation evidence is judged; a run
+  // of such a report without the evidence is INVALID. Pre-B1.5.4B results carry neither.
+  const judged = (r) => isObj(r) && (r.appPageIsolation !== undefined || lifecycle !== undefined)
+  const isoRuns = [
+    ...(functional && judged(f) ? [f] : []),
+    ...perfRuns.filter(judged),
+    ...cycleList.filter(judged),
+  ].map((r) => evaluateAppPageIsolation(r.appPageIsolation))
+  if (isoRuns.length === 1) criteria.appPageIsolation = isoRuns[0]
+  else if (isoRuns.length > 1)
+    criteria.appPageIsolation = verdict(combine(isoRuns.map((r) => r.verdict)), 'per_run', {
+      perRun: isoRuns,
+    })
   // One session record (a run) or several (`report` over a folder): one criterion per session.
   if (Array.isArray(lifecycle))
     for (const [i, rec] of lifecycle.entries())

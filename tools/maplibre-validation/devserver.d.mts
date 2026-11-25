@@ -3,6 +3,8 @@ export type DevStage =
   'preflight' | 'spawn' | 'listening' | 'ownership' | 'http' | 'labRoute' | 'modules'
 
 export declare const DEV_STAGES: readonly DevStage[]
+/** B1.5.4E: the stage after `modules` with `options.placeholder`. */
+export declare const PLACEHOLDER_STAGE: 'placeholder'
 export declare const DEV_TIMEOUTS: Readonly<{
   preflight: number
   listening: number
@@ -10,6 +12,7 @@ export declare const DEV_TIMEOUTS: Readonly<{
   http: number
   labRoute: number
   modules: number
+  placeholder: number
   request: number
   shutdown: number
   endpointDown: number
@@ -32,6 +35,18 @@ export interface ServerHandle {
   exitInfo(): { code: number | null; signal: string | null } | null
   /** Sends the IPC `shutdown`; false if the channel is closed. */
   requestShutdown(): boolean
+  /** B1.5.4E: sends the IPC `placeholder`; false if the channel is closed. */
+  requestPlaceholder?(): boolean
+}
+
+/** B1.5.4E: result of the `placeholder` stage. */
+export interface PlaceholderResult {
+  active: true
+  marker: string
+  ackMs: number
+  ms: number
+  app: { status: number; marker: string | null; scripts: number }
+  lab: { scripts: number; modules: number }
 }
 
 export interface ProcessEntry {
@@ -67,6 +82,8 @@ export interface DevServerOptions {
   label?: string
   timeouts?: Partial<typeof DEV_TIMEOUTS>
   limits?: Partial<typeof DEV_LIMITS>
+  /** B1.5.4E: switch `/` to the placeholder after readiness (stage `placeholder`). */
+  placeholder?: boolean
 }
 
 export interface RunningServer<H extends ServerHandle = ServerHandle> {
@@ -83,6 +100,11 @@ export interface RunningServer<H extends ServerHandle = ServerHandle> {
     urls: string[]
     passes: { pass: number; ms: number; modules: number; failures: unknown[] }[]
   }
+  /** True once every readiness stage passed (before the optional `placeholder` stage). */
+  ready: boolean
+  labScripts: string[]
+  requiredModuleUrls: string[]
+  placeholder?: PlaceholderResult
 }
 
 export interface StopResult {
@@ -111,7 +133,19 @@ export declare class DevServerError extends Error {
   diagnosticsSaveError: string | null
   cleanup: StopResult | null
   pid: number | null
+  /** B1.5.4E: `activatePlaceholder` refused before sending anything. */
+  refused?: boolean
 }
+
+export declare function activatePlaceholder<H extends ServerHandle>(
+  deps: DevServerDeps<H>,
+  server: Partial<RunningServer<H>> & Pick<RunningServer<H>, 'pid' | 'handle'>,
+  options?: {
+    labMarker?: string
+    timeouts?: Partial<typeof DEV_TIMEOUTS>
+    limits?: Partial<typeof DEV_LIMITS>
+  },
+): Promise<PlaceholderResult>
 
 export declare function moduleScripts(html: string, pageUrl: string): string[]
 export declare function moduleImports(code: string, moduleUrl: string): string[]

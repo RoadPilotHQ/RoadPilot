@@ -35,6 +35,16 @@
  *                 on a cold start; a stable second pass shows it has settled. Bounded passes.
  * The server process exiting at any point fails the current stage at once.
  *
+ * B1.5.4E (app-page isolation, `options.placeholder`): one more stage after readiness:
+ * 8. `placeholder` the server switches `/` to the empty, marked placeholder (placeholder.mjs):
+ *                 IPC `placeholder`, acknowledged by `placeholder-active` from the server's own
+ *                 PID with the expected marker; then over HTTP `/` must be the placeholder (marker,
+ *                 no script), the lab page must still be the lab with the same module scripts, and
+ *                 one pass over the lab's modules and the required URLs must answer 200 with
+ *                 JavaScript, every URL from the stable readiness set. RoadPilot starts only after
+ *                 this stage. It is refused (`activatePlaceholder`) unless readiness passed, and it
+ *                 is not retried; a failure stops the server like any failed start.
+ *
  * A failed start saves diagnostics, stops the server it started (gracefully, as below) and
  * throws `DevServerError`. Nothing is retried here.
  *
@@ -44,6 +54,8 @@
  * cleanup FAIL with the process identities, and the session stops. Processes that the harness did
  * not start are never looked up by name and never touched.
  */
+
+import { PLACEHOLDER_MARKER, PLACEHOLDER_META } from './placeholder.mjs'
 
 export const DEV_STAGES = Object.freeze([
   'preflight',
@@ -55,6 +67,9 @@ export const DEV_STAGES = Object.freeze([
   'modules',
 ])
 
+/** B1.5.4E: the stage after `modules` when `options.placeholder` is set. */
+export const PLACEHOLDER_STAGE = 'placeholder'
+
 export const DEV_TIMEOUTS = Object.freeze({
   preflight: 10_000,
   listening: 30_000,
@@ -62,6 +77,8 @@ export const DEV_TIMEOUTS = Object.freeze({
   http: 15_000,
   labRoute: 15_000,
   modules: 120_000,
+  /** IPC `placeholder` until `placeholder-active` (B1.5.4E). */
+  placeholder: 5_000,
   /** One HTTP request. */
   request: 10_000,
   /** IPC shutdown until the process has exited (measured: 0.1-0.9 s). */
@@ -179,12 +196,114 @@ async function crawl(entries, deps, t, limits) {
   return { urls: [...seen].sort(), failures }
 }
 
+const placeholderMetaRe = new RegExp(
+  `<meta\\s+name=["']${PLACEHOLDER_META}["']\\s+content=["']([^"']*)["']`,
+  'i',
+)
+
+/**
+ * B1.5.4E: the `placeholder` stage (see the header). Throws StageFail; never retries.
+ * Needs a server that passed readiness (`server.ready`), its recorded lab scripts and modules.
+ */
+async function placeholderStage(deps, server, t, limits, labMarker) {
+  const stage = PLACEHOLDER_STAGE
+  if (server?.ready !== true)
+    throw new StageFail(stage, 'refused: the dev server has not passed readiness')
+  const h = server.handle
+  if (typeof h?.requestPlaceholder !== 'function')
+    throw new StageFail(stage, 'refused: the server handle cannot switch the app page')
+  if (h.exitInfo()) throw new StageFail(stage, 'refused: the server process has exited')
+  const t0 = deps.now()
+  if (!h.requestPlaceholder()) throw new StageFail(stage, 'IPC channel closed; not switched')
+  let ack
+  for (;;) {
+    const msgs = h.messages()
+    ack = msgs.find((m) => m?.type === 'placeholder-active' || m?.type === 'placeholder-refused')
+    if (ack) break
+    const x = h.exitInfo()
+    if (x) throw new StageFail(stage, `server process exited (code ${x.code}) before acknowledging`)
+    if (deps.now() - t0 >= t.placeholder)
+      throw new StageFail(stage, `no placeholder acknowledgement within ${t.placeholder} ms`)
+    await deps.sleep(t.poll)
+  }
+  const ackMs = deps.now() - t0
+  if (ack.type === 'placeholder-refused')
+    throw new StageFail(stage, `server refused the switch (${ack.reason ?? 'no reason'})`)
+  if (ack.pid !== server.pid)
+    throw new StageFail(stage, `acknowledgement from PID ${ack.pid}, not ${server.pid}`)
+  if (ack.marker !== PLACEHOLDER_MARKER)
+    throw new StageFail(stage, `acknowledged marker ${JSON.stringify(ack.marker)} is not expected`)
+
+  // One request each, no retry: the switch either took effect or the session stops.
+  const app = await deps.fetch(server.appUrl, t.request)
+  const appMarker = String(app.text ?? '').match(placeholderMetaRe)?.[1] ?? null
+  if (app.status !== 200 || !isHtml(app.contentType))
+    throw new StageFail(stage, `${server.appUrl} answered ${app.status} ${app.contentType ?? ''}`)
+  if (appMarker !== PLACEHOLDER_MARKER)
+    throw new StageFail(stage, `${server.appUrl} is not the placeholder (marker missing)`)
+  if (/<script\b/i.test(app.text))
+    throw new StageFail(stage, `${server.appUrl} placeholder contains a script`)
+
+  const lab = await deps.fetch(server.labUrl, t.request)
+  if (lab.status !== 200 || !isHtml(lab.contentType) || !String(lab.text).includes(labMarker))
+    throw new StageFail(stage, `${server.labUrl} is no longer the lab page after the switch`)
+  const labScripts = moduleScripts(lab.text, server.labUrl)
+  if (labScripts.join('\n') !== (server.labScripts ?? []).join('\n'))
+    throw new StageFail(stage, `${server.labUrl} module scripts changed after the switch`)
+  const pass = await crawl(
+    [...new Set([...labScripts, ...(server.requiredModuleUrls ?? [])])],
+    deps,
+    t,
+    limits,
+  )
+  const known = new Set(server.modules?.urls ?? [])
+  const unknown = pass.urls.filter((u) => !known.has(u))
+  if (pass.failures.length)
+    throw new StageFail(
+      stage,
+      `lab modules not served after the switch (${pass.failures.length} failed: ${pass.failures
+        .slice(0, 3)
+        .map((f) => f.url)
+        .join(', ')})`,
+    )
+  if (unknown.length)
+    throw new StageFail(stage, `lab modules changed after the switch (${unknown.slice(0, 3)})`)
+  return {
+    active: true,
+    marker: ack.marker,
+    ackMs,
+    ms: deps.now() - t0,
+    app: { status: app.status, marker: appMarker, scripts: 0 },
+    lab: { scripts: labScripts.length, modules: pass.urls.length },
+  }
+}
+
+/**
+ * B1.5.4E: switches a running, READY server's `/` to the placeholder. Refused (DevServerError,
+ * stage `placeholder`, `refused: true`, nothing sent) unless `startDevServer` completed readiness
+ * for this server. `startDevServer` with `options.placeholder` runs it as its last stage; this
+ * export exists for callers and tests that hold a server object. Does not stop the server.
+ */
+export async function activatePlaceholder(deps, server, options = {}) {
+  const t = { ...DEV_TIMEOUTS, ...(options.timeouts ?? {}) }
+  const limits = { ...DEV_LIMITS, ...(options.limits ?? {}) }
+  try {
+    server.placeholder = await placeholderStage(deps, server, t, limits, options.labMarker ?? '')
+    return server.placeholder
+  } catch (e) {
+    if (!(e instanceof StageFail)) throw e
+    throw new DevServerError(e.stage, e.message, { refused: /^refused:/.test(e.message) })
+  }
+}
+
 /**
  * @param {object} deps    spawn(), fetch(url, ms) → {status, contentType, text}, portOwners(port),
  *                         descendants(pid), isAlive(pid), save(name, data) → path, now(), sleep(ms)
  * @param {object} options origin, appPath, labPath, labMarker, requiredModules, label, timeouts,
- *                         limits
- * @returns the running server ({ pid, origin, handle, stages, events, descendants, modules })
+ *                         limits, placeholder (B1.5.4E: switch `/` to the placeholder after
+ *                         readiness)
+ * @returns the running server ({ pid, origin, handle, stages, events, descendants, modules,
+ *          ready, placeholder })
  */
 export async function startDevServer(deps, options) {
   const t = { ...DEV_TIMEOUTS, ...(options.timeouts ?? {}) }
@@ -359,6 +478,14 @@ export async function startDevServer(deps, options) {
         failures: p.failures,
       })),
       urls: stable.urls,
+    }
+    server.labScripts = moduleScripts(labHtml, labUrl)
+    server.requiredModuleUrls = (options.requiredModules ?? []).map((p) => new URL(p, origin).href)
+    server.ready = true
+    if (options.placeholder) {
+      enter(PLACEHOLDER_STAGE)
+      server.placeholder = await placeholderStage(deps, server, t, limits, options.labMarker)
+      mark('placeholder', { marker: server.placeholder.marker, ackMs: server.placeholder.ackMs })
     }
     enter('ready')
     server.stages = log.stages
