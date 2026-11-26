@@ -2,13 +2,9 @@
 
 How the runtime criteria of the MapLibre prototype ([maplibre-prototype.md](maplibre-prototype.md)) will be measured.
 
-> **Status: B1.5 run stopped (NO-GO); B1.5.1 corrections made statically, not runtime-tested.** B1.5 (2026-11-22, AMD only) ran the harness and found two defects: MapLibre workers without the projection handler (lab) and lab pages that did not open after app start (harness). Both are corrected in B1.5.1 (see [B1.5.1 corrections](#b151-corrections)), verified by unit tests against fakes only. The B1.5 results stay in `out/` unchanged. Every runtime criterion needs a new run, which needs a separate approval.
+> **Status (B1.5.5, 2026-11-26): harness validated in RoadPilot's WebView2 (AMD); B1 not passed.** The B1.5.4F positive series (20 of 20 valid functional sessions) and the B1.5.4F negative control (`detected`) are GO for the harness and the app-page isolation gate. The positional accuracy criteria still FAIL in every run and are unresolved; perf, memory/cycles, labels and the NVIDIA GPU are NOT TESTED. See [B1.5.4 runtime results](#b154-runtime-results-b154b154f).
 >
-> **B1.5.4B (harness reliability):** the three harness defects of B1.5.4 / B1.5.4A (screenshot name collision, Vite cold start, Vite shutdown) are corrected and covered by automated tests, see [B1.5.4B harness reliability correction](#b154b-harness-reliability-correction). The corrected harness has **not** run against RoadPilot's WebView2 yet; a later runtime phase must validate it.
->
-> **B1.5.4E (app-page isolation):** the harness-owned dev server serves an empty, marked placeholder at `/` once readiness has passed, so RoadPilot's app page no longer loads before the lab, and `report.mjs` judges every run with `appPageIsolation`. See [B1.5.4E app-page isolation](#b154e-app-page-isolation). Covered by automated tests only; it has not run in WebView2.
->
-> **B1.5.4G (negative control):** `run.mjs control --negative-control` reproduces the app-page race on purpose so that a runtime test can show the detector works; it is never a measurement. See [B1.5.4G negative-control mode](#b154g-negative-control-mode). It has not run in WebView2.
+> **History:** B1.5 (2026-11-22, AMD only) ran the harness, found two defects (workers without the projection handler; lab pages that did not open after app start) and was stopped (NO-GO). B1.5.1 corrected both statically ([B1.5.1 corrections](#b151-corrections)); B1.5.2 and B1.5.3 followed. B1.5.4B corrected three harness defects ([B1.5.4B](#b154b-harness-reliability-correction)), B1.5.4E added app-page isolation ([B1.5.4E](#b154e-app-page-isolation)), B1.5.4G the negative-control mode ([B1.5.4G](#b154g-negative-control-mode)). All three have since run in WebView2 (B1.5.4C, B1.5.4F). The B1.5 results stay in `out/` unchanged.
 
 ## Location
 
@@ -416,7 +412,7 @@ The real Vite path (`viteserver.mjs` with the repository's config, through `devs
 
 ### Remaining runtime risks
 
-- The corrected harness has not run against RoadPilot's WebView2. The next runtime phase must show that a session passes readiness, the lab opening, the tests and the cleanup in one go.
+- _(Resolved in B1.5.4C and B1.5.4F, see [B1.5.4 runtime results](#b154-runtime-results-b154b154f).)_ Sessions passed readiness, the lab opening, the tests and the cleanup in one go in WebView2 (5 of 5 in B1.5.4C, 20 of 20 in B1.5.4F).
 - The `modules` stage proves that the server has settled for the modules it can see statically. A module that the lab loads only through a computed URL would not be warmed.
 - A cold start now takes about 40 s before RoadPilot starts. The 120 s `modules` deadline leaves margin on this machine only.
 - `Get-NetTCPConnection` and `Get-CimInstance` (PowerShell) are needed for ownership checks, and each call takes about 1–2 s.
@@ -473,7 +469,7 @@ Harness only. RoadPilot's application code, its Tauri configuration, the product
 
 ### Remaining runtime risks
 
-- Not run against RoadPilot's WebView2. A runtime phase must show that the probe finds the marker, that no IPC request or callback warning appears over many starts, and (as a negative control) that the detector flags the race when the placeholder is off.
+- _(Resolved in B1.5.4F, see [B1.5.4 runtime results](#b154-runtime-results-b154b154f).)_ In WebView2 the probe found the marker in 20 of 20 starts with no IPC request or callback warning, and the negative control (placeholder off) was `detected`.
 - Tauri's initialization scripts still run in the placeholder document. In B1.5.4C they made no IPC call on their own (lab pages 1–4: none).
 - `/src/app/` and `/src/backend/` as app-only paths depend on the lab's imports. A lab import from those folders would make every run INVALID, which is loud rather than silent.
 
@@ -509,13 +505,38 @@ node tools/maplibre-validation/run.mjs control --negative-control --confirm-runt
   - `negativeControl.test.ts`: command-line acceptance and refusals; detected, inconclusive and INVALID outcomes; a control can never pass; the report guards; unchanged `appPageIsolation` and `network`; source checks of the `run.mjs` wiring.
   - `openLab.test.ts`: waits for the render before the probe and the navigation; a page that never renders fails closed without a retry; conflicting options are refused before launch; default runs never wait for a render.
 
+## B1.5.4 runtime results (B1.5.4–B1.5.4F)
+
+**MEASUREMENT.** RoadPilot's WebView2 158 on the AMD iGPU (`ANGLE (AMD, AMD Radeon(TM) Graphics (0x00001681) Direct3D11)`), synthetic data, Dry Run active; no game, no driving, no input simulation. The NVIDIA GPU was not used. Evidence folders are under `tools/maplibre-validation/out/` (ignored by Git) and are kept unchanged.
+
+| Phase       | Date       | Evidence                                                                   | Result                                                                                                                                                                                                                                                                                                                                                                                     | Verdict                              |
+| ----------- | ---------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------ |
+| B1.5.4      | 2026-11-23 | `b154-20261123-154840`                                                     | Test A (lab opening) 5/5 PASS. Test B (worker projection) PASS: handler installed about 4 ms after the entry started, 0 messages before installation, 6/6 workers; a failing worker URL fails loudly and recovers. Test C: accuracy FAIL at zoom 1/3 (scs 8.287 px), bit-identical to B1.5; the functional steps INVALID through the screenshot name collision. Test E not run (stop rule) | CONDITIONAL GO                       |
+| B1.5.4A     | 2026-11-23 | `b154a-20261123-170102`                                                    | Test E alone: 10 forced `WorkerPool.restart()` cycles, 10/10 PASS, 11 workers, generation 11, 0 CSP violations or external requests. A cold Vite server made attempt 1 fail in `openLab` (fixed in B1.5.4B)                                                                                                                                                                                | GO (worker stability only)           |
+| B1.5.4C     | 2026-11-25 | `b154c-20261125-155200-s1` … `-s5`, `-meta`                                | Corrected harness, 5 functional sessions: lifecycle PASS, lab opened at the first attempt, 15/15 screenshots unique, network offline, 0 CSP violations, exceptions or projection warnings, graceful Vite stop (about 1.2 s). Session 5: the app page ran during the lab navigation (6 IPC calls, 144 Tauri callback warnings), not flagged by the harness of that time                     | CONDITIONAL GO                       |
+| B1.5.4D     | 2026-11-25 | none (read-only)                                                           | Cause of the session 5 race confirmed from source: `src/app/main.tsx` creates its sources at module level, and Tauri keeps JS listeners per webview, not per document. Led to B1.5.4E                                                                                                                                                                                                      | investigation                        |
+| B1.5.4F     | 2026-11-25 | `b154f-negative-control-20261125-172603`                                   | Negative control (B1.5.4G mode): outcome **`detected`**: 13 IPC requests, 5 app modules, 67 outgoing-page resources, app render 273 ms. No callback warnings in the 2 s hold                                                                                                                                                                                                               | detector works (never a measurement) |
+| B1.5.4F     | 2026-11-25 | `b154f-positive-20261125-172745-r01` … `-r10`                              | r01–r09 isolated; r10 INVALID `app_resources_in_app_page`, caused only by the browser's automatic `/favicon.ico` request of the placeholder (detector false positive). Series stopped; fixed in `3231a33` (inline `data:,` icon, criteria unchanged)                                                                                                                                       | NO-GO (for `bf79137`)                |
+| B1.5.4F     | 2026-11-26 | `b154f-positive-20261126-170742-r01`, `b154f-positive-20261126-171038-r01` | Both refused by the session preflight (`DESKTOP BUSY: NVIDIA utilisation 99 %`); nothing was started. Stopped attempts, not counted                                                                                                                                                                                                                                                        | INVALID (not counted)                |
+| **B1.5.4F** | 2026-11-26 | `b154f-positive-20261126-172223-r01` … `-r20`                              | `3231a33`, normal `functional` mode, WebView2 `Edg/158.0.4370.45`: **20 of 20 valid.** See below                                                                                                                                                                                                                                                                                           | **GO**                               |
+
+**B1.5.4F series (20 runs, identical in every run):** PASS for every session stage (preflight, dev server, body, app closed, graceful dev-server stop in 1140–1226 ms), `network` (offline), `contextLoss` (restored), `releaseRemount` (clean), `workerProjection` (verified), `screenshots` (all saved), `startup` (first attempt), `appPageIsolation` (isolated) and `sessionLifecycle` (complete). The placeholder probe listed 0 resources; 0 IPC requests, 0 app-module requests, 0 callback warnings and 0 exceptions. Each run still logs one `/favicon.ico` 404, always after the lab navigation: it comes from the lab page, which declares no icon, not from the placeholder.
+
+**Excluded from the verdict, and unresolved or untested:**
+
+- `accuracyScs`, `accuracyIdentity`, `accuracyScsDpr15`: FAIL (`error_above_tolerance`) in all 20 runs, with bit-identical results. Collected, but excluded from the verdict by the authorization of the run. Unresolved, see [maplibre-prototype.md, positional accuracy](maplibre-prototype.md#positional-accuracy-unresolved).
+- `labels`: NOT TESTED (`visual_review_required`).
+- `perf`, `memory`: NOT TESTED (perf and cycles modes not run).
+- NVIDIA (`--nv`), the GTX 1070 and the Intel HD 530: NOT TESTED.
+
+The harness's own `OVERALL` line is FAIL in every run, only because it includes the accuracy criteria.
+
 ## Open runtime questions
 
 Everything in the [acceptance matrix](maplibre-prototype.md#acceptance-matrix) marked NOT TESTED. In addition, for the harness itself:
 
-- Whether it works end to end. The DevTools, worker auto-attach and sampler code paths were used in M3 but have not run in this form.
-- Whether the lab's first configuration on page load finishes before the harness's first `configure` call. The harness waits for it, up to 80 s.
-- Whether `state().listeners` and `pendingWaits` are 0 after `release()` in a real browser.
+- Whether the `perf` and `cycles` modes and the sampler work end to end; they have not run in this form. _(The `functional` and `control` modes, DevTools and worker auto-attach ran end to end in WebView2 in B1.5.4C and B1.5.4F.)_
+- _(Answered in B1.5.4F: the lab's first configuration finished before the harness's first `configure` call, `initialConfig` about 1 s; and `releaseRemount` was `clean`, which includes 0 listeners and 0 pending waits after `release()`, in 20 of 20 runs.)_
 - Whether MapLibre's line interiors are drawn exactly in the style colours, which the ±4 tolerance assumes (opaque lines on an opaque background, no colour management in WebGL).
 - Whether first visible geometry of `maplibre-nolabels` and `m3` can be compared at all, given the different detection methods and timed work ([Comparison with M3](#comparison-with-m3-b141)). One way to check this at runtime would be to apply the same pixel classification to M3's first frame. That is not implemented.
 - Which numeric memory growth limit, if any, is approved as an acceptance criterion.
