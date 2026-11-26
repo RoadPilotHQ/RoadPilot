@@ -23,24 +23,25 @@ Statements are marked **FACT** (follows from code, source or a test that ran), *
 
 ## Layout
 
-| Path                                           | Role                                                                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `src/dev/mapLibreLab/index.html`               | Lab page; carries the production CSP verbatim as a meta tag                                                    |
-| `src/dev/mapLibreLab/main.ts`                  | Lab UI, MapLibre and M3 mounting, load timing, benchmark driver, accuracy, context loss                        |
-| `src/dev/mapLibreLab/coordinates.ts`           | Display convention, carrier conversion, registered CRS, expected screen positions                              |
-| `src/dev/mapLibreLab/scsProjection.worker.mjs` | Projection handler for MapLibre's workers (GeoJSON in the registered CRS)                                      |
-| `src/dev/mapLibreLab/scsWorkerEntry.mjs`       | B1.5.3: the lab's MapLibre worker entry; installs the handler while the worker starts                          |
-| `src/dev/mapLibreLab/scsWorkerProbe.mjs`       | B1.5.3: counts worker messages before the handler installation (ordering evidence)                             |
-| `src/dev/mapLibreLab/workerProjection.ts`      | B1.5.1/B1.5.3: sets the worker entry, keeps the pool, verifies every worker generation                         |
-| `src/dev/mapLibreLab/syntheticData.ts`         | Scenarios A–D, GeoJSON conversion, conversion to the M3 `Scenario`                                             |
-| `src/dev/mapLibreLab/mapStyle.ts`              | Inline style: no URL of any kind                                                                               |
-| `src/dev/mapLibreLab/benchmark.ts`             | Frame-gap statistics and the M3 lab's pan/zoom camera paths                                                    |
-| `src/dev/mapLibreLab/lifecycle.ts`             | B1.2: load session (timeouts, release, listener ownership), retryable global setup                             |
-| `src/dev/mapLibreLab/accuracyReport.ts`        | B1.2: accuracy evaluation; infrastructure errors kept apart from rendering results                             |
-| `src/dev/mapLibreLab/roadPixels.ts`            | B1.4: classifies road-layer pixels for first visible geometry                                                  |
-| `src/dev/mapLibreLab/tests/`                   | Coordinates, synthetic data, style, isolation, lifecycle, accuracy, road pixels, validation report (109 tests) |
-| `tools/maplibre-validation/`                   | B1.4: runtime validation harness and its evaluation ([maplibre-validation.md](maplibre-validation.md))         |
-| `package.json`                                 | `maplibre-gl` `6.19.0`, exact, `devDependencies` only                                                          |
+| Path                                           | Role                                                                                                                               |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `src/dev/mapLibreLab/index.html`               | Lab page; carries the production CSP verbatim as a meta tag                                                                        |
+| `src/dev/mapLibreLab/main.ts`                  | Lab UI, MapLibre and M3 mounting, load timing, benchmark driver, accuracy, context loss                                            |
+| `src/dev/mapLibreLab/coordinates.ts`           | Display convention, carrier conversion, registered CRS, expected screen positions                                                  |
+| `src/dev/mapLibreLab/scsProjection.worker.mjs` | Projection handler for MapLibre's workers (GeoJSON in the registered CRS)                                                          |
+| `src/dev/mapLibreLab/scsWorkerEntry.mjs`       | B1.5.3: the lab's MapLibre worker entry; installs the handler while the worker starts                                              |
+| `src/dev/mapLibreLab/scsWorkerProbe.mjs`       | B1.5.3: counts worker messages before the handler installation (ordering evidence)                                                 |
+| `src/dev/mapLibreLab/workerProjection.ts`      | B1.5.1/B1.5.3: sets the worker entry, keeps the pool, verifies every worker generation                                             |
+| `src/dev/mapLibreLab/syntheticData.ts`         | Scenarios A–D, GeoJSON conversion, conversion to the M3 `Scenario`                                                                 |
+| `src/dev/mapLibreLab/mapStyle.ts`              | Inline style: no URL of any kind                                                                                                   |
+| `src/dev/mapLibreLab/benchmark.ts`             | Frame-gap statistics and the M3 lab's pan/zoom camera paths                                                                        |
+| `src/dev/mapLibreLab/lifecycle.ts`             | B1.2: load session (timeouts, release, listener ownership), retryable global setup                                                 |
+| `src/dev/mapLibreLab/accuracyReport.ts`        | B1.2: accuracy evaluation; infrastructure errors kept apart from rendering results. B1.5.5: device pixels, `not_measurable` probes |
+| `src/dev/mapLibreLab/probeMeasure.ts`          | B1.5.5: probe measurability inside the CRS world; dot finder that ignores cleared and foreign pixels                               |
+| `src/dev/mapLibreLab/roadPixels.ts`            | B1.4: classifies road-layer pixels for first visible geometry                                                                      |
+| `src/dev/mapLibreLab/tests/`                   | Coordinates, synthetic data, style, isolation, lifecycle, accuracy, road pixels, validation report (109 tests)                     |
+| `tools/maplibre-validation/`                   | B1.4: runtime validation harness and its evaluation ([maplibre-validation.md](maplibre-validation.md))                             |
+| `package.json`                                 | `maplibre-gl` `6.19.0`, exact, `devDependencies` only                                                                              |
 
 The lab is at `http://127.0.0.1:1420/src/dev/mapLibreLab/index.html` on the dev server (`npm run dev`). `window.mapLibreLab` is the harness interface: `configure`, `run('pan' | 'zoom')`, `settle`, `accuracy`, `apiChecks`, `labelStats`, `contextLoss`, `release`, `remount`, `gpuInfo`, `state`.
 
@@ -186,34 +187,34 @@ PASS = evidence recorded; PARTIAL = part verified or met with a documented devia
 
 ### Brief (Phase 2.4D B1)
 
-| #   | Criterion                                                                    | Result         | Evidence / reason                                                                                            |
-| --- | ---------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------ |
-| 1   | Repository preflight clean, `e1d2fe9` = `origin/main`                        | PASS           | `roadpilot-git.ps1 status`, `git status`, `rev-parse`                                                        |
-| 2   | `maplibre-gl` 6.19.0 pinned, dev-only, no PMTiles, no extra libraries        | PASS           | `package.json`, isolation test                                                                               |
-| 3   | Prototype reachable only through a dev-only entry, never imported by the app | PASS           | isolation test; no build input                                                                               |
-| 4   | Excluded from `dist`; production build excludes MapLibre                     | PASS           | `dist` search empty; hashes identical to HEAD                                                                |
-| 5   | Planar identity / custom projection, no Mercator, no WGS84                   | PASS (static)  | registered CRS, linear converter (unit tests); not observed at runtime                                       |
-| 6   | Display X = X, Y = −Z, no additional scale or offset                         | PARTIAL        | exact in the CRS plane; the API needs a documented, exact 2⁻¹¹ carrier because `LngLat` rejects \|lat\| > 90 |
-| 7   | Positional error ≤ 0.5 CSS px (zooms, sizes, magnitudes)                     | NOT TESTED     | unit-level expectations only; MapLibre `project` and rendered pixels never measured                          |
-| 8   | East / north / no axis swap / no mirror / no hidden Mercator (rendered)      | NOT TESTED     | verified for the lab's own math only                                                                         |
-| 9   | Scenarios A–D deterministic, ≥ 100k / ≥ 1M segments, no SCS data             | PASS           | unit tests (exact 100,000 / 1,000,000, reproducible hashes)                                                  |
-| 10  | Road styles for five classes, RoadPilot design language                      | PARTIAL        | style built and tested (widths = production widths); never rendered                                          |
-| 11  | Labels from local glyphs, collision, zoom visibility                         | NOT TESTED     | configuration tested; glyphs local but not bundled (see Labels)                                              |
-| 12  | No external font / glyph / sprite / style URL                                | PASS (static)  | style and source tests                                                                                       |
-| 13  | Interaction: wheel, drag, buttons, whole map, north-up, loading / error      | NOT TESTED     | implemented, never run                                                                                       |
-| 14  | **Zero external network requests** (start, render, interaction, labels)      | **NOT TESTED** | instrumentation built; no log exists                                                                         |
-| 15  | Production CSP unchanged and not weakened                                    | PASS           | `tauri.conf.json` unchanged; lab carries it verbatim (test)                                                  |
-| 16  | Works under the production CSP (workers etc.)                                | NOT TESTED     | source analysis suggests yes (HYPOTHESIS); sprites / icons would be blocked (FACT)                           |
-| 17  | First visible ≤ 100 ms (100k) / ≤ 500 ms (1M)                                | NOT TESTED     | —                                                                                                            |
-| 18  | Frame gap p95 ≤ 20 ms (100k) / ≤ 33 ms (1M)                                  | NOT TESTED     | —                                                                                                            |
-| 19  | Frame gap max ≤ 50 ms (100k) / ≤ 75 ms (1M)                                  | NOT TESTED     | —                                                                                                            |
-| 20  | Pan responsive at 100k and 1M                                                | NOT TESTED     | —                                                                                                            |
-| 21  | Comparison with M3 on identical data                                         | NOT TESTED     | identical-data path built and unit-tested                                                                    |
-| 22  | Memory, GPU memory, no growth over repeated pan / zoom                       | NOT TESTED     | —                                                                                                            |
-| 23  | No WebGL errors, crashes or context-loss loop                                | NOT TESTED     | —                                                                                                            |
-| 24  | Test environment recorded                                                    | PARTIAL        | hardware, driver and WebView2 read on the machine; no run in it                                              |
-| 25  | Production code, Rust, RPMT, IPC, telemetry, SDK, Input Plugin, M3 unchanged | PASS           | diff: only `package.json`, `package-lock.json`, `src/dev/mapLibreLab/`, this file                            |
-| 26  | Typecheck, lint, format, tests, build                                        | PASS           | `npm run check` (43 files, 482 tests after B1.4); `npm run build`                                            |
+| #   | Criterion                                                                                                                            | Result         | Evidence / reason                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1   | Repository preflight clean, `e1d2fe9` = `origin/main`                                                                                | PASS           | `roadpilot-git.ps1 status`, `git status`, `rev-parse`                                                        |
+| 2   | `maplibre-gl` 6.19.0 pinned, dev-only, no PMTiles, no extra libraries                                                                | PASS           | `package.json`, isolation test                                                                               |
+| 3   | Prototype reachable only through a dev-only entry, never imported by the app                                                         | PASS           | isolation test; no build input                                                                               |
+| 4   | Excluded from `dist`; production build excludes MapLibre                                                                             | PASS           | `dist` search empty; hashes identical to HEAD                                                                |
+| 5   | Planar identity / custom projection, no Mercator, no WGS84                                                                           | PASS (static)  | registered CRS, linear converter (unit tests); not observed at runtime                                       |
+| 6   | Display X = X, Y = −Z, no additional scale or offset                                                                                 | PARTIAL        | exact in the CRS plane; the API needs a documented, exact 2⁻¹¹ carrier because `LngLat` rejects \|lat\| > 90 |
+| 7   | Positional error ≤ 0.5 device px (zooms, sizes, magnitudes; measurable probes inside the CRS world; B1.5.5 decision, was 0.5 CSS px) | NOT TESTED     | unit-level expectations only; MapLibre `project` and rendered pixels never measured                          |
+| 8   | East / north / no axis swap / no mirror / no hidden Mercator (rendered)                                                              | NOT TESTED     | verified for the lab's own math only                                                                         |
+| 9   | Scenarios A–D deterministic, ≥ 100k / ≥ 1M segments, no SCS data                                                                     | PASS           | unit tests (exact 100,000 / 1,000,000, reproducible hashes)                                                  |
+| 10  | Road styles for five classes, RoadPilot design language                                                                              | PARTIAL        | style built and tested (widths = production widths); never rendered                                          |
+| 11  | Labels from local glyphs, collision, zoom visibility                                                                                 | NOT TESTED     | configuration tested; glyphs local but not bundled (see Labels)                                              |
+| 12  | No external font / glyph / sprite / style URL                                                                                        | PASS (static)  | style and source tests                                                                                       |
+| 13  | Interaction: wheel, drag, buttons, whole map, north-up, loading / error                                                              | NOT TESTED     | implemented, never run                                                                                       |
+| 14  | **Zero external network requests** (start, render, interaction, labels)                                                              | **NOT TESTED** | instrumentation built; no log exists                                                                         |
+| 15  | Production CSP unchanged and not weakened                                                                                            | PASS           | `tauri.conf.json` unchanged; lab carries it verbatim (test)                                                  |
+| 16  | Works under the production CSP (workers etc.)                                                                                        | NOT TESTED     | source analysis suggests yes (HYPOTHESIS); sprites / icons would be blocked (FACT)                           |
+| 17  | First visible ≤ 100 ms (100k) / ≤ 500 ms (1M)                                                                                        | NOT TESTED     | —                                                                                                            |
+| 18  | Frame gap p95 ≤ 20 ms (100k) / ≤ 33 ms (1M)                                                                                          | NOT TESTED     | —                                                                                                            |
+| 19  | Frame gap max ≤ 50 ms (100k) / ≤ 75 ms (1M)                                                                                          | NOT TESTED     | —                                                                                                            |
+| 20  | Pan responsive at 100k and 1M                                                                                                        | NOT TESTED     | —                                                                                                            |
+| 21  | Comparison with M3 on identical data                                                                                                 | NOT TESTED     | identical-data path built and unit-tested                                                                    |
+| 22  | Memory, GPU memory, no growth over repeated pan / zoom                                                                               | NOT TESTED     | —                                                                                                            |
+| 23  | No WebGL errors, crashes or context-loss loop                                                                                        | NOT TESTED     | —                                                                                                            |
+| 24  | Test environment recorded                                                                                                            | PARTIAL        | hardware, driver and WebView2 read on the machine; no run in it                                              |
+| 25  | Production code, Rust, RPMT, IPC, telemetry, SDK, Input Plugin, M3 unchanged                                                         | PASS           | diff: only `package.json`, `package-lock.json`, `src/dev/mapLibreLab/`, this file                            |
+| 26  | Typecheck, lint, format, tests, build                                                                                                | PASS           | `npm run check` (43 files, 482 tests after B1.4); `npm run build`                                            |
 
 ### ADR-003 B1 criteria
 
@@ -371,22 +372,32 @@ This GO is not a B1 PASS. It says that the measurement environment is trustworth
 
 ### Positional accuracy (unresolved)
 
-**MEASUREMENT (B1.5.4F, 20 runs, bit-identical results):** `accuracyScs` max 8.287 CSS px, `accuracyIdentity` 0.708, `accuracyScsDpr15` 6.779 (tolerance 0.5 CSS px, `ACCURACY_TOLERANCE_PX` in `accuracyReport.ts`). The failing probes occur only at zoom 1 and 3. MapLibre's `project` / `unproject` errors stay at or below 7 × 10⁻¹⁰ / 5 × 10⁻⁸ px at every zoom; only the **rendered** centroid fails.
+**MEASUREMENT (B1.5.4F, 20 runs, bit-identical results):** `accuracyScs` max 8.287 CSS px, `accuracyIdentity` 0.708, `accuracyScsDpr15` 6.779 (judged under the rule of that time: tolerance 0.5 CSS px, then `ACCURACY_TOLERANCE_PX` in `accuracyReport.ts`). The failing probes occur only at zoom 1 and 3. MapLibre's `project` / `unproject` errors stay at or below 7 × 10⁻¹⁰ / 5 × 10⁻⁸ px at every zoom; only the **rendered** centroid fails.
 
 **Static analysis (B1.5.5, no runtime, nothing changed):**
 
 - **FACT (lab source):** `probeGrid` (`main.ts`) places the 3 × 3 probes at ±30 % of the view. At zoom 1 and 3 the view is larger than the CRS world (2¹⁸ units: 1,024 CSS px wide at zoom 1), so with centres near ±120,000 some probes lie outside the world.
 - **FACT (MapLibre 6.19.0 `dist/maplibre-gl-dev.mjs`):** the frame is cleared to `Color.transparent`, and the background layer is drawn only over the covering tiles. With `renderWorldCopies: false` nothing is painted outside the world, so those pixels read back as RGB (0, 0, 0).
-- **FACT (lab source):** `findDot` weights each pixel by its distance from the background colour towards the probe colour and accepts blue within 140. A pixel (0, 0, 0) gets the full weight 1, so the cleared area outside the world counts as "probe" pixels.
+- **FACT (lab source, before the B1.5.5 correction):** `findDot` weights each pixel by its distance from the background colour towards the probe colour and accepts blue within 140. A pixel (0, 0, 0) gets the full weight 1, so the cleared area outside the world counts as "probe" pixels.
 - **MEASUREMENT (classification of all probes, B1.5.4F evidence):** every probe with a rendered error > 0.5 px lies outside the world (scs: 72 of 72; identity: 12 of 12) or within the 10 px search radius of its edge (4 of 4 in each scs file). No probe further inside fails: the worst is 0.062 (scs), 0.078 (identity) and 0.038 (scs, DPR 1.5) CSS px over all zooms, centres and sizes. Probes fully outside the world show exactly +0.5 device px on both axes (0.333 CSS px at DPR 1.5: the centre of the search window), so their "found" dots are an artefact and they were not actually measured. At DPR 1.5 those artefacts stay below 0.5 CSS px and pass by chance.
 - **HYPOTHESIS:** the low-zoom FAIL is a defect of the lab's measurement method, not a MapLibre positional error. The exact size of the edge cases (for example 8.287 px) is consistent with that mechanism, but it was not reproduced arithmetically. Confirming it needs a runtime run.
 
-**The two written criteria differ** and have not been reconciled; the decision is pending:
+**Binding criterion (user decision, 2026-11-26, B1.5.5).** The two written criteria differed: ADR-003 criterion 3 said ≤ 0.5 device px at the closest zoom; acceptance matrix row 7 (brief) said ≤ 0.5 CSS px over zooms, sizes and magnitudes. The user decided:
 
-- ADR-003, B1 criterion 3: error ≤ 0.5 **device** px **at the closest zoom**.
-- Acceptance matrix row 7 (brief) and the implementation: ≤ 0.5 **CSS** px over **zooms, sizes and magnitudes**.
+1. The acceptance matrix governs B1, not the narrower "closest zoom" rule of ADR-003.
+2. Accuracy is judged in **device pixels**: ≤ 0.5 device px for the API (`project`), rendered and `unproject` errors.
+3. The scope is every zoom, size and magnitude, as far as a probe is measurable inside the CRS world.
+4. A probe outside the CRS world, or within the safety margin to its edge, is `not_measurable`. It is reported and counted, and never counts as a pass.
+5. B1 stays **not passed** until a separately approved runtime run confirms the corrected measurement.
 
-Neither criterion and no threshold was changed. A correction of the measurement (probes only inside the world with a margin, and a finder that ignores cleared pixels) was proposed, not implemented; it needs a separate approval and a new runtime run.
+**Measurement correction (B1.5.5, dev-only lab, implemented statically; not runtime-verified):**
+
+- `probeMeasure.ts` `probeMeasurability`: a probe is `not_measurable` when it lies outside the world (`outside_world`) or closer than `PROBE_EDGE_MARGIN_PX` = 13 CSS px (search radius 10 + dot radius 3) to its edge (`edge_margin`). The lab neither searches for such a probe nor uses its errors.
+- `probeMeasure.ts` `findDot`: a pixel counts only if it is fully opaque and its colour lies on the background → probe mix in all three channels (tolerance 0.1 of each channel's span). Cleared (transparent) pixels and foreign colours have weight 0, so a dot that is not drawn stays missing (`missingDots` > 0, FAIL).
+- `accuracyReport.ts` `summarizeAccuracy(cases, dpr)`: maxima over measurable probes only, converted to device pixels (`maxApiErrorDevicePx`, `maxRenderedErrorDevicePx`, `maxUnprojectErrorDevicePx`; `errorUnit: 'device_px'`, `toleranceDevicePx: 0.5`), plus `measurableProbes` and `notMeasurable { count, outsideWorld, edgeMargin }`. No measurable probe at all is an `infrastructure_error` (`no_measurable_probes`), never a pass.
+- `report.mjs` `evaluateAccuracy` re-checks the same rule; a result in another unit or tolerance (every result saved before B1.5.5, in CSS px) is INVALID (`tolerance_mismatch`). `worstProbe` skips `not_measurable` probes.
+
+**Expected effect (static, not verified):** applying the measurability rule to the saved B1.5.4F results leaves 869 of 945 (scs), 303 of 315 (identity) and 289 of 315 (scs, DPR 1.5) probes measurable. Their rendered errors, as measured by the old finder, are at most 0.062, 0.078 and 0.058 device px. The corrected finder has not run on real pixels. Whether the corrected measurement passes is open until a separately approved runtime run.
 
 ## Known limitations
 
@@ -407,7 +418,7 @@ Neither criterion and no threshold was changed. A correction of the measurement 
 
 - What supports it: the planar CRS can hold native SCS-magnitude coordinates exactly, with a documented, lossless API carrier. Static analysis of 6.19.0 shows an offline, CSP-compatible worker and glyph path that does not need `blob:` or any URL. The experiment stays fully out of production (byte-identical bundle).
 - Conditions that remain open before anything else may be decided:
-  1. Run the existing harness in RoadPilot's WebView2: zero external requests, CSP without violations, positional error ≤ 0.5 CSS px, labels, context loss. _(B1.5.4–B1.5.4F, AMD: offline, no CSP violation and context loss shown; positional accuracy unresolved, labels not reviewed.)_
+  1. Run the existing harness in RoadPilot's WebView2: zero external requests, CSP without violations, positional error ≤ 0.5 device px (B1.5.5 decision), labels, context loss. _(B1.5.4–B1.5.4F, AMD: offline, no CSP violation and context loss shown; positional accuracy unresolved, labels not reviewed.)_
   2. Measure the performance and memory targets against M3 on identical data, without changing thresholds.
   3. Accept or reject the API carrier, and decide on bundled fonts and the icon / CSP limitation.
 - Should RoadPilot continue with MapLibre or keep the custom renderer? **Not decidable on this evidence.** Until B1 is completed, the custom renderer (Canvas 2D in production, M3 WebGL 2 as the reference) remains the baseline.

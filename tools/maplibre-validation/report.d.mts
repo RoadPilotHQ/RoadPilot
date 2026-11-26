@@ -17,7 +17,8 @@ export declare const THRESHOLDS: Readonly<
     Readonly<{ segments: number; firstVisibleMs: number; gapP95Ms: number; gapMaxMs: number }>
   >
 >
-export declare const ACCURACY_TOLERANCE_PX: number
+export declare const ACCURACY_TOLERANCE_DEVICE_PX: number
+export declare const ACCURACY_ERROR_UNIT: 'device_px'
 export declare const MIN_RUNS: number
 export declare const MEMORY: Readonly<{
   status: 'provisional'

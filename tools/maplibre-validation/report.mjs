@@ -25,8 +25,13 @@ export const THRESHOLDS = Object.freeze({
   stress: Object.freeze({ segments: 1_000_000, firstVisibleMs: 500, gapP95Ms: 33, gapMaxMs: 75 }),
 })
 
-/** B1 brief, section 10: maximum positional display error, CSS pixels. */
-export const ACCURACY_TOLERANCE_PX = 0.5
+/**
+ * B1 brief, section 10, with the B1.5.5 user decision (2026-11-26): maximum positional display
+ * error 0.5 **device** pixels, over all zooms, sizes and magnitudes, as far as a probe is
+ * measurable inside the CRS world. Results judged in CSS pixels (before B1.5.5) are INVALID here.
+ */
+export const ACCURACY_TOLERANCE_DEVICE_PX = 0.5
+export const ACCURACY_ERROR_UNIT = 'device_px'
 
 /** B1 brief: at least three measurements per scenario after warm-up. */
 export const MIN_RUNS = 3
@@ -62,8 +67,11 @@ export function combine(verdicts) {
 // ---------------------------------------------------------------- accuracy
 
 /**
- * The lab's `accuracy()` result (B1.2 format, `accuracyReport.ts`). An infrastructure error or a
- * malformed result is INVALID, never a rendering failure and never a pass.
+ * The lab's `accuracy()` result (B1.5.5 format, `accuracyReport.ts`). An infrastructure error, a
+ * malformed result or a result in another unit or tolerance (for example a B1.2 result in CSS
+ * pixels) is INVALID, never a rendering failure and never a pass. Probes that are
+ * `not_measurable` are counted in the metrics and never make a pass on their own: a result needs
+ * at least one measurable probe.
  */
 export function evaluateAccuracy(acc) {
   if (!isObj(acc)) return verdict('INVALID', 'no_result')
@@ -72,32 +80,52 @@ export function evaluateAccuracy(acc) {
       detail: acc.detail,
     })
   if (acc.status !== 'measured') return verdict('INVALID', 'unknown_status')
-  const ints = ['cases', 'probes', 'missingDots']
   if (
-    !ints.every((k) => Number.isInteger(acc[k]) && acc[k] >= 0) ||
+    acc.errorUnit !== ACCURACY_ERROR_UNIT ||
+    acc.toleranceDevicePx !== ACCURACY_TOLERANCE_DEVICE_PX
+  )
+    return verdict('INVALID', 'tolerance_mismatch')
+  const nm = isObj(acc.notMeasurable) ? acc.notMeasurable : {}
+  const ints = [
+    acc.cases,
+    acc.probes,
+    acc.measurableProbes,
+    acc.missingDots,
+    nm.count,
+    nm.outsideWorld,
+    nm.edgeMargin,
+  ]
+  if (
+    !ints.every((v) => Number.isInteger(v) && v >= 0) ||
     acc.cases === 0 ||
-    acc.probes === 0
+    acc.probes === 0 ||
+    acc.measurableProbes + nm.count !== acc.probes ||
+    nm.outsideWorld + nm.edgeMargin !== nm.count ||
+    acc.missingDots > acc.measurableProbes
   )
     return verdict('INVALID', 'malformed_result')
-  if (acc.tolerancePx !== ACCURACY_TOLERANCE_PX) return verdict('INVALID', 'tolerance_mismatch')
+  if (acc.measurableProbes === 0) return verdict('INVALID', 'no_measurable_probes')
   if (typeof acc.withinTolerance !== 'boolean') return verdict('INVALID', 'malformed_result')
   const metrics = {
     cases: acc.cases,
     probes: acc.probes,
+    measurableProbes: acc.measurableProbes,
+    notMeasurable: { count: nm.count, outsideWorld: nm.outsideWorld, edgeMargin: nm.edgeMargin },
     missingDots: acc.missingDots,
-    maxApiError: acc.maxApiError,
-    maxRenderedError: acc.maxRenderedError,
-    maxUnprojectError: acc.maxUnprojectError,
+    dpr: acc.dpr,
+    maxApiErrorDevicePx: acc.maxApiErrorDevicePx,
+    maxRenderedErrorDevicePx: acc.maxRenderedErrorDevicePx,
+    maxUnprojectErrorDevicePx: acc.maxUnprojectErrorDevicePx,
     constrainedCases: Array.isArray(acc.constrainedCases) ? acc.constrainedCases.length : null,
   }
   // Re-check independently of the lab's own flag.
   const errorsOk =
-    finite(acc.maxApiError) &&
-    finite(acc.maxRenderedError) &&
-    finite(acc.maxUnprojectError) &&
-    acc.maxApiError <= ACCURACY_TOLERANCE_PX &&
-    acc.maxRenderedError <= ACCURACY_TOLERANCE_PX &&
-    acc.maxUnprojectError <= ACCURACY_TOLERANCE_PX
+    finite(acc.maxApiErrorDevicePx) &&
+    finite(acc.maxRenderedErrorDevicePx) &&
+    finite(acc.maxUnprojectErrorDevicePx) &&
+    acc.maxApiErrorDevicePx <= ACCURACY_TOLERANCE_DEVICE_PX &&
+    acc.maxRenderedErrorDevicePx <= ACCURACY_TOLERANCE_DEVICE_PX &&
+    acc.maxUnprojectErrorDevicePx <= ACCURACY_TOLERANCE_DEVICE_PX
   const recheck = acc.missingDots === 0 && errorsOk
   if (acc.withinTolerance !== recheck) return verdict('INVALID', 'inconsistent_result', { metrics })
   if (recheck) return verdict('PASS', 'within_tolerance', { metrics })
@@ -106,14 +134,22 @@ export function evaluateAccuracy(acc) {
   })
 }
 
-/** The probe with the largest rendered error, or null; never assumes `acc.results` exists. */
+/**
+ * The measurable probe with the largest rendered error (CSS px, as stored per probe), or null;
+ * never assumes `acc.results` exists. B1.5.5: `not_measurable` probes are skipped.
+ */
 export function worstProbe(acc) {
   if (!isObj(acc) || !Array.isArray(acc.results)) return null
   let worst = null
   for (const r of acc.results) {
     if (!isObj(r) || !Array.isArray(r.probes)) continue
     for (const p of r.probes)
-      if (isObj(p) && finite(p.renderedError) && (!worst || p.renderedError > worst.renderedError))
+      if (
+        isObj(p) &&
+        p.measurable !== false &&
+        finite(p.renderedError) &&
+        (!worst || p.renderedError > worst.renderedError)
+      )
         worst = { center: r.center, zoom: r.zoom, size: r.size, ...p }
   }
   return worst
@@ -705,7 +741,7 @@ export function buildReport({ functional, perf, cycles, lifecycle, negativeContr
   else if (lifecycle !== undefined) criteria.sessionLifecycle = evaluateLifecycle(lifecycle)
   return {
     thresholds: THRESHOLDS,
-    accuracyTolerancePx: ACCURACY_TOLERANCE_PX,
+    accuracyToleranceDevicePx: ACCURACY_TOLERANCE_DEVICE_PX,
     minRuns: MIN_RUNS,
     memoryRule: MEMORY,
     criteria,

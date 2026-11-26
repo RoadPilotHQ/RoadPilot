@@ -112,6 +112,8 @@ All in RoadPilot's WebView2 (as in M3), synthetic data only, pinned MapLibre ver
 | 10  | Stability                       | Context loss and restore leave a working map, or RoadPilot falls back to Canvas 2D; release/remount leave no canvas and no error                                                                                                                               |
 | 11  | Isolation                       | No change outside `src/dev/` (plus the pinned devDependency and docs); production build output contains no MapLibre code; all existing checks pass                                                                                                             |
 
+> **B1.5.5 decision (2026-11-26):** for criterion 3, the acceptance matrix in [maplibre-prototype.md](../maplibre-prototype.md#positional-accuracy-unresolved) governs, not "at the closest zoom": ≤ 0.5 device px over every zoom, size and magnitude, for probes measurable inside the CRS world; probes outside it or within the edge margin are `not_measurable` and never count as a pass.
+
 **B1 fails** if any of: an external request is unavoidable; the production CSP must be loosened; coordinates are off by more than the tolerance or features cannot be picked correctly in the planar CRS; labels cannot be drawn offline; frame gap p95 at 100k exceeds 20 ms or recurring gaps exceed 50 ms where the WebGL 2 prototype meets the targets; memory keeps growing over zoom cycles; a context loss leaves a blank map without fallback; or the experiment cannot be kept out of the production bundle.
 
 ## 7. Consequences

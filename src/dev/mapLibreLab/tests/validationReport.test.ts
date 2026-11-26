@@ -1,7 +1,8 @@
 /** B1.4: the validation harness's pure evaluation (tools/maplibre-validation/report.mjs). */
 import { describe, expect, it } from 'vitest'
 import {
-  ACCURACY_TOLERANCE_PX,
+  ACCURACY_ERROR_UNIT,
+  ACCURACY_TOLERANCE_DEVICE_PX,
   aggregatePerf,
   buildReport,
   CALLBACK_WARNING,
@@ -47,7 +48,9 @@ describe('thresholds are the B1 brief values, unchanged', () => {
       gapP95Ms: 33,
       gapMaxMs: 75,
     })
-    expect(ACCURACY_TOLERANCE_PX).toBe(0.5)
+    // B1.5.5 decision: 0.5 device pixels.
+    expect(ACCURACY_TOLERANCE_DEVICE_PX).toBe(0.5)
+    expect(ACCURACY_ERROR_UNIT).toBe('device_px')
     expect(MIN_RUNS).toBe(3)
     expect(MEMORY).toEqual({ status: 'provisional', cycles: 8, steadyFrom: 5, growthLimit: 0.05 })
     expect(Object.isFrozen(THRESHOLDS.urban)).toBe(true)
@@ -66,6 +69,25 @@ describe('thresholds are the B1 brief values, unchanged', () => {
 
 const measured = (o: Record<string, unknown> = {}) => ({
   status: 'measured',
+  errorUnit: 'device_px',
+  toleranceDevicePx: 0.5,
+  dpr: 1,
+  cases: 35,
+  probes: 315,
+  measurableProbes: 303,
+  notMeasurable: { count: 12, outsideWorld: 12, edgeMargin: 0 },
+  missingDots: 0,
+  maxApiErrorDevicePx: 0.01,
+  maxRenderedErrorDevicePx: 0.2,
+  maxUnprojectErrorDevicePx: 0.001,
+  withinTolerance: true,
+  constrainedCases: [],
+  ...o,
+})
+
+/** A B1.2 result (CSS pixels, no measurability), as saved before B1.5.5. */
+const legacyCssResult = {
+  status: 'measured',
   tolerancePx: 0.5,
   cases: 35,
   probes: 315,
@@ -75,10 +97,9 @@ const measured = (o: Record<string, unknown> = {}) => ({
   maxUnprojectError: 0.001,
   withinTolerance: true,
   constrainedCases: [],
-  ...o,
-})
+}
 
-describe('evaluateAccuracy (B1.2 result format)', () => {
+describe('evaluateAccuracy (B1.5.5 result format, device pixels)', () => {
   it('a valid result within tolerance passes', () => {
     expect(evaluateAccuracy(measured())).toMatchObject({
       verdict: 'PASS',
@@ -104,8 +125,42 @@ describe('evaluateAccuracy (B1.2 result format)', () => {
       reason: 'missing_dots',
     })
     expect(
-      evaluateAccuracy(measured({ maxRenderedError: 0.51, withinTolerance: false })),
+      evaluateAccuracy(measured({ maxRenderedErrorDevicePx: 0.51, withinTolerance: false })),
     ).toMatchObject({ verdict: 'FAIL', reason: 'error_above_tolerance' })
+  })
+
+  it('reports the not measurable probes in the metrics', () => {
+    expect(evaluateAccuracy(measured()).metrics).toMatchObject({
+      measurableProbes: 303,
+      notMeasurable: { count: 12, outsideWorld: 12, edgeMargin: 0 },
+    })
+  })
+
+  it('B1.5.5: a missing measurable dot still fails, even with skipped probes', () => {
+    expect(evaluateAccuracy(measured({ missingDots: 1, withinTolerance: false }))).toMatchObject({
+      verdict: 'FAIL',
+      reason: 'missing_dots',
+    })
+  })
+
+  it('B1.5.5: a result in CSS pixels (before B1.5.5) or another tolerance is invalid', () => {
+    expect(evaluateAccuracy(legacyCssResult)).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'tolerance_mismatch',
+    })
+    for (const o of [{ errorUnit: 'css_px' }, { toleranceDevicePx: 0.6 }, { errorUnit: undefined }])
+      expect(evaluateAccuracy(measured(o))).toMatchObject({ reason: 'tolerance_mismatch' })
+  })
+
+  it('B1.5.5: no measurable probe is invalid, never a pass', () => {
+    expect(
+      evaluateAccuracy(
+        measured({
+          measurableProbes: 0,
+          notMeasurable: { count: 315, outsideWorld: 300, edgeMargin: 15 },
+        }),
+      ),
+    ).toMatchObject({ verdict: 'INVALID', reason: 'no_measurable_probes' })
   })
 
   it('no result, unknown status, malformed, relaxed tolerance or inconsistent flags are invalid', () => {
@@ -116,12 +171,33 @@ describe('evaluateAccuracy (B1.2 result format)', () => {
       { status: 'ok' },
       measured({ cases: 0 }),
       measured({ missingDots: -1 }),
-      measured({ tolerancePx: 0.6 }),
       measured({ withinTolerance: 'yes' }),
-      measured({ maxRenderedError: 2 }), // flag says within tolerance, the numbers do not
-      measured({ maxApiError: NaN }),
+      measured({ maxRenderedErrorDevicePx: 2 }), // flag says within tolerance, the numbers do not
+      measured({ maxApiErrorDevicePx: NaN }),
+      // B1.5.5: the probe counts must add up.
+      measured({ notMeasurable: undefined }),
+      measured({ measurableProbes: 310 }),
+      measured({ notMeasurable: { count: 12, outsideWorld: 10, edgeMargin: 0 } }),
+      measured({ missingDots: 400 }),
     ])
       expect(evaluateAccuracy(bad).verdict, JSON.stringify(bad)).toBe('INVALID')
+  })
+
+  it('B1.5.5: worstProbe skips not measurable probes', () => {
+    const acc = {
+      results: [
+        {
+          center: { x: 0, z: 0 },
+          zoom: 1,
+          size: { width: 980, height: 900 },
+          probes: [
+            { id: 'in', measurable: true, renderedError: 0.06 },
+            { id: 'out', measurable: false, renderedError: 8 },
+          ],
+        },
+      ],
+    }
+    expect(worstProbe(acc)).toMatchObject({ id: 'in', renderedError: 0.06 })
   })
 
   it('worstProbe never assumes `results` exists', () => {

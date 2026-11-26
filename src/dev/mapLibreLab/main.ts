@@ -60,6 +60,7 @@ import {
   type Emitter,
 } from './lifecycle'
 import { createWorkerProjection } from './workerProjection'
+import { findDot, probeMeasurability } from './probeMeasure'
 import { panCamera, summarizePhase, zoomCamera, type Camera, type PhaseSummary } from './benchmark'
 import { buildStyle, COLORS, DRAW_ORDER } from './mapStyle'
 import { countRoadPixels, detectableRoadColours } from './roadPixels'
@@ -787,32 +788,6 @@ async function run(
 
 // ---------------------------------------------------------------- accuracy
 
-/** Centroid of probe-coloured pixels around a CSS position, in CSS pixels; null when none. */
-function findDot(px: Uint8Array, w: number, h: number, dpr: number, at: { x: number; y: number }) {
-  const [pr, pg, pb] = [0xc9, 0x53, 0x48]
-  const R = Math.ceil(10 * dpr)
-  const cx = Math.round(at.x * dpr)
-  const cy = Math.round(at.y * dpr)
-  let sx = 0
-  let sy = 0
-  let sw = 0
-  for (let y = cy - R; y <= cy + R; y++) {
-    if (y < 0 || y >= h) continue
-    for (let x = cx - R; x <= cx + R; x++) {
-      if (x < 0 || x >= w) continue
-      const i = ((h - 1 - y) * w + x) * 4 // readPixels rows start at the bottom
-      // Weight: how far the pixel moved from the background towards the probe colour.
-      const d = (0xf2 - px[i]!) / (0xf2 - pr) + (0xe8 - px[i + 1]!) / (0xe8 - pg)
-      const wgt = Math.max(0, Math.min(1, d / 2))
-      if (wgt <= 0.02 || Math.abs(px[i + 2]! - pb) > 140) continue
-      sx += (x + 0.5) * wgt
-      sy += (y + 0.5) * wgt
-      sw += wgt
-    }
-  }
-  return sw > 0 ? { x: sx / sw / dpr, y: sy / sw / dpr } : null
-}
-
 function hideNonProbeLayers(hide: boolean) {
   const m = map!
   for (const l of m.getStyle().layers) {
@@ -840,6 +815,10 @@ function probeGrid(c: NativePoint, zoom: number, size: { width: number; height: 
  * MapLibre's `project` (API), the centroid of the drawn dot (rendered), and `unproject` back to
  * native units, against `expectedScreen` (independent of MapLibre). Road and label layers are
  * hidden while measuring, so road edges do not disturb the centroids.
+ *
+ * B1.5.5: a probe outside the CRS world or within its edge margin is `not_measurable`
+ * (`probeMeasurability`): it is not searched for and is counted separately; `findDot` only counts
+ * opaque background-to-probe pixels (`probeMeasure.ts`).
  */
 async function accuracy(
   opts: {
@@ -889,6 +868,10 @@ async function accuracy(
           const actualCenter = fromCarrier(c.lng, c.lat)
           const actualZoom = m.getZoom()
           const probes = probeGrid(actualCenter, actualZoom, size)
+          const measurability = probes.map((p) => probeMeasurability(p, actualZoom, config.crs))
+          // The dot the wait loop looks for: the first measurable probe (the centre if it is).
+          const order = [4, 0, 1, 2, 3, 5, 6, 7, 8]
+          const waitFor = order.find((i) => measurability[i]?.measurable)
           await source.setData(probesGeoJSON(probes) as unknown as Json)
           await settle()
           // Wait for the dots to be drawn: the worker returns the tile asynchronously.
@@ -905,24 +888,26 @@ async function accuracy(
               gl.UNSIGNED_BYTE,
               px,
             )
-            const centre = expectedScreen(actualCenter, actualZoom, size, probes[4]!, config.crs)
+            if (waitFor === undefined) break // nothing measurable to wait for
+            const target = probes[waitFor]!
+            const centre = expectedScreen(actualCenter, actualZoom, size, target, config.crs)
             if (findDot(px, gl.drawingBufferWidth, gl.drawingBufferHeight, dpr, centre)) break
             await delay(30)
           }
-          const pr: ProbeResult[] = probes.map((p) => {
+          const pr: ProbeResult[] = probes.map((p, i) => {
+            const meas = measurability[i]!
             const expected = expectedScreen(actualCenter, actualZoom, size, p, config.crs)
             const api = m.project(toCarrier(p))
-            const rendered = findDot(
-              px,
-              gl.drawingBufferWidth,
-              gl.drawingBufferHeight,
-              dpr,
-              expected,
-            )
+            const rendered = meas.measurable
+              ? findDot(px, gl.drawingBufferWidth, gl.drawingBufferHeight, dpr, expected)
+              : null
             const back = m.unproject([expected.x, expected.y])
             const nb = fromCarrier(back.lng, back.lat)
             return {
               id: p.id,
+              measurable: meas.measurable,
+              notMeasurableReason: meas.reason,
+              edgeDistancePx: meas.edgeDistancePx,
               expected,
               api: { x: api.x, y: api.y },
               apiError: Math.hypot(api.x - expected.x, api.y - expected.y),
@@ -958,7 +943,7 @@ async function accuracy(
     camera = saved
     m.jumpTo({ center: toCarrier(saved.center), zoom: saved.zoom })
   }
-  return { crs: config.crs, dpr, ...summarizeAccuracy(results), results }
+  return { crs: config.crs, dpr, ...summarizeAccuracy(results, dpr), results }
 }
 
 /** Orientation, picking, fitBounds and rotation checks against known synthetic coordinates. */
