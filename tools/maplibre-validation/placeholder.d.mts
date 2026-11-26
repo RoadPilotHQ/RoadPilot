@@ -1,6 +1,7 @@
 /** Types of `placeholder.mjs` (B1.5.4E, for the unit tests in src/dev/mapLibreLab/tests). */
 export declare const PLACEHOLDER_META: string
 export declare const PLACEHOLDER_MARKER: string
+export declare const PLACEHOLDER_ICON: string
 export declare const PLACEHOLDER_HTML: string
 export declare const APP_DOCUMENT_PATHS: readonly string[]
 

@@ -7,6 +7,7 @@ import {
   APP_DOCUMENT_PATHS,
   createPlaceholderSwitch,
   PLACEHOLDER_HTML,
+  PLACEHOLDER_ICON,
   PLACEHOLDER_MARKER,
   PLACEHOLDER_META,
 } from '../../../../tools/maplibre-validation/placeholder.mjs'
@@ -37,11 +38,24 @@ describe('app-page placeholder switch (B1.5.4E)', () => {
     expect(PLACEHOLDER_HTML).toContain(
       `<meta name="${PLACEHOLDER_META}" content="${PLACEHOLDER_MARKER}">`,
     )
-    expect(PLACEHOLDER_HTML).not.toMatch(/<script\b|<link\b|<img\b|<iframe\b|src=|href=/i)
+    expect(PLACEHOLDER_HTML).not.toMatch(/<script\b|<img\b|<iframe\b|<style\b|src=|url\(/i)
+    // The only link is the inline icon; every href is a data: URL (no network request).
+    expect(PLACEHOLDER_HTML.match(/<link\b[^>]*>/gi)).toEqual([PLACEHOLDER_ICON])
+    expect(PLACEHOLDER_HTML.match(/href="[^"]*"/gi)).toEqual(['href="data:,"'])
     expect(PLACEHOLDER_HTML).not.toContain('/@vite/client')
     expect(PLACEHOLDER_HTML).not.toContain('/src/')
     expect(PLACEHOLDER_MARKER).toMatch(/^[a-z0-9-]+$/)
     expect(APP_DOCUMENT_PATHS).toEqual(['/', '/index.html'])
+  })
+
+  it('B1.5.4F: declares an inline icon in <head>, so the browser does not request /favicon.ico', () => {
+    expect(PLACEHOLDER_ICON).toBe('<link rel="icon" href="data:,">')
+    const head = PLACEHOLDER_HTML.slice(
+      PLACEHOLDER_HTML.indexOf('<head>'),
+      PLACEHOLDER_HTML.indexOf('</head>'),
+    )
+    expect(head).toContain(PLACEHOLDER_ICON)
+    expect(PLACEHOLDER_HTML).not.toMatch(/favicon/i)
   })
 
   it('inactive until switched: every request passes through to the normal server', () => {

@@ -704,6 +704,30 @@ describe('appPageIsolation (B1.5.4E)', () => {
     )
   })
 
+  it('B1.5.4F: criteria unchanged; the inline icon is not a resource, a favicon request still is', () => {
+    // r10 evidence: the browser's automatic /favicon.ico stays a same-origin resource (not exempted).
+    expect(evaluateAppPageIsolation(withResources(`${origin}/favicon.ico`))).toMatchObject({
+      verdict: 'INVALID',
+      reason: 'app_resources_in_app_page',
+    })
+    // Should a browser ever list the placeholder's data: icon, it is neither same-origin nor IPC.
+    expect(evaluateAppPageIsolation(withResources('data:,')).verdict).toBe('PASS')
+    // Genuine app resources and IPC alongside the icon remain detectable.
+    const e = evaluateAppPageIsolation(
+      iso({
+        probe: probe({ resources: ['data:,', `${origin}/src/app/main.tsx`, S5_IPC[1]!.url] }),
+        requests: [...labRequests, S5_IPC[1]!, page(`${origin}/src/backend/controlSource.ts`)],
+      }),
+    )
+    expect(e.verdict).toBe('INVALID')
+    expect(e.reasons).toEqual([
+      'ipc_requests',
+      'app_resources_requested',
+      'ipc_in_app_page_resources',
+      'app_resources_in_app_page',
+    ])
+  })
+
   it('app-only modules in the request log are INVALID; lab modules from shared folders are not', () => {
     for (const p of ['/src/app/main.tsx', '/src/backend/controlSource.ts'])
       expect(evaluateAppPageIsolation(withRequests(page(`${origin}${p}`))).reason).toBe(
